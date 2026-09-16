@@ -499,6 +499,45 @@ class CcBarTray:
 
         return None
 
+    def query_model_breakdown_by_day(self, days_ago=0):
+        """查询某天的模型分布"""
+        db_path = self.settings["db_path"]
+        if not os.path.exists(db_path):
+            return None
+
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                SELECT
+                    model,
+                    COUNT(*) as reqs,
+                    COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens), 0) as total_token,
+                    COALESCE(SUM(cache_read_tokens), 0) as cache_read
+                FROM proxy_request_logs
+                WHERE date(created_at, 'unixepoch', 'localtime') = date('now', 'localtime', '-' || ? || ' days')
+                GROUP BY model
+                ORDER BY total_token DESC
+            """, (days_ago,))
+
+            models = []
+            for row in cursor.fetchall():
+                models.append({
+                    "model": row[0],
+                    "reqs": row[1],
+                    "total_token": row[2],
+                    "cache_read": row[3]
+                })
+
+            conn.close()
+            return models
+
+        except Exception as e:
+            print(f"查询失败: {e}")
+
+        return None
+
     def check_warning(self, stats):
         """检查是否需要预警"""
         if not self.settings["warning_enabled"]:
@@ -588,7 +627,7 @@ class CcBarTray:
 
         # 模型分布
         if models:
-            menu_items.append(pystray.MenuItem("🤖 模型分布", None, enabled=False))
+            menu_items.append(pystray.MenuItem("🤖 模型分布", self.show_model_detail))
             for m in models[:3]:
                 model_name = m["model"][:15] + "…" if len(m["model"]) > 15 else m["model"]
                 menu_items.append(pystray.MenuItem(f"  {model_name}: {self.fmt_tokens(m['total'])}", None, enabled=False))
@@ -748,6 +787,101 @@ class CcBarTray:
     def show_monthly_detail(self, icon=None, item=None):
         """显示近30天详情"""
         self.show_daily_detail(days=30, title="近30天用量")
+
+    def show_model_detail(self, icon=None, item=None):
+        """显示模型分布详情"""
+        import tkinter as tk
+        from tkinter import ttk
+
+        root = tk.Tk()
+        root.title("模型分布详情")
+        root.geometry("650x450")
+        root.configure(bg='#1a1a19')
+
+        current_days_ago = 0
+        current_date = datetime.now()
+
+        # 导航栏
+        nav_frame = tk.Frame(root, bg='#1a1a19')
+        nav_frame.pack(fill=tk.X, padx=16, pady=8)
+
+        def prev_day():
+            nonlocal current_days_ago, current_date
+            current_days_ago += 1
+            current_date = datetime.now() - timedelta(days=current_days_ago)
+            refresh_model()
+
+        def next_day():
+            nonlocal current_days_ago, current_date
+            if current_days_ago > 0:
+                current_days_ago -= 1
+                current_date = datetime.now() - timedelta(days=current_days_ago)
+                refresh_model()
+
+        tk.Button(nav_frame, text="◀", command=prev_day, bg='#333', fg='white', width=3).pack(side=tk.LEFT)
+
+        date_label = tk.Label(nav_frame, text=current_date.strftime("%y-%m-%d"), font=("Consolas", 12, "bold"), fg='white', bg='#1a1a19')
+        date_label.pack(side=tk.LEFT, expand=True)
+
+        tk.Button(nav_frame, text="▶", command=next_day, bg='#333', fg='white', width=3).pack(side=tk.RIGHT)
+
+        # 内容区域
+        content_frame = tk.Frame(root, bg='#1a1a19')
+        content_frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 12))
+
+        # 标题行
+        header_frame = tk.Frame(content_frame, bg='#1a1a19')
+        header_frame.pack(fill=tk.X)
+        tk.Label(header_frame, text="模型", width=25, anchor='w', fg='#999', bg='#1a1a19', font=("Consolas", 10)).pack(side=tk.LEFT)
+        tk.Label(header_frame, text="请求数", width=10, anchor='e', fg='#999', bg='#1a1a19', font=("Consolas", 10)).pack(side=tk.LEFT)
+        tk.Label(header_frame, text="总token", width=12, anchor='e', fg='#999', bg='#1a1a19', font=("Consolas", 10)).pack(side=tk.LEFT)
+        tk.Label(header_frame, text="缓存读", width=12, anchor='e', fg='#999', bg='#1a1a19', font=("Consolas", 10)).pack(side=tk.LEFT)
+
+        tk.Frame(content_frame, bg='#444', height=1).pack(fill=tk.X, pady=2)
+
+        # 数据区域
+        data_frame = tk.Frame(content_frame, bg='#1a1a19')
+        data_frame.pack(fill=tk.BOTH, expand=True)
+
+        def refresh_model():
+            for widget in data_frame.winfo_children():
+                widget.destroy()
+
+            date_label.config(text=current_date.strftime("%y-%m-%d"))
+
+            models = self.query_model_breakdown_by_day(current_days_ago)
+            if not models:
+                tk.Label(data_frame, text="暂无数据", fg='#666', bg='#1a1a19').pack(pady=20)
+                return
+
+            # 计算合计
+            total_reqs = sum(m["reqs"] for m in models)
+            total_token = sum(m["total_token"] for m in models)
+            total_cache = sum(m["cache_read"] for m in models)
+
+            # 合计行
+            total_frame = tk.Frame(data_frame, bg='#1a1a19')
+            total_frame.pack(fill=tk.X)
+            tk.Label(total_frame, text="合计", width=25, anchor='w', fg='white', bg='#1a1a19', font=("Consolas", 10, "bold")).pack(side=tk.LEFT)
+            tk.Label(total_frame, text=f"{total_reqs}次", width=10, anchor='e', fg='white', bg='#1a1a19', font=("Consolas", 10, "bold")).pack(side=tk.LEFT)
+            tk.Label(total_frame, text=self.fmt_tokens(total_token), width=12, anchor='e', fg='white', bg='#1a1a19', font=("Consolas", 10, "bold")).pack(side=tk.LEFT)
+            tk.Label(total_frame, text=self.fmt_tokens(total_cache), width=12, anchor='e', fg='white', bg='#1a1a19', font=("Consolas", 10, "bold")).pack(side=tk.LEFT)
+
+            tk.Frame(data_frame, bg='#444', height=1).pack(fill=tk.X, pady=2)
+
+            # 每个模型的数据
+            for m in models:
+                model_name = m["model"][:22] + "…" if len(m["model"]) > 22 else m["model"]
+
+                row_frame = tk.Frame(data_frame, bg='#1a1a19')
+                row_frame.pack(fill=tk.X)
+                tk.Label(row_frame, text=model_name, width=25, anchor='w', fg='#64b5f6', bg='#1a1a19', font=("Consolas", 10)).pack(side=tk.LEFT)
+                tk.Label(row_frame, text=f"{m['reqs']}次", width=10, anchor='e', fg='white' if m['reqs'] > 0 else '#666', bg='#1a1a19', font=("Consolas", 10)).pack(side=tk.LEFT)
+                tk.Label(row_frame, text=self.fmt_tokens(m['total_token']), width=12, anchor='e', fg='white' if m['total_token'] > 0 else '#666', bg='#1a1a19', font=("Consolas", 10)).pack(side=tk.LEFT)
+                tk.Label(row_frame, text=self.fmt_tokens(m['cache_read']), width=12, anchor='e', fg='#ccc' if m['cache_read'] > 0 else '#666', bg='#1a1a19', font=("Consolas", 10)).pack(side=tk.LEFT)
+
+        refresh_model()
+        root.mainloop()
 
     def show_daily_detail(self, days=7, title="近7天用量"):
         """显示每日详情窗口"""
