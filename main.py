@@ -146,6 +146,33 @@ def usage_color_for_total(total, threshold_wan):
     return usage_color(min((total / threshold) / 1.2, 1.0))
 
 
+def model_colors(count=6):
+    """模型配色：每小时换一次顺序
+
+    同一小时内颜色稳定，跨小时自动换一套。
+    """
+    colors = Design.MODEL_COLORS[:]
+
+    # 当前小时种子
+    now = datetime.now()
+    seed = (now.year * 1_000_000 + now.month * 10_000
+            + now.day * 100 + now.hour)
+
+    # Fisher-Yates 洗牌（确定性 LCG）
+    state = (seed * 6364136223846793005 + 1442695040888963407) % (1 << 64)
+
+    def next_rand():
+        nonlocal state
+        state = (state * 6364136223846793005 + 1442695040888963407) % (1 << 64)
+        return state >> 33
+
+    for i in range(len(colors) - 1, 0, -1):
+        j = next_rand() % (i + 1)
+        colors[i], colors[j] = colors[j], colors[i]
+
+    return [colors[i % len(colors)] for i in range(count)]
+
+
 def gradient_color(colors, progress, hue_offset=0.0):
     """在色带上按进度取色，可选色相偏移"""
     import colorsys
@@ -1274,18 +1301,21 @@ class CcBarTray:
             total_token = sum(m["total_token"] for m in models)
             total_cache = sum(m["cache_read"] for m in models)
 
+            # 模型配色（按小时轮换，同一小时内稳定）
+            colors = model_colors()
+
             # 环形图（取前 6 个模型）
             top_models = models[:6]
             items = []
             for idx, m in enumerate(top_models):
-                color = Design.MODEL_COLORS[idx % len(Design.MODEL_COLORS)]
+                color = colors[idx % len(colors)]
                 items.append((m["total_token"], color, m["model"]))
 
             ChartCanvas.draw_donut(donut_canvas, items, 160)
 
             # 图例
             for idx, m in enumerate(top_models):
-                color = Design.MODEL_COLORS[idx % len(Design.MODEL_COLORS)]
+                color = colors[idx % len(colors)]
                 pct = (m["total_token"] / total_token * 100) if total_token > 0 else 0
                 short_name = m["model"][:16] + "…" if len(m["model"]) > 16 else m["model"]
 
@@ -1325,7 +1355,7 @@ class CcBarTray:
                 row.pack(fill=tk.X, pady=1)
 
                 # 颜色圆点（前6个有色，其余灰色）
-                color = (Design.MODEL_COLORS[idx % len(Design.MODEL_COLORS)]
+                color = (colors[idx % len(colors)]
                          if idx < 6 else Design.TEXT_MUTED)
                 dot = tk.Canvas(row, width=10, height=10,
                                 bg=Design.BACKGROUND, highlightthickness=0)
