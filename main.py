@@ -59,6 +59,15 @@ class Design:
     WARNING = "#F2A65A"
     ERROR = "#E5675C"
 
+    # 用量色阶关键色（按进度 0.0 ~ 1.0 排列）
+    USAGE_STOPS = [
+        (0.00, "#6BD99E"),  # 浅绿
+        (0.35, "#A6DE73"),  # 黄绿
+        (0.60, "#F2CC59"),  # 黄
+        (0.82, "#F29447"),  # 橙
+        (1.00, "#E6474D"),  # 红
+    ]
+
     # 字体
     FONT_UI = ("Microsoft YaHei UI", 10)
     FONT_UI_SMALL = ("Microsoft YaHei UI", 9)
@@ -100,6 +109,41 @@ def blend(color, background, alpha):
     c = _hex_to_rgb(color)
     b = _hex_to_rgb(background)
     return _rgb_to_hex(tuple(c[i] * alpha + b[i] * (1 - alpha) for i in range(3)))
+
+
+def usage_color(progress):
+    """按用量进度取色（0.0 浅绿 → 1.0 红）"""
+    p = min(max(progress, 0.0), 1.0)
+    stops = Design.USAGE_STOPS
+
+    for i in range(len(stops) - 1):
+        a_pos, a_color = stops[i]
+        b_pos, b_color = stops[i + 1]
+        if p <= b_pos:
+            span = b_pos - a_pos
+            t = (p - a_pos) / span if span > 0 else 0
+            c1 = _hex_to_rgb(a_color)
+            c2 = _hex_to_rgb(b_color)
+            rgb = tuple(c1[k] + (c2[k] - c1[k]) * t for k in range(3))
+            return _rgb_to_hex(rgb)
+
+    return stops[-1][1]
+
+
+def usage_color_for_total(total, threshold_wan):
+    """根据今日用量和预警阈值计算颜色
+
+    色阶锚点（以预警阈值为参照）：
+    - 0.25x 阈值 → 浅绿
+    - 0.75x 阈值 → 黄
+    - 1.00x 阈值 → 橙红（刚好达到预警线）
+    - >=1.2x 阈值 → 正红
+    """
+    threshold = float(threshold_wan) * 10_000
+    if threshold <= 0:
+        return Design.USAGE_STOPS[0][1]
+    # 阈值对应 0.83 进度，1.2x 阈值对应满格红色
+    return usage_color(min((total / threshold) / 1.2, 1.0))
 
 
 def gradient_color(colors, progress, hue_offset=0.0):
@@ -331,17 +375,44 @@ class CcBarTray:
             f.write(date_str)
         self.last_history_backup_date = date_str
 
-    def create_icon(self):
-        """加载闪电图标"""
-        ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ccBar.ico")
-        if os.path.exists(ico_path):
-            return Image.open(ico_path)
-        # fallback
-        img = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
+    def create_icon(self, color=None):
+        """生成闪电图标
+
+        color 为 None 时使用 ccBar.ico；否则按指定颜色绘制（用于用量变色）
+        """
+        if color is None:
+            ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ccBar.ico")
+            if os.path.exists(ico_path):
+                return Image.open(ico_path)
+
+        # 绘制闪电（4x 超采样后缩小，边缘更平滑）
+        scale = 4
+        size = 64
+        img = Image.new('RGBA', (size * scale, size * scale), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
         pts = [(35, 63), (21, 35), (31, 35), (28, 7), (42, 35), (31, 35)]
-        draw.polygon(pts, fill=(255, 110, 180, 255))
-        return img
+        rgb = _hex_to_rgb(color or Design.BRAND)
+        draw.polygon([(x * scale, y * scale) for x, y in pts],
+                     fill=rgb + (255,))
+        return img.resize((size, size), Image.LANCZOS)
+
+    def update_icon_color(self):
+        """根据今日用量更新托盘图标颜色"""
+        today = self.query_day_stats(0)
+        if not today:
+            return
+
+        color = usage_color_for_total(today["total"], self.settings["warning_threshold"])
+        if color == getattr(self, "_last_icon_color", None):
+            return  # 颜色没变就不重绘
+
+        self._last_icon_color = color
+        if self.icon:
+            try:
+                self.icon.icon = self.create_icon(color)
+                self.icon.title = f"{self.fmt_tokens(today['total'])}"
+            except Exception:
+                pass
 
     def init_history_table(self):
         """初始化历史备份表"""
@@ -1647,6 +1718,8 @@ class CcBarTray:
             time.sleep(self.settings["refresh_interval"])
             # 检查定时备份
             self.check_and_run_scheduled_backup()
+            # 按用量更新图标颜色
+            self.update_icon_color()
             # 更新菜单
             if self.icon:
                 menu = pystray.Menu(*self.build_menu())
@@ -1669,8 +1742,12 @@ class CcBarTray:
         # 启动时执行一次备份
         self.backup_history()
 
-        # 创建图标
-        image = self.create_icon()
+        # 创建图标（按当前用量着色：浅绿 → 黄 → 橙 → 红）
+        today = self.query_day_stats(0)
+        initial_color = (usage_color_for_total(today["total"], self.settings["warning_threshold"])
+                         if today else Design.BRAND)
+        self._last_icon_color = initial_color
+        image = self.create_icon(initial_color)
 
         # 初始菜单
         menu = pystray.Menu(*self.build_menu())
