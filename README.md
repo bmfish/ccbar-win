@@ -4,45 +4,51 @@ Windows 系统托盘工具，显示 ccSwitch token 用量。
 
 ## 安装
 
-### 方法一：下载 exe（推荐）
-从 [Releases](https://github.com/bmfish/ccbar-win/releases) 下载 `ccBar.exe`，双击运行。
+### 一键安装（PowerShell）
 
-### 方法二：从源码运行
+```powershell
+irm https://raw.githubusercontent.com/bmfish/ccbar-win/master/install.ps1 -OutFile $env:TEMP\install-ccbar.ps1; & $env:TEMP\install-ccbar.ps1
+```
+
+### 手动安装
+
+从 [Releases](https://github.com/bmfish/ccbar-win/releases) 下载 `ccBar.exe` 和 `install.ps1`，放在同一目录，右键 `install.ps1` → 使用 PowerShell 运行。
+
+或直接把 `ccBar.exe` 复制到 `%LOCALAPPDATA%\ccBar\` 双击启动。
+
+### 从源码运行
+
 ```bash
 pip install -r requirements.txt
 python main.py
 ```
 
-### 方法三：打包成 exe
+### 打包 exe
+
 ```bash
 pip install pyinstaller
-pyinstaller --onefile --noconsole main.py
+pyinstaller ccBar.spec
 ```
 
 ## 功能
 
-- 系统托盘显示今日 token 用量
-- 悬停显示详细信息
-- 右键菜单显示：
-  - 今日用量
-  - 近7天用量
-  - 近30天用量
-- 设置刷新间隔（5-3000秒）
-- 设置数据库路径
+- 左键点击托盘弹出面板：今日用量 / 模型分布 / 近7天 / 近30天 / 历史总量
+- 右键菜单：今日 / 昨日 / 近7天 / 近30天 / 历史 详情窗口（带柱状图、折线图、环形图）
+- 模型分布详情（按天查看模型占比，环形图 + 列表）
+- 托盘图标随用量变色
+- 定时备份历史数据（每天 11:00 / 20:00）
+- 设置：刷新间隔 / 数据库路径 / 预警阈值
 
 ## 数据库路径
 
 默认：`~/.cc-switch/cc-switch.db`
 
-如果自动识别失败，请在设置中手动指定。
+自动识别失败时在设置中手动指定。
 
 ## 开发
 
 ```bash
-# 安装依赖
 pip install -r requirements.txt
-
-# 运行
 python main.py
 ```
 

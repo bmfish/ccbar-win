@@ -1359,7 +1359,12 @@ class CcBarTray:
         return None
 
     def query_model_breakdown(self):
-        """查询模型分布"""
+        """查询模型分布
+
+        total 口径与"今日用量"和模型分布详情窗口一致：
+        input + output + cache_creation + cache_read，
+        否则面板里的模型数字会比上方今日用量小一个量级。
+        """
         db_path = self.settings["db_path"]
         if not os.path.exists(db_path):
             return None
@@ -1377,7 +1382,8 @@ class CcBarTray:
                     model,
                     COALESCE(SUM(input_tokens), 0) as input,
                     COALESCE(SUM(output_tokens), 0) as output,
-                    COALESCE(SUM(input_tokens + output_tokens), 0) as total
+                    COALESCE(SUM(input_tokens + output_tokens
+                                 + cache_creation_tokens + cache_read_tokens), 0) as total
                 FROM proxy_request_logs
                 WHERE created_at >= ?
                 GROUP BY model
@@ -1709,6 +1715,24 @@ class CcBarTray:
                                  highlightthickness=0)
         chart_canvas.pack(fill=tk.X)
 
+        # 柱状图状态：canvas 要等窗口布局完成才有真实宽度，
+        # 一建好就画的话 winfo_width() 只有 1，柱子会全挤在左边
+        chart_state = {}
+
+        def draw_chart(_event=None):
+            if not chart_state:
+                chart_canvas.delete("all")
+                return
+            width = chart_canvas.winfo_width()
+            if width <= 1:
+                return
+            ChartCanvas.draw_bar_chart(chart_canvas, chart_state["values"], width, 110,
+                                       labels=chart_state["labels"],
+                                       use_gradient=True,
+                                       hue_offset=chart_state["hue_offset"])
+
+        chart_canvas.bind("<Configure>", draw_chart)
+
         # 表头
         header = tk.Frame(root, bg=Design.BACKGROUND)
         header.pack(fill=tk.X, padx=16)
@@ -1759,6 +1783,7 @@ class CcBarTray:
             if not hourly_data:
                 tk.Label(inner, text="暂无数据", fg=Design.TEXT_MUTED,
                          bg=Design.BACKGROUND, font=Design.FONT_UI).pack(pady=20)
+                chart_state.clear()
                 chart_canvas.delete("all")
                 return
 
@@ -1766,6 +1791,7 @@ class CcBarTray:
             if not hours_with_data:
                 tk.Label(inner, text="暂无数据", fg=Design.TEXT_MUTED,
                          bg=Design.BACKGROUND, font=Design.FONT_UI).pack(pady=20)
+                chart_state.clear()
                 chart_canvas.delete("all")
                 return
 
@@ -1782,11 +1808,9 @@ class CcBarTray:
             hue_offset = (day_of_year % 6) / 6.0
             values = [hourly_data.get(h, {}).get("reqs", 0) for h in range(start_hour, end_hour + 1)]
             labels = list(range(start_hour, end_hour + 1))
-            chart_canvas.update_idletasks()
-            w = chart_canvas.winfo_width() or 460
-            ChartCanvas.draw_bar_chart(chart_canvas, values, w, 110,
-                                       labels=labels, use_gradient=True,
-                                       hue_offset=hue_offset)
+            chart_state.clear()
+            chart_state.update(values=values, labels=labels, hue_offset=hue_offset)
+            draw_chart()
 
             # 合计行
             total_row = tk.Frame(inner, bg=Design.BACKGROUND)
@@ -2098,6 +2122,22 @@ class CcBarTray:
                                  highlightthickness=0)
         chart_canvas.pack(fill=tk.X)
 
+        # 折线图状态：理由同每小时详情，等布局完成有宽度再画
+        chart_state = {}
+
+        def draw_chart(_event=None):
+            if not chart_state:
+                chart_canvas.delete("all")
+                return
+            width = chart_canvas.winfo_width()
+            if width <= 1:
+                return
+            ChartCanvas.draw_sparkline(chart_canvas, chart_state["values"], width, 70,
+                                       use_gradient=True,
+                                       hue_offset=chart_state["hue_offset"])
+
+        chart_canvas.bind("<Configure>", draw_chart)
+
         # 表头
         header = tk.Frame(root, bg=Design.BACKGROUND)
         header.pack(fill=tk.X, padx=16)
@@ -2168,6 +2208,7 @@ class CcBarTray:
             if not daily_data:
                 tk.Label(inner, text="暂无数据", fg=Design.TEXT_MUTED,
                          bg=Design.BACKGROUND, font=Design.FONT_UI).pack(pady=20)
+                chart_state.clear()
                 chart_canvas.delete("all")
                 return
 
@@ -2179,10 +2220,9 @@ class CcBarTray:
 
             # 绘制折线图
             values = [d["output"] + d["input"] + d["cache_read"] for d in daily_data.values()]
-            chart_canvas.update_idletasks()
-            w = chart_canvas.winfo_width() or 500
-            ChartCanvas.draw_sparkline(chart_canvas, values, w, 70,
-                                       use_gradient=True, hue_offset=hue_offset)
+            chart_state.clear()
+            chart_state.update(values=values, hue_offset=hue_offset)
+            draw_chart()
 
             # 合计行
             total_row = tk.Frame(inner, bg=Design.BACKGROUND)
