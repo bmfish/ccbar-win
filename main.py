@@ -3,6 +3,8 @@ import os
 import sqlite3
 import threading
 import time
+import queue
+import functools
 from datetime import datetime, timedelta
 from pathlib import Path
 import random
@@ -59,6 +61,11 @@ class Design:
     WARNING = "#F2A65A"
     ERROR = "#E5675C"
 
+    # 面板交互色（白色以 8% / 16% / 4% 叠在 #1C1C1C 上的等效色）
+    BTN_BG = "#2E2E2E"
+    BTN_BG_HOVER = "#404040"
+    ROW_HOVER = "#262626"
+
     # 用量色阶关键色（按进度 0.0 ~ 1.0 排列）
     USAGE_STOPS = [
         (0.00, "#6BD99E"),  # 浅绿
@@ -77,6 +84,11 @@ class Design:
     FONT_MONO_TINY = ("Consolas", 8)
     FONT_TITLE = ("Microsoft YaHei UI", 11, "bold")
     FONT_BIG = ("Consolas", 22, "bold")
+    FONT_VALUE = ("Consolas", 12)
+    FONT_SECTION = ("Microsoft YaHei UI", 9, "bold")
+    FONT_CHEVRON = ("Microsoft YaHei UI", 11)
+    FONT_BTN = ("Microsoft YaHei UI", 8)
+    FONT_BTN_ICON = ("Segoe UI Emoji", 13)
 
     @staticmethod
     def fmt_tokens(n):
@@ -203,6 +215,34 @@ class ChartCanvas:
     """基于 tkinter Canvas 的图表绘制工具"""
 
     @staticmethod
+    def round_rect(canvas, x1, y1, x2, y2, r, **kwargs):
+        """画圆角矩形（tkinter 没有原生圆角，用两个矩形 + 四个扇形拼）
+
+        r 会自动收敛到不超过短边的一半。
+        """
+        r = max(0, min(r, (x2 - x1) / 2, (y2 - y1) / 2))
+        if r <= 0:
+            return canvas.create_rectangle(x1, y1, x2, y2, **kwargs)
+
+        kwargs.setdefault("outline", "")
+        items = [
+            canvas.create_rectangle(x1 + r, y1, x2 - r, y2, **kwargs),
+            canvas.create_rectangle(x1, y1 + r, x2, y2 - r, **kwargs),
+        ]
+        # 四个角的扇形：start/extent 组合出 90 度圆角
+        corners = [
+            (x1, y1, x1 + 2 * r, y1 + 2 * r, 90, 90),
+            (x2 - 2 * r, y1, x2, y1 + 2 * r, 0, 90),
+            (x2 - 2 * r, y2 - 2 * r, x2, y2, 270, 90),
+            (x1, y2 - 2 * r, x1 + 2 * r, y2, 180, 90),
+        ]
+        for bx1, by1, bx2, by2, start, extent in corners:
+            items.append(canvas.create_arc(
+                bx1, by1, bx2, by2, start=start, extent=extent,
+                style="pieslice", **kwargs))
+        return items
+
+    @staticmethod
     def draw_bar_chart(canvas, values, width, height, labels=None,
                        use_gradient=True, hue_offset=0.0, padding=6, label_height=16):
         """绘制渐变柱状图"""
@@ -319,6 +359,495 @@ class ChartCanvas:
                            fill=Design.TEXT_PRIMARY, font=Design.FONT_MONO_SMALL)
 
 
+def _on_gui(method):
+    """把整个方法体调度到 GUI 线程执行
+
+    pystray 的菜单回调是在托盘消息循环线程里同步跑的，在那里直接
+    root.mainloop() 会把托盘卡死（右键不出菜单）。所以所有窗口都必须
+    投递到 GUI 线程创建。
+    """
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        self._ui(lambda: method(self, *args, **kwargs))
+    return wrapper
+
+
+class PopoverWindow:
+    """托盘左键弹出的自绘面板（对齐 macOS 版 popover 的观感）
+
+    只在 GUI 线程上操作，外部调用一律经 CcBarTray._ui() 投递。
+    """
+
+    WIDTH = 300
+    PAD = 12
+    RADIUS = 10
+    BTN_HEIGHT = 40
+    BTN_GAP = 4
+
+    def __init__(self, app):
+        self.app = app
+        self.win = None
+        self._armed = False
+        self._btn_down = False
+        self._last_close = 0.0
+
+    # ---------------- 生命周期 ----------------
+
+    @property
+    def is_open(self):
+        return self.win is not None
+
+    def toggle(self):
+        if self.is_open:
+            self.close()
+        elif time.time() - self._last_close > 0.25:
+            # 刚因"点了面板外面"而关掉时，这次点击不再重新弹出来
+            self.show()
+
+    def close(self):
+        win, self.win = self.win, None
+        self._last_close = time.time()
+        if win is not None:
+            try:
+                win.destroy()
+            except Exception:
+                pass
+
+    def show(self):
+        import tkinter as tk
+
+        if self.win is not None:
+            self.close()
+
+        win = tk.Toplevel(self.app._ui_root)
+        win.overrideredirect(True)
+        win.configure(bg=Design.CARD_BORDER)   # 1px 边框靠外层底色透出来
+        win.attributes("-topmost", True)
+        self.win = win
+        self._armed = False
+        self._btn_down = False
+
+        inner = tk.Frame(win, bg=Design.BACKGROUND)
+        inner.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+
+        body = tk.Frame(inner, bg=Design.BACKGROUND)
+        body.pack(fill=tk.BOTH, expand=True, padx=self.PAD, pady=(8, 6))
+
+        self._build(body)
+
+        # 定位：贴光标上方，钳制在工作区内
+        win.update_idletasks()
+        height = win.winfo_reqheight()
+        x, y = self._position(win, height)
+        win.geometry(f"{self.WIDTH}x{height}+{x}+{y}")
+
+        self._round_corners(win, self.RADIUS)
+        win.lift()
+        win.focus_force()
+        win.bind("<Escape>", lambda e: self.close())
+        win.bind("<FocusOut>", self._on_focus_out)
+        win.after(250, self._arm)
+        win.after(150, self._poll_outside_click)
+
+    def _arm(self):
+        """确认窗口真的拿到了焦点，才启用"失焦即关"
+
+        overrideredirect 窗口在 Windows 上 focus_force 可能失败，那时
+        失焦判断会误伤，所以干脆只靠"点外部关闭"来兜底。
+        """
+        win = self.win
+        if win is None:
+            return
+        try:
+            self._armed = win.focus_get() is not None
+        except Exception:
+            self._armed = False
+
+    def _poll_outside_click(self):
+        """轮询左键状态：在面板外面按下就关闭
+
+        不依赖焦点，是面板关闭的主要途径。只认"按下"这个边沿，
+        否则弹出瞬间鼠标还按着（点托盘的慢速点击）会被误判。
+        """
+        win = self.win
+        if win is None:
+            return
+        try:
+            import ctypes
+            # VK_LBUTTON = 0x01
+            down = bool(ctypes.windll.user32.GetAsyncKeyState(0x01) & 0x8000)
+            if down and not self._btn_down:
+                px, py = win.winfo_pointerxy()
+                x1, y1 = win.winfo_rootx(), win.winfo_rooty()
+                inside = (x1 <= px <= x1 + win.winfo_width()
+                          and y1 <= py <= y1 + win.winfo_height())
+                if not inside:
+                    self.close()
+                    return
+            self._btn_down = down
+        except Exception:
+            pass
+        win.after(100, self._poll_outside_click)
+
+    def _on_focus_out(self, _event=None):
+        if self.win is not None:
+            self.win.after(120, self._check_focus)
+
+    def _check_focus(self):
+        win = self.win
+        if win is None or not self._armed:
+            return
+        try:
+            if win.focus_get() is None:   # 焦点跑到别的程序了
+                self.close()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _position(win, height):
+        """面板贴在光标上方（托盘在右下角），并钳制在工作区内"""
+        cx, cy = win.winfo_pointerxy()
+        left, top, right, bottom = PopoverWindow._work_area(win)
+        width = PopoverWindow.WIDTH
+
+        x = min(max(cx - width // 2, left + 8), right - width - 8)
+        y = cy - height - 12
+        if y < top + 8:
+            y = min(cy + 12, bottom - height - 8)
+        return x, y
+
+    @staticmethod
+    def _work_area(win):
+        """工作区（排除任务栏）"""
+        try:
+            import ctypes
+            from ctypes import wintypes
+            rect = wintypes.RECT()
+            # SPI_GETWORKAREA = 0x0030
+            if ctypes.windll.user32.SystemParametersInfoW(
+                    0x0030, 0, ctypes.byref(rect), 0):
+                return rect.left, rect.top, rect.right, rect.bottom
+        except Exception:
+            pass
+        return 0, 0, win.winfo_screenwidth(), win.winfo_screenheight()
+
+    @staticmethod
+    def _round_corners(win, radius):
+        """用窗口区域裁出圆角
+
+        Win10 没有 DWMWA_WINDOW_CORNER_PREFERENCE（Win11 才有），
+        所以走 SetWindowRgn。失败就保持直角，不能因此崩。
+        """
+        try:
+            import ctypes
+            win.update_idletasks()
+            w, h = win.winfo_width(), win.winfo_height()
+            hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
+            rgn = ctypes.windll.gdi32.CreateRoundRectRgn(
+                0, 0, w + 1, h + 1, radius * 2, radius * 2)
+            ctypes.windll.user32.SetWindowRgn(hwnd, rgn, True)
+        except Exception:
+            pass
+
+    # ---------------- 内容构建 ----------------
+
+    def _build(self, parent):
+        import tkinter as tk
+
+        app = self.app
+        today = app.query_day_stats(0)
+        yesterday = app.query_day_stats(1)
+        week = app.query_day_stats(7)
+        month = app.query_day_stats(30)
+        total = app.query_total_stats()
+        models = app.query_model_breakdown()
+        work_hours = app.query_work_hours()
+
+        # 问候语
+        greeting = random.choice(app.GREETINGS)
+        if len(greeting) > 20:
+            greeting = greeting[:19] + "…"
+        tk.Label(parent, text=greeting, fg=Design.TEXT_SECONDARY,
+                 bg=Design.BACKGROUND, font=Design.FONT_UI).pack(fill=tk.X)
+        self._separator(parent)
+
+        # 今日用量
+        if today:
+            self._section_header(parent, "📊 今日用量",
+                                 self._open(app.show_hourly_detail_today))
+            tk.Label(parent, text=Design.fmt_tokens(today["total"]),
+                     fg=Design.BRAND, bg=Design.BACKGROUND, font=Design.FONT_BIG,
+                     anchor='w').pack(fill=tk.X, pady=(2, 6))
+            self._stat_columns(parent, today, work_hours)
+        else:
+            if os.path.exists(app.settings["db_path"]):
+                tk.Label(parent, text="📊 今日暂无数据", fg=Design.TEXT_MUTED,
+                         bg=Design.BACKGROUND, font=Design.FONT_UI).pack(
+                             fill=tk.X, pady=6)
+            else:
+                self._stat_row(parent, "🌶️", "未找到数据源", "去设置",
+                               self._open(app.show_settings))
+        self._separator(parent)
+
+        # 模型分布
+        if models:
+            self._section_header(parent, "🤖 模型分布",
+                                 self._open(app.show_model_detail))
+            max_total = models[0]["total"] if models else 1
+            colors = model_colors()
+            for idx, m in enumerate(models[:3]):
+                name = m["model"]
+                if len(name) > 14:
+                    name = name[:14] + "…"
+                self._model_row(parent, name, m["total"], max_total,
+                                colors[idx % len(colors)])
+            self._separator(parent)
+
+        # 时间段统计
+        if yesterday:
+            self._stat_row(parent, "📅", "昨日", Design.fmt_tokens(yesterday["total"]),
+                           self._open(app.show_hourly_detail_yesterday))
+        if week:
+            self._stat_row(parent, "📊", "近7天", Design.fmt_tokens(week["total"]),
+                           self._open(app.show_weekly_detail))
+        if month:
+            self._stat_row(parent, "📆", "近30天", Design.fmt_tokens(month["total"]),
+                           self._open(app.show_monthly_detail))
+        if total:
+            self._stat_row(parent, "📈", "历史总量", Design.fmt_tokens(total["total"]),
+                           self._open(app.show_monthly_detail))
+        self._separator(parent)
+
+        # 按钮栏
+        self._button_bar(parent, [
+            ("📋", "复制", self._on_copy),
+            ("🔄", "刷新", self._on_refresh),
+            ("⚙️", "设置", self._on_settings),
+            ("❌", "退出", self._on_quit),
+        ])
+
+    def _separator(self, parent):
+        import tkinter as tk
+        tk.Frame(parent, bg=Design.CARD_BORDER, height=1).pack(fill=tk.X, pady=6)
+
+    def _new_row(self, parent, height):
+        import tkinter as tk
+        row = tk.Frame(parent, bg=Design.BACKGROUND, height=height)
+        row.pack(fill=tk.X)
+        row.pack_propagate(False)
+        return row
+
+    def _section_header(self, parent, title, command):
+        import tkinter as tk
+        row = self._new_row(parent, 22)
+        tk.Label(row, text=title, fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+                 font=Design.FONT_SECTION, anchor='w').pack(side=tk.LEFT)
+        tk.Label(row, text="›", fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
+                 font=Design.FONT_CHEVRON).pack(side=tk.RIGHT)
+        self._bind_row(row, command)
+
+    def _stat_columns(self, parent, today, work_hours):
+        """三列指标：请求数 / 缓存命中 / 时长"""
+        import tkinter as tk
+
+        total_input = today["input"] + today["cache_create"] + today["cache_read"]
+        cache_rate = (today["cache_read"] / total_input * 100) if total_input > 0 else 0
+
+        columns = [
+            ("请求数", f"{today['reqs']}次", Design.TEXT_PRIMARY),
+            ("缓存命中", f"{cache_rate:.0f}%",
+             Design.SUCCESS if cache_rate > 80 else Design.WARNING),
+        ]
+        if work_hours:
+            columns.append(("时长", f"{work_hours}h", Design.TEXT_PRIMARY))
+
+        row = tk.Frame(parent, bg=Design.BACKGROUND)
+        row.pack(fill=tk.X, pady=(0, 4))
+        for i, (label, value, color) in enumerate(columns):
+            row.grid_columnconfigure(i, weight=1, uniform="stat")
+            cell = tk.Frame(row, bg=Design.BACKGROUND)
+            cell.grid(row=0, column=i, sticky="ew")
+            tk.Label(cell, text=label, fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
+                     font=Design.FONT_UI_SMALL).pack()
+            tk.Label(cell, text=value, fg=color, bg=Design.BACKGROUND,
+                     font=Design.FONT_VALUE).pack(pady=(2, 0))
+
+    def _stat_row(self, parent, icon, title, value, command):
+        import tkinter as tk
+        row = self._new_row(parent, 28)
+        tk.Label(row, text=icon, bg=Design.BACKGROUND,
+                 font=Design.FONT_UI).pack(side=tk.LEFT)
+        tk.Label(row, text=title, fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+                 font=Design.FONT_UI).pack(side=tk.LEFT, padx=(6, 0))
+        tk.Label(row, text="›", fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
+                 font=Design.FONT_CHEVRON).pack(side=tk.RIGHT)
+        tk.Label(row, text=value, fg=Design.TEXT_SECONDARY, bg=Design.BACKGROUND,
+                 font=Design.FONT_MONO).pack(side=tk.RIGHT, padx=(0, 6))
+        self._bind_row(row, command)
+
+    def _model_row(self, parent, name, value, max_value, color):
+        """模型名 + 右对齐用量 + 圆角进度条"""
+        import tkinter as tk
+
+        row = tk.Frame(parent, bg=Design.BACKGROUND)
+        row.pack(fill=tk.X, pady=(0, 6))
+
+        top = tk.Frame(row, bg=Design.BACKGROUND)
+        top.pack(fill=tk.X)
+        tk.Label(top, text=name, fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+                 font=Design.FONT_UI_SMALL, anchor='w').pack(side=tk.LEFT)
+        tk.Label(top, text=Design.fmt_tokens(value), fg=Design.TEXT_SECONDARY,
+                 bg=Design.BACKGROUND, font=Design.FONT_MONO_SMALL,
+                 anchor='e').pack(side=tk.RIGHT)
+
+        ratio = (value / max_value) if max_value > 0 else 0
+        bar = tk.Canvas(row, width=1, height=5, bg=Design.BACKGROUND,
+                        highlightthickness=0)
+        bar.pack(fill=tk.X, pady=(3, 0))
+
+        def redraw(_event=None):
+            bar.delete("all")
+            w = bar.winfo_width()
+            if w <= 1:
+                w = self.WIDTH - 2 - 2 * self.PAD
+            ChartCanvas.round_rect(bar, 0, 0, w, 5, 2.5, fill=Design.CARD_BORDER)
+            fill_w = w * min(max(ratio, 0.0), 1.0)
+            if fill_w > 1:
+                ChartCanvas.round_rect(bar, 0, 0, fill_w, 5, 2.5, fill=color)
+
+        bar.bind("<Configure>", redraw)
+
+    def _button_bar(self, parent, buttons):
+        """四宫格按钮：等宽圆角 + hover 高亮"""
+        import tkinter as tk
+
+        bar = tk.Canvas(parent, width=1, height=self.BTN_HEIGHT,
+                        bg=Design.BACKGROUND, highlightthickness=0)
+        bar.pack(fill=tk.X)
+        state = {"index": -1}
+
+        def geometry():
+            w = bar.winfo_width()
+            if w <= 1:
+                w = self.WIDTH - 2 - 2 * self.PAD
+            n = len(buttons)
+            return w, (w - self.BTN_GAP * (n - 1)) / n
+
+        def index_at(x):
+            _w, bw = geometry()
+            if bw <= 0:
+                return -1
+            i = int(x / (bw + self.BTN_GAP))
+            return i if 0 <= i < len(buttons) else -1
+
+        def redraw(_event=None):
+            bar.delete("all")
+            _w, bw = geometry()
+            for i, (icon, label, _cmd) in enumerate(buttons):
+                x1 = i * (bw + self.BTN_GAP)
+                x2 = x1 + bw
+                fill = Design.BTN_BG_HOVER if i == state["index"] else Design.BTN_BG
+                ChartCanvas.round_rect(bar, x1, 0, x2, self.BTN_HEIGHT, 6, fill=fill)
+                cx = (x1 + x2) / 2
+                bar.create_text(cx, 13, text=icon, fill=Design.TEXT_PRIMARY,
+                                font=Design.FONT_BTN_ICON)
+                bar.create_text(cx, 28, text=label, fill=Design.TEXT_PRIMARY,
+                                font=Design.FONT_BTN)
+
+        def on_motion(event):
+            i = index_at(event.x)
+            if i != state["index"]:
+                state["index"] = i
+                redraw()
+                bar.configure(cursor="hand2" if i >= 0 else "")
+
+        def on_leave(_event):
+            if state["index"] != -1:
+                state["index"] = -1
+                redraw()
+
+        def on_click(event):
+            i = index_at(event.x)
+            if i >= 0:
+                buttons[i][2]()
+
+        bar.bind("<Configure>", redraw)
+        bar.bind("<Motion>", on_motion)
+        bar.bind("<Leave>", on_leave)
+        bar.bind("<Button-1>", on_click)
+
+    # ---------------- 行交互 ----------------
+
+    def _open(self, command):
+        """点开别的窗口前先收起面板"""
+        def run():
+            self.close()
+            command()
+        return run
+
+    def _bind_row(self, row, command):
+        """整行可点：绑到行和它所有子控件，带 hover 高亮"""
+        def enter(_event):
+            self._set_bg(row, Design.ROW_HOVER)
+
+        def leave(_event):
+            # 移到子控件上也会触发 Leave，这时不算真的离开
+            under = row.winfo_containing(*row.winfo_pointerxy())
+            if under is not None and self._is_within(under, row):
+                return
+            self._set_bg(row, Design.BACKGROUND)
+
+        for widget in self._descendants(row):
+            widget.bind("<Enter>", enter)
+            widget.bind("<Leave>", leave)
+            widget.bind("<Button-1>", lambda e, c=command: c())
+            try:
+                widget.configure(cursor="hand2")
+            except Exception:
+                pass
+
+    @staticmethod
+    def _descendants(widget):
+        yield widget
+        for child in widget.winfo_children():
+            yield from PopoverWindow._descendants(child)
+
+    @staticmethod
+    def _is_within(widget, ancestor):
+        node = widget
+        while node is not None:
+            if node is ancestor:
+                return True
+            node = getattr(node, "master", None)
+        return False
+
+    @staticmethod
+    def _set_bg(widget, color):
+        for w in PopoverWindow._descendants(widget):
+            try:
+                w.configure(bg=color)
+            except Exception:
+                pass
+
+    # ---------------- 按钮动作 ----------------
+
+    def _on_copy(self):
+        self.close()
+        self.app.copy_stats(self.app.icon, None)
+
+    def _on_refresh(self):
+        self.app.refresh_data(self.app.icon, None)
+        self.show()          # 重建内容，刷新数据
+
+    def _on_settings(self):
+        self.close()
+        self.app.show_settings()
+
+    def _on_quit(self):
+        self.close()
+        self.app.quit_app(self.app.icon, None)
+
+
 class CcBarTray:
     GREETINGS = [
         "今天也要加油写 Bug 哦 ✨",
@@ -353,7 +882,83 @@ class CcBarTray:
         }
         self.last_notification_date = None
         self.last_history_backup_date = None
+
+        # GUI 线程：所有 tkinter 窗口都跑在这个线程上，避免卡住托盘消息循环
+        self._ui_queue = queue.Queue()
+        self._ui_root = None
+        self.popover = PopoverWindow(self)
+
         self.load_settings()
+
+    # ------------------------------------------------------------
+    # GUI 线程调度
+    # ------------------------------------------------------------
+
+    def _start_gui(self):
+        """起一个常驻 GUI 线程，持有隐藏的 Tk root 并跑 mainloop"""
+        import tkinter as tk
+
+        ready = threading.Event()
+
+        def run_ui():
+            self._ui_root = tk.Tk()
+            self._ui_root.withdraw()
+            self._ui_root.after(50, self._drain_ui)
+            ready.set()
+            self._ui_root.mainloop()
+
+        threading.Thread(target=run_ui, daemon=True, name="ccbar-gui").start()
+        ready.wait(timeout=10)
+
+    def _drain_ui(self):
+        """在 GUI 线程里执行队列中的回调"""
+        while True:
+            try:
+                fn = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                fn()
+            except Exception as e:
+                print(f"UI 回调异常: {e}")
+
+        if self._ui_root is not None:
+            self._ui_root.after(50, self._drain_ui)
+
+    def _ui(self, fn):
+        """把回调投递到 GUI 线程执行（可从任意线程调用）"""
+        if self._ui_root is None:
+            print("GUI 线程未就绪，忽略 UI 请求")
+            return
+        self._ui_queue.put(fn)
+
+    def toggle_popover(self, icon=None, item=None):
+        """左键点托盘：开关面板"""
+        self._ui(self.popover.toggle)
+
+    @staticmethod
+    def _bring_to_front(win):
+        """把窗口提到最前
+
+        托盘程序不是前台进程，Windows 不会自动把新建的窗口带到前面，
+        用户会以为点了没反应。用 topmost 顶一下再撤销。
+        """
+        try:
+            win.deiconify()
+            win.lift()
+            win.attributes("-topmost", True)
+            win.after(300, lambda: CcBarTray._drop_topmost(win))
+            win.focus_force()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _drop_topmost(win):
+        try:
+            if win.winfo_exists():
+                win.attributes("-topmost", False)
+        except Exception:
+            pass
 
     def load_settings(self):
         """加载设置"""
@@ -830,6 +1435,47 @@ class CcBarTray:
 
         return None
 
+    def query_total_stats(self):
+        """查询历史总量
+
+        总量 = proxy_request_logs 全部 + usage_daily_rollups 中更早的部分
+        （只取 rollup 里早于最早日志日期的行，避免和日志重复计数）
+        """
+        db_path = self.settings["db_path"]
+        if not os.path.exists(db_path):
+            return None
+
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                SELECT SUM(reqs), SUM(total) FROM (
+                    SELECT COUNT(*) as reqs,
+                           COALESCE(SUM(input_tokens + output_tokens
+                                        + cache_creation_tokens + cache_read_tokens), 0) as total
+                    FROM proxy_request_logs
+                    UNION ALL
+                    SELECT COALESCE(SUM(request_count), 0) as reqs,
+                           COALESCE(SUM(input_tokens + output_tokens
+                                        + cache_creation_tokens + cache_read_tokens), 0) as total
+                    FROM usage_daily_rollups
+                    WHERE date < (SELECT date(MIN(created_at), 'unixepoch', 'localtime')
+                                  FROM proxy_request_logs)
+                )
+            """)
+
+            row = cursor.fetchone()
+            conn.close()
+
+            if row and row[1]:
+                return {"reqs": row[0] or 0, "total": row[1] or 0}
+
+        except Exception as e:
+            print(f"查询失败: {e}")
+
+        return None
+
     def query_model_breakdown_by_day(self, days_ago=0):
         """查询某天的模型分布"""
         db_path = self.settings["db_path"]
@@ -928,6 +1574,9 @@ class CcBarTray:
 
         menu_items = []
 
+        # default=True 的项会被左键点击触发，右键仍出原生菜单
+        menu_items.append(pystray.MenuItem("打开面板", self.toggle_popover, default=True))
+
         greeting = random.choice(self.GREETINGS)
         menu_items.append(pystray.MenuItem(greeting[:16], None, enabled=False))
         menu_items.append(pystray.Menu.SEPARATOR)
@@ -1000,11 +1649,12 @@ class CcBarTray:
         """显示昨日每小时详情"""
         self.show_hourly_detail(days_ago=1)
 
+    @_on_gui
     def show_hourly_detail(self, days_ago=0, date_str=None):
         """显示每小时详情窗口"""
         import tkinter as tk
 
-        root = tk.Tk()
+        root = tk.Toplevel(self._ui_root)
         root.title("每小时用量详情")
         root.geometry("520x620")
         root.configure(bg=Design.BACKGROUND)
@@ -1097,7 +1747,8 @@ class CcBarTray:
         def on_mousewheel(event):
             canvas_scroll.yview_scroll(int(-event.delta / 120), "units")
 
-        canvas_scroll.bind_all("<MouseWheel>", on_mousewheel)
+        canvas_scroll.bind("<MouseWheel>", on_mousewheel)
+        inner.bind("<MouseWheel>", on_mousewheel)
 
         def refresh():
             date_label.config(text=target_date.strftime("%y-%m-%d"))
@@ -1172,7 +1823,7 @@ class CcBarTray:
                              bg=Design.BACKGROUND, font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT)
 
         refresh()
-        root.mainloop()
+        self._bring_to_front(root)
 
     def show_weekly_detail(self, icon=None, item=None):
         """显示近7天详情"""
@@ -1182,11 +1833,12 @@ class CcBarTray:
         """显示近30天详情"""
         self.show_daily_detail(days=30, title="近30天用量")
 
+    @_on_gui
     def show_model_detail(self, icon=None, item=None):
         """显示模型分布详情（带环形图）"""
         import tkinter as tk
 
-        root = tk.Tk()
+        root = tk.Toplevel(self._ui_root)
         root.title("模型分布详情")
         root.geometry("620x620")
         root.configure(bg=Design.BACKGROUND)
@@ -1280,7 +1932,8 @@ class CcBarTray:
         def on_mousewheel(event):
             canvas_scroll.yview_scroll(int(-event.delta / 120), "units")
 
-        canvas_scroll.bind_all("<MouseWheel>", on_mousewheel)
+        canvas_scroll.bind("<MouseWheel>", on_mousewheel)
+        inner.bind("<MouseWheel>", on_mousewheel)
 
         def refresh_model():
             for widget in inner.winfo_children():
@@ -1377,13 +2030,14 @@ class CcBarTray:
                          bg=Design.BACKGROUND, font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT)
 
         refresh_model()
-        root.mainloop()
+        self._bring_to_front(root)
 
+    @_on_gui
     def show_daily_detail(self, days=7, title="近7天用量"):
         """显示每日详情窗口（7天/30天）"""
         import tkinter as tk
 
-        root = tk.Tk()
+        root = tk.Toplevel(self._ui_root)
         root.title(title)
         root.geometry("560x620")
         root.configure(bg=Design.BACKGROUND)
@@ -1484,7 +2138,8 @@ class CcBarTray:
         def on_mousewheel(event):
             canvas_scroll.yview_scroll(int(-event.delta / 120), "units")
 
-        canvas_scroll.bind_all("<MouseWheel>", on_mousewheel)
+        canvas_scroll.bind("<MouseWheel>", on_mousewheel)
+        inner.bind("<MouseWheel>", on_mousewheel)
 
         def refresh_daily():
             for widget in inner.winfo_children():
@@ -1566,7 +2221,7 @@ class CcBarTray:
                              bg=Design.BACKGROUND, font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT)
 
         refresh_daily()
-        root.mainloop()
+        self._bring_to_front(root)
 
     def copy_stats(self, icon, item):
         """复制今日统计"""
@@ -1602,12 +2257,13 @@ class CcBarTray:
             menu = pystray.Menu(*self.build_menu())
             self.icon.menu = menu
 
+    @_on_gui
     def show_settings(self, icon=None, item=None):
         """显示设置窗口（统一深色风格）"""
         import tkinter as tk
         from tkinter import filedialog, messagebox
 
-        root = tk.Tk()
+        root = tk.Toplevel(self._ui_root)
         root.title("ccBar 设置")
         root.geometry("520x460")
         root.configure(bg=Design.BACKGROUND)
@@ -1736,7 +2392,7 @@ class CcBarTray:
         make_btn(btn_bar, "重置", reset).pack(side=tk.RIGHT)
         make_btn(btn_bar, "保存", save, primary=True).pack(side=tk.RIGHT, padx=(0, 10))
 
-        root.mainloop()
+        self._bring_to_front(root)
 
     def quit_app(self, icon, item):
         """退出应用"""
@@ -1766,6 +2422,9 @@ class CcBarTray:
 
     def run(self):
         """运行应用"""
+        # 先起 GUI 线程，后续所有窗口都投递到它上面
+        self._start_gui()
+
         # 初始化历史备份表
         self.init_history_table()
 
