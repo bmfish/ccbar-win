@@ -142,20 +142,19 @@ def usage_color(progress):
     return stops[-1][1]
 
 
-def usage_color_for_total(total, threshold_wan):
-    """根据今日用量和预警阈值计算颜色
+# 今日用量（面板大数字 + 托盘图标）标红的阈值：超过 8000万 才变红
+TODAY_RED_THRESHOLD = 80_000_000
 
-    色阶锚点（以预警阈值为参照）：
-    - 0.25x 阈值 → 浅绿
-    - 0.75x 阈值 → 黄
-    - 1.00x 阈值 → 橙红（刚好达到预警线）
-    - >=1.2x 阈值 → 正红
+
+def today_usage_color(total):
+    """今日用量配色
+
+    8000万以下走绿 → 黄 → 橙（最高只到橙），超过阈值才标红。
     """
-    threshold = float(threshold_wan) * 10_000
-    if threshold <= 0:
-        return Design.USAGE_STOPS[0][1]
-    # 阈值对应 0.83 进度，1.2x 阈值对应满格红色
-    return usage_color(min((total / threshold) / 1.2, 1.0))
+    if total > TODAY_RED_THRESHOLD:
+        return Design.USAGE_STOPS[-1][1]
+    # 0.82 是色阶里橙色那一档，卡住不让它滑到红
+    return usage_color(total / TODAY_RED_THRESHOLD * 0.82)
 
 
 def model_colors(count=6):
@@ -576,7 +575,8 @@ class PopoverWindow:
             self._section_header(parent, "📊 今日用量",
                                  self._open(app.show_hourly_detail_today))
             tk.Label(parent, text=Design.fmt_tokens(today["total"]),
-                     fg=Design.BRAND, bg=Design.BACKGROUND, font=Design.FONT_BIG,
+                     fg=today_usage_color(today["total"]), bg=Design.BACKGROUND,
+                     font=Design.FONT_BIG,
                      anchor='w').pack(fill=tk.X, pady=(2, 6))
             self._stat_columns(parent, today, work_hours)
         else:
@@ -1034,7 +1034,7 @@ class CcBarTray:
         if not today:
             return
 
-        color = usage_color_for_total(today["total"], self.settings["warning_threshold"])
+        color = today_usage_color(today["total"])
         if color == getattr(self, "_last_icon_color", None):
             return  # 颜色没变就不重绘
 
@@ -2471,9 +2471,9 @@ class CcBarTray:
         # 启动时执行一次备份
         self.backup_history()
 
-        # 创建图标（按当前用量着色：浅绿 → 黄 → 橙 → 红）
+        # 创建图标（按当前用量着色：浅绿 → 黄 → 橙，超过 8000万 才红）
         today = self.query_day_stats(0)
-        initial_color = (usage_color_for_total(today["total"], self.settings["warning_threshold"])
+        initial_color = (today_usage_color(today["total"])
                          if today else Design.BRAND)
         self._last_icon_color = initial_color
         image = self.create_icon(initial_color)
