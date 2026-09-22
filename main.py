@@ -1046,6 +1046,46 @@ class CcBarTray:
             except Exception:
                 pass
 
+    def check_token_milestone(self, total):
+        """每1000万token跨档时触发冒泡通知和标题闪烁"""
+        tier = int(total / 10_000_000)
+        last_tier = getattr(self, "_last_token_tier", 0)
+        if tier <= last_tier or tier <= 0:
+            return
+        self._last_token_tier = tier
+
+        # 计算增量
+        delta = total - (tier - 1) * 10_000_000 if tier > 1 else total
+
+        # Toast 通知（Windows 原生）
+        try:
+            toaster = win10toast.ToastNotifier()
+            toaster.show_toast(
+                "🫧 里程碑",
+                f"+{self.fmt_tokens(delta)} tokens！今日已达 {self.fmt_tokens(total)}",
+                duration=5,
+                threaded=True
+            )
+        except Exception:
+            pass
+
+        # 托盘标题闪烁（加 ✨ 前缀，0.6秒后恢复）
+        if self.icon:
+            try:
+                original = self.icon.title or f"{self.fmt_tokens(total)}"
+                self.icon.title = f"✨ {self.fmt_tokens(total)}"
+
+                def restore():
+                    import time
+                    time.sleep(0.6)
+                    if self.icon:
+                        self.icon.title = f"{self.fmt_tokens(total)}"
+
+                t = threading.Thread(target=restore, daemon=True)
+                t.start()
+            except Exception:
+                pass
+
     def init_history_table(self):
         """初始化历史备份表"""
         db_path = self.settings["db_path"]
@@ -2446,6 +2486,10 @@ class CcBarTray:
             self.check_and_run_scheduled_backup()
             # 按用量更新图标颜色
             self.update_icon_color()
+            # 检查里程碑（每1000万token冒泡通知）
+            today = self.query_day_stats(0)
+            if today:
+                self.check_token_milestone(today["total"])
             # 更新菜单
             if self.icon:
                 menu = pystray.Menu(*self.build_menu())
