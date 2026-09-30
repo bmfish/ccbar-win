@@ -14,7 +14,9 @@ import pystray
 from PIL import Image, ImageDraw
 import win10toast
 
-# 数据库路径
+from stats_store import StatsStore, SOURCE_REGISTRY
+
+# 数据库路径（cc-switch 默认值，可在设置中修改）
 DB_PATH = os.path.expanduser("~/.cc-switch/cc-switch.db")
 
 
@@ -580,7 +582,7 @@ class PopoverWindow:
                      anchor='w').pack(fill=tk.X, pady=(2, 6))
             self._stat_columns(parent, today, work_hours)
         else:
-            if os.path.exists(app.settings["db_path"]):
+            if app.store.attached:
                 tk.Label(parent, text="📊 今日暂无数据", fg=Design.TEXT_MUTED,
                          bg=Design.BACKGROUND, font=Design.FONT_UI).pack(
                              fill=tk.X, pady=6)
@@ -877,11 +879,14 @@ class CcBarTray:
         self.settings = {
             "refresh_interval": 60,
             "db_path": DB_PATH,
+            "ccswitch_enabled": True,
+            "zcode_enabled": False,
+            "zcode_path": next(a for a in SOURCE_REGISTRY if a.id == "zcode").default_path,
             "warning_threshold": 50,
             "warning_enabled": True,
         }
-        self.last_notification_date = None
-        self.last_history_backup_date = None
+        # 自建统计库：历史每日补账 + 今日实时查询（对源库只读）
+        self.store = StatsStore()
 
         # GUI 线程：所有 tkinter 窗口都跑在这个线程上，避免卡住托盘消息循环
         self._ui_queue = queue.Queue()
@@ -975,16 +980,16 @@ class CcBarTray:
                             self.settings["refresh_interval"] = int(value)
                         elif key == "db_path":
                             self.settings["db_path"] = value
+                        elif key == "ccswitch_enabled":
+                            self.settings["ccswitch_enabled"] = value.lower() == "true"
+                        elif key == "zcode_enabled":
+                            self.settings["zcode_enabled"] = value.lower() == "true"
+                        elif key == "zcode_path":
+                            self.settings["zcode_path"] = value
                         elif key == "warning_threshold":
                             self.settings["warning_threshold"] = int(value)
                         elif key == "warning_enabled":
                             self.settings["warning_enabled"] = value.lower() == "true"
-
-        # 加载上次备份日期
-        backup_file = config_dir / "last_backup.txt"
-        if backup_file.exists():
-            with open(backup_file, "r") as f:
-                self.last_history_backup_date = f.read().strip()
 
     def save_settings(self):
         """保存设置"""
@@ -995,17 +1000,26 @@ class CcBarTray:
         with open(config_file, "w") as f:
             f.write(f"refresh_interval={self.settings['refresh_interval']}\n")
             f.write(f"db_path={self.settings['db_path']}\n")
+            f.write(f"ccswitch_enabled={self.settings['ccswitch_enabled']}\n")
+            f.write(f"zcode_enabled={self.settings['zcode_enabled']}\n")
+            f.write(f"zcode_path={self.settings['zcode_path']}\n")
             f.write(f"warning_threshold={self.settings['warning_threshold']}\n")
             f.write(f"warning_enabled={self.settings['warning_enabled']}\n")
 
-    def save_backup_date(self, date_str):
-        """保存备份日期"""
-        config_dir = Path.home() / ".ccbar"
-        config_dir.mkdir(exist_ok=True)
-        backup_file = config_dir / "last_backup.txt"
-        with open(backup_file, "w") as f:
-            f.write(date_str)
-        self.last_history_backup_date = date_str
+    def connect_store(self):
+        """按当前设置（重）建统计库连接并 ATTACH 各数据源，随后补账一次"""
+        ccswitch = next(a for a in SOURCE_REGISTRY if a.id == "ccswitch")
+        zcode = next(a for a in SOURCE_REGISTRY if a.id == "zcode")
+        configs = [
+            (ccswitch,
+             self.settings.get("ccswitch_enabled", True),
+             self.settings.get("db_path") or ccswitch.default_path),
+            (zcode,
+             self.settings.get("zcode_enabled", False),
+             self.settings.get("zcode_path") or zcode.default_path),
+        ]
+        self.store.rebuild(configs)
+        self.store.sync_if_needed()
 
     def create_icon(self, color=None):
         """生成闪电图标
@@ -1086,480 +1100,208 @@ class CcBarTray:
             except Exception:
                 pass
 
-    def init_history_table(self):
-        """初始化历史备份表"""
-        db_path = self.settings["db_path"]
-        if not os.path.exists(db_path):
-            return
-
-        try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS proxy_request_logs_history (
-                    request_id TEXT PRIMARY KEY,
-                    provider_id TEXT NOT NULL,
-                    app_type TEXT NOT NULL,
-                    model TEXT NOT NULL,
-                    request_model TEXT,
-                    input_tokens INTEGER NOT NULL DEFAULT 0,
-                    output_tokens INTEGER NOT NULL DEFAULT 0,
-                    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-                    cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
-                    input_cost_usd TEXT NOT NULL DEFAULT '0',
-                    output_cost_usd TEXT NOT NULL DEFAULT '0',
-                    cache_read_cost_usd TEXT NOT NULL DEFAULT '0',
-                    cache_creation_cost_usd TEXT NOT NULL DEFAULT '0',
-                    total_cost_usd TEXT NOT NULL DEFAULT '0',
-                    latency_ms INTEGER NOT NULL,
-                    first_token_ms INTEGER,
-                    duration_ms INTEGER,
-                    status_code INTEGER NOT NULL,
-                    error_message TEXT,
-                    session_id TEXT,
-                    provider_type TEXT,
-                    is_streaming INTEGER NOT NULL DEFAULT 0,
-                    cost_multiplier TEXT NOT NULL DEFAULT '1.0',
-                    created_at INTEGER NOT NULL,
-                    data_source TEXT NOT NULL DEFAULT 'proxy',
-                    pricing_model TEXT,
-                    input_token_semantics INTEGER NOT NULL DEFAULT 0,
-                    backed_up_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
-                )
-            """)
-
-            conn.commit()
-            conn.close()
-            print("历史备份表已就绪")
-        except Exception as e:
-            print(f"创建历史备份表失败: {e}")
-
-    def backup_history(self):
-        """备份历史数据"""
-        db_path = self.settings["db_path"]
-        if not os.path.exists(db_path):
-            return
-
-        try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-
-            # 获取上次备份日期
-            last_backup = self.last_history_backup_date or "2000-01-01"
-
-            # 计算昨天的日期
-            yesterday = datetime.now() - timedelta(days=1)
-            yesterday_str = yesterday.strftime("%Y-%m-%d")
-
-            # 如果已经备份过昨天，跳过
-            if last_backup >= yesterday_str:
-                print(f"历史数据已是最新（上次备份: {last_backup}）")
-                conn.close()
-                return
-
-            # 备份从上次备份日期到昨天的数据
-            cursor.execute("""
-                INSERT OR IGNORE INTO proxy_request_logs_history
-                SELECT
-                    request_id, provider_id, app_type, model, request_model,
-                    input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-                    input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd,
-                    total_cost_usd, latency_ms, first_token_ms, duration_ms,
-                    status_code, error_message, session_id, provider_type,
-                    is_streaming, cost_multiplier, created_at, data_source,
-                    pricing_model, input_token_semantics,
-                    strftime('%s', 'now') as backed_up_at
-                FROM proxy_request_logs
-                WHERE date(created_at, 'unixepoch', 'localtime') > ?
-                  AND date(created_at, 'unixepoch', 'localtime') <= ?
-            """, (last_backup, yesterday_str))
-
-            changes = cursor.rowcount
-            conn.commit()
-            conn.close()
-
-            print(f"历史备份完成: 新增 {changes} 条记录（{last_backup} ~ {yesterday_str}）")
-            self.save_backup_date(yesterday_str)
-
-        except Exception as e:
-            print(f"历史备份失败: {e}")
-
-    def check_and_run_scheduled_backup(self):
-        """检查是否需要执行定时备份（11:00 或 20:00）"""
-        now = datetime.now()
-        hour = now.hour
-        minute = now.minute
-
-        # 检查是否是备份时间（11:00 或 20:00）
-        is_backup_time = (hour == 11 and minute == 0) or (hour == 20 and minute == 0)
-
-        if not is_backup_time:
-            return
-
-        # 获取今天是否已经备份过
-        last_backup = self.last_history_backup_date or "2000-01-01"
-        yesterday = datetime.now() - timedelta(days=1)
-        yesterday_str = yesterday.strftime("%Y-%m-%d")
-
-        # 如果20:00检查，且已经备份到昨天，跳过
-        if hour == 20 and last_backup >= yesterday_str:
-            print("20:00 检查：历史数据已是最新，跳过备份")
-            return
-
-        # 执行备份
-        print(f"执行定时备份（{hour}:00）")
-        self.backup_history()
-
     def query_day_stats(self, days=0):
-        """查询统计（包含历史表）"""
-        db_path = self.settings["db_path"]
-        if not os.path.exists(db_path):
+        """查询统计（usage_all = 自家历史 + 各源今日实时）"""
+        now = datetime.now()
+        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_timestamp = int(start_of_day.timestamp())
+
+        if days == 0:
+            sql = """SELECT COALESCE(SUM(request_count), 0),
+                            COALESCE(SUM(input_tokens), 0),
+                            COALESCE(SUM(output_tokens), 0),
+                            COALESCE(SUM(cache_creation_tokens + cache_read_tokens), 0)
+                     FROM usage_all WHERE created_at >= ?"""
+            params = (start_timestamp,)
+        elif days == 1:
+            yesterday_start = start_of_day - timedelta(days=1)
+            sql = """SELECT COALESCE(SUM(request_count), 0),
+                            COALESCE(SUM(input_tokens), 0),
+                            COALESCE(SUM(output_tokens), 0),
+                            COALESCE(SUM(cache_creation_tokens + cache_read_tokens), 0)
+                     FROM usage_all WHERE created_at >= ? AND created_at < ?"""
+            params = (int(yesterday_start.timestamp()), start_timestamp)
+        else:
+            # 近N天
+            start_date = start_of_day - timedelta(days=days)
+            sql = """SELECT COALESCE(SUM(request_count), 0),
+                            COALESCE(SUM(input_tokens), 0),
+                            COALESCE(SUM(output_tokens), 0),
+                            COALESCE(SUM(cache_creation_tokens + cache_read_tokens), 0)
+                     FROM usage_all WHERE created_at >= ?"""
+            params = (int(start_date.timestamp()),)
+
+        row = self.store.query_one(sql, params)
+        if not row:
             return None
 
-        try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-
-            now = datetime.now()
-            start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
-            start_timestamp = int(start_of_day.timestamp())
-
-            if days == 0:
-                # 今日
-                cursor.execute("""
-                    SELECT
-                        COUNT(*) as reqs,
-                        COALESCE(SUM(input_tokens), 0) as input,
-                        COALESCE(SUM(output_tokens), 0) as output,
-                        COALESCE(SUM(cache_creation_tokens), 0) as cache_create,
-                        COALESCE(SUM(cache_read_tokens), 0) as cache_read
-                    FROM proxy_request_logs
-                    WHERE created_at >= ?
-                """, (start_timestamp,))
-            elif days == 1:
-                # 昨日
-                yesterday_start = start_of_day - timedelta(days=1)
-                cursor.execute("""
-                    SELECT
-                        COUNT(*) as reqs,
-                        COALESCE(SUM(input_tokens), 0) as input,
-                        COALESCE(SUM(output_tokens), 0) as output,
-                        COALESCE(SUM(cache_creation_tokens), 0) as cache_create,
-                        COALESCE(SUM(cache_read_tokens), 0) as cache_read
-                    FROM proxy_request_logs
-                    WHERE created_at >= ? AND created_at < ?
-                """, (int(yesterday_start.timestamp()), start_timestamp))
-            else:
-                # 近N天（包含历史表）
-                start_date = start_of_day - timedelta(days=days)
-                cursor.execute("""
-                    SELECT SUM(reqs), SUM(input), SUM(output), SUM(cache_create), SUM(cache_read) FROM (
-                        SELECT
-                            COUNT(*) as reqs,
-                            COALESCE(SUM(input_tokens), 0) as input,
-                            COALESCE(SUM(output_tokens), 0) as output,
-                            COALESCE(SUM(cache_creation_tokens), 0) as cache_create,
-                            COALESCE(SUM(cache_read_tokens), 0) as cache_read
-                        FROM proxy_request_logs
-                        WHERE created_at >= ?
-                        UNION ALL
-                        SELECT
-                            COALESCE(SUM(request_count), 0) as reqs,
-                            COALESCE(SUM(input_tokens), 0) as input,
-                            COALESCE(SUM(output_tokens), 0) as output,
-                            COALESCE(SUM(cache_creation_tokens), 0) as cache_create,
-                            COALESCE(SUM(cache_read_tokens), 0) as cache_read
-                        FROM usage_daily_rollups
-                        WHERE date >= date(?, 'unixepoch', 'localtime')
-                          AND date < (SELECT date(MIN(created_at), 'unixepoch', 'localtime') FROM proxy_request_logs)
-                    )
-                """, (int(start_date.timestamp()), int(start_date.timestamp())))
-
-            row = cursor.fetchone()
-            conn.close()
-
-            if row and row[0]:
-                return {
-                    "reqs": row[0],
-                    "input": row[1] or 0,
-                    "output": row[2] or 0,
-                    "cache_create": row[3] or 0,
-                    "cache_read": row[4] or 0,
-                    "total": (row[1] or 0) + (row[2] or 0) + (row[3] or 0) + (row[4] or 0)
-                }
-        except Exception as e:
-            print(f"查询失败: {e}")
-
-        return None
+        return {
+            "reqs": row[0],
+            "input": row[1],
+            "output": row[2],
+            "cache_create": 0,
+            "cache_read": row[3],
+            "total": row[1] + row[2] + row[3],
+        }
 
     def query_hourly_stats(self, days_ago=0):
         """查询每小时统计"""
-        db_path = self.settings["db_path"]
-        if not os.path.exists(db_path):
+        rows = self.store.query_all("""
+            SELECT
+                strftime('%H', created_at, 'unixepoch', 'localtime') as hour,
+                COALESCE(SUM(request_count), 0) as reqs,
+                COALESCE(SUM(output_tokens), 0) as output,
+                COALESCE(SUM(input_tokens), 0) as input,
+                COALESCE(SUM(cache_read_tokens), 0) as cache_read
+            FROM usage_all
+            WHERE date(created_at, 'unixepoch', 'localtime') = date('now', 'localtime', '-' || ? || ' days')
+            GROUP BY hour
+            ORDER BY hour
+        """, (days_ago,))
+        if rows is None:
             return None
 
-        try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-
-            cursor.execute("""
-                SELECT
-                    strftime('%H', created_at, 'unixepoch', 'localtime') as hour,
-                    COUNT(*) as reqs,
-                    COALESCE(SUM(output_tokens), 0) as output,
-                    COALESCE(SUM(input_tokens), 0) as input,
-                    COALESCE(SUM(cache_read_tokens), 0) as cache_read
-                FROM proxy_request_logs
-                WHERE date(created_at, 'unixepoch', 'localtime') = date('now', 'localtime', '-' || ? || ' days')
-                GROUP BY hour
-                ORDER BY hour
-            """, (days_ago,))
-
-            hourly_data = {}
-            for row in cursor.fetchall():
-                hour = int(row[0])
-                hourly_data[hour] = {
-                    "reqs": row[1],
-                    "output": row[2],
-                    "input": row[3],
-                    "cache_read": row[4]
-                }
-
-            conn.close()
-            return hourly_data
-
-        except Exception as e:
-            print(f"查询失败: {e}")
-
-        return None
+        hourly_data = {}
+        for row in rows:
+            hour = int(row[0])
+            hourly_data[hour] = {
+                "reqs": row[1],
+                "output": row[2],
+                "input": row[3],
+                "cache_read": row[4]
+            }
+        return hourly_data
 
     def query_daily_stats_for_range(self, start_date, end_date):
-        """查询日期范围内的每日统计"""
-        db_path = self.settings["db_path"]
-        if not os.path.exists(db_path):
+        """查询日期范围内的每日统计（历史聚合已在补账时并入 usage_log）"""
+        rows = self.store.query_all("""
+            SELECT
+                date(created_at, 'unixepoch', 'localtime') as day,
+                COALESCE(SUM(request_count), 0) as reqs,
+                COALESCE(SUM(output_tokens), 0) as output,
+                COALESCE(SUM(input_tokens), 0) as input,
+                COALESCE(SUM(cache_read_tokens), 0) as cache_read
+            FROM usage_all
+            WHERE date(created_at, 'unixepoch', 'localtime') >= ?
+              AND date(created_at, 'unixepoch', 'localtime') <= ?
+            GROUP BY day
+        """, (start_date, end_date))
+        if rows is None:
             return None
 
-        try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-
-            # 查询原始日志
-            cursor.execute("""
-                SELECT
-                    date(created_at, 'unixepoch', 'localtime') as day,
-                    COUNT(*) as reqs,
-                    COALESCE(SUM(output_tokens), 0) as output,
-                    COALESCE(SUM(input_tokens), 0) as input,
-                    COALESCE(SUM(cache_read_tokens), 0) as cache_read
-                FROM proxy_request_logs
-                WHERE date(created_at, 'unixepoch', 'localtime') >= ?
-                  AND date(created_at, 'unixepoch', 'localtime') <= ?
-                GROUP BY day
-            """, (start_date, end_date))
-
-            daily_data = {}
-            for row in cursor.fetchall():
-                daily_data[row[0]] = {
-                    "reqs": row[1],
-                    "output": row[2],
-                    "input": row[3],
-                    "cache_read": row[4]
-                }
-
-            # 查询历史汇总（30天前的数据）
-            cursor.execute("""
-                SELECT
-                    date,
-                    COALESCE(SUM(request_count), 0) as reqs,
-                    COALESCE(SUM(output_tokens), 0) as output,
-                    COALESCE(SUM(input_tokens), 0) as input,
-                    COALESCE(SUM(cache_read_tokens), 0) as cache_read
-                FROM usage_daily_rollups
-                WHERE date >= ? AND date <= ?
-                  AND date < (SELECT date(MIN(created_at), 'unixepoch', 'localtime') FROM proxy_request_logs)
-                GROUP BY date
-            """, (start_date, end_date))
-
-            for row in cursor.fetchall():
-                if row[0] not in daily_data:
-                    daily_data[row[0]] = {
-                        "reqs": row[1],
-                        "output": row[2],
-                        "input": row[3],
-                        "cache_read": row[4]
-                    }
-
-            conn.close()
-            return daily_data
-
-        except Exception as e:
-            print(f"查询失败: {e}")
-
-        return None
+        daily_data = {}
+        for row in rows:
+            daily_data[row[0]] = {
+                "reqs": row[1],
+                "output": row[2],
+                "input": row[3],
+                "cache_read": row[4]
+            }
+        return daily_data
 
     def query_model_breakdown(self):
-        """查询模型分布
+        """查询模型分布（跨渠道合并，口径与今日用量一致）"""
+        now = datetime.now()
+        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_timestamp = int(start_of_day.timestamp())
 
-        total 口径与"今日用量"和模型分布详情窗口一致：
-        input + output + cache_creation + cache_read，
-        否则面板里的模型数字会比上方今日用量小一个量级。
-        """
-        db_path = self.settings["db_path"]
-        if not os.path.exists(db_path):
+        rows = self.store.query_all("""
+            SELECT
+                model,
+                COALESCE(SUM(input_tokens), 0) as input,
+                COALESCE(SUM(output_tokens), 0) as output,
+                COALESCE(SUM(input_tokens + output_tokens
+                             + cache_creation_tokens + cache_read_tokens), 0) as total
+            FROM usage_all
+            WHERE created_at >= ?
+            GROUP BY model
+            ORDER BY total DESC
+            LIMIT 5
+        """, (start_timestamp,))
+        if rows is None:
             return None
 
-        try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-
-            now = datetime.now()
-            start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
-            start_timestamp = int(start_of_day.timestamp())
-
-            cursor.execute("""
-                SELECT
-                    model,
-                    COALESCE(SUM(input_tokens), 0) as input,
-                    COALESCE(SUM(output_tokens), 0) as output,
-                    COALESCE(SUM(input_tokens + output_tokens
-                                 + cache_creation_tokens + cache_read_tokens), 0) as total
-                FROM proxy_request_logs
-                WHERE created_at >= ?
-                GROUP BY model
-                ORDER BY total DESC
-                LIMIT 5
-            """, (start_timestamp,))
-
-            breakdown = []
-            for row in cursor.fetchall():
-                breakdown.append({
-                    "model": row[0],
-                    "input": row[1],
-                    "output": row[2],
-                    "total": row[3]
-                })
-
-            conn.close()
-            return breakdown if breakdown else None
-        except Exception as e:
-            print(f"查询失败: {e}")
-
-        return None
+        breakdown = []
+        for row in rows:
+            breakdown.append({
+                "model": row[0],
+                "input": row[1],
+                "output": row[2],
+                "total": row[3]
+            })
+        return breakdown if breakdown else None
 
     def query_work_hours(self):
         """查询工作时长"""
-        db_path = self.settings["db_path"]
-        if not os.path.exists(db_path):
-            return None
+        now = datetime.now()
+        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_timestamp = int(start_of_day.timestamp())
 
-        try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-
-            now = datetime.now()
-            start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
-            start_timestamp = int(start_of_day.timestamp())
-
-            cursor.execute("""
-                SELECT MIN(created_at)
-                FROM proxy_request_logs
-                WHERE created_at >= ?
-            """, (start_timestamp,))
-
-            row = cursor.fetchone()
-            conn.close()
-
-            if row and row[0]:
-                start = datetime.fromtimestamp(row[0])
-                hours = (datetime.now() - start).total_seconds() / 3600
-                if hours > 0:
-                    return f"{hours:.1f}"
-
-        except Exception as e:
-            print(f"查询失败: {e}")
-
+        row = self.store.query_one("""
+            SELECT MIN(created_at) FROM usage_all WHERE created_at >= ?
+        """, (start_timestamp,))
+        if row and row[0]:
+            start = datetime.fromtimestamp(row[0])
+            hours = (datetime.now() - start).total_seconds() / 3600
+            if hours > 0:
+                return f"{hours:.1f}"
         return None
 
     def query_total_stats(self):
-        """查询历史总量
-
-        总量 = proxy_request_logs 全部 + usage_daily_rollups 中更早的部分
-        （只取 rollup 里早于最早日志日期的行，避免和日志重复计数）
-        """
-        db_path = self.settings["db_path"]
-        if not os.path.exists(db_path):
-            return None
-
-        try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-
-            cursor.execute("""
-                SELECT SUM(reqs), SUM(total) FROM (
-                    SELECT COUNT(*) as reqs,
-                           COALESCE(SUM(input_tokens + output_tokens
-                                        + cache_creation_tokens + cache_read_tokens), 0) as total
-                    FROM proxy_request_logs
-                    UNION ALL
-                    SELECT COALESCE(SUM(request_count), 0) as reqs,
-                           COALESCE(SUM(input_tokens + output_tokens
-                                        + cache_creation_tokens + cache_read_tokens), 0) as total
-                    FROM usage_daily_rollups
-                    WHERE date < (SELECT date(MIN(created_at), 'unixepoch', 'localtime')
-                                  FROM proxy_request_logs)
-                )
-            """)
-
-            row = cursor.fetchone()
-            conn.close()
-
-            if row and row[1]:
-                return {"reqs": row[0] or 0, "total": row[1] or 0}
-
-        except Exception as e:
-            print(f"查询失败: {e}")
-
+        """查询历史总量（历史聚合已在补账时并入 usage_log，单表即全量）"""
+        row = self.store.query_one("""
+            SELECT COALESCE(SUM(request_count), 0),
+                   COALESCE(SUM(input_tokens + output_tokens
+                                + cache_creation_tokens + cache_read_tokens), 0)
+            FROM usage_all
+        """)
+        if row and row[1]:
+            return {"reqs": row[0], "total": row[1]}
         return None
 
     def query_model_breakdown_by_day(self, days_ago=0):
-        """查询某天的模型分布"""
-        db_path = self.settings["db_path"]
-        if not os.path.exists(db_path):
+        """查询某天的模型分布（含来源渠道）"""
+        rows = self.store.query_all("""
+            SELECT
+                source,
+                model,
+                COALESCE(SUM(request_count), 0) as reqs,
+                COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens), 0) as total_token,
+                COALESCE(SUM(cache_read_tokens), 0) as cache_read
+            FROM usage_all
+            WHERE date(created_at, 'unixepoch', 'localtime') = date('now', 'localtime', '-' || ? || ' days')
+            GROUP BY source, model
+            ORDER BY total_token DESC
+        """, (days_ago,))
+        if rows is None:
             return None
 
-        try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
+        models = []
+        for row in rows:
+            models.append({
+                "source": row[0],
+                "model": row[1],
+                "reqs": row[2],
+                "total_token": row[3],
+                "cache_read": row[4]
+            })
+        return models
 
-            cursor.execute("""
-                SELECT
-                    model,
-                    COUNT(*) as reqs,
-                    COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens), 0) as total_token,
-                    COALESCE(SUM(cache_read_tokens), 0) as cache_read
-                FROM proxy_request_logs
-                WHERE date(created_at, 'unixepoch', 'localtime') = date('now', 'localtime', '-' || ? || ' days')
-                GROUP BY model
-                ORDER BY total_token DESC
-            """, (days_ago,))
-
-            models = []
-            for row in cursor.fetchall():
-                models.append({
-                    "model": row[0],
-                    "reqs": row[1],
-                    "total_token": row[2],
-                    "cache_read": row[3]
-                })
-
-            conn.close()
-            return models
-
-        except Exception as e:
-            print(f"查询失败: {e}")
-
-        return None
+    def query_source_breakdown(self):
+        """今日各数据源分账（source, 请求数, token 总量）"""
+        rows = self.store.query_all("""
+            SELECT source,
+                   COALESCE(SUM(request_count), 0),
+                   COALESCE(SUM(input_tokens + output_tokens
+                                + cache_read_tokens + cache_creation_tokens), 0)
+            FROM usage_all
+            WHERE date(created_at, 'unixepoch', 'localtime') = date('now', 'localtime')
+            GROUP BY source
+            ORDER BY 3 DESC
+        """)
+        if not rows:
+            return []
+        return [{"source": r[0], "reqs": r[1], "total": r[2]} for r in rows]
 
     def check_warning(self, stats):
         """检查是否需要预警"""
@@ -1644,7 +1386,7 @@ class CcBarTray:
             if work_hours:
                 menu_items.append(pystray.MenuItem(f"  ⏱️ 时长: {work_hours}h", None, enabled=False))
         else:
-            if os.path.exists(self.settings["db_path"]):
+            if self.store.attached:
                 menu_items.append(pystray.MenuItem("📊 今日暂无数据", None, enabled=False))
             else:
                 menu_items.append(pystray.MenuItem("🌶️ 未找到数据源，请去设置", self.show_settings))
@@ -2021,20 +1763,24 @@ class CcBarTray:
             # 模型配色（按小时轮换，同一小时内稳定）
             colors = model_colors()
 
-            # 环形图（取前 6 个模型）
-            top_models = models[:6]
+            # 环形图：跨渠道按模型合并，展示整体分布（取前 6）
+            merged = {}
+            for m in models:
+                acc = merged.get(m["model"], (0, 0))
+                merged[m["model"]] = (acc[0] + m["total_token"], acc[1] + m["cache_read"])
+            merged_list = sorted(merged.items(), key=lambda kv: kv[1][0], reverse=True)
+
             items = []
-            for idx, m in enumerate(top_models):
-                color = colors[idx % len(colors)]
-                items.append((m["total_token"], color, m["model"]))
+            for idx, (model_name, (token, _)) in enumerate(merged_list[:6]):
+                items.append((token, colors[idx % len(colors)], model_name))
 
             ChartCanvas.draw_donut(donut_canvas, items, 160)
 
             # 图例
-            for idx, m in enumerate(top_models):
+            for idx, (model_name, (token, _)) in enumerate(merged_list[:6]):
                 color = colors[idx % len(colors)]
-                pct = (m["total_token"] / total_token * 100) if total_token > 0 else 0
-                short_name = m["model"][:16] + "…" if len(m["model"]) > 16 else m["model"]
+                pct = (token / total_token * 100) if total_token > 0 else 0
+                short_name = model_name[:16] + "…" if len(model_name) > 16 else model_name
 
                 item_frame = tk.Frame(legend_frame, bg=Design.BACKGROUND)
                 item_frame.pack(fill=tk.X, pady=2)
@@ -2053,31 +1799,43 @@ class CcBarTray:
                          bg=Design.BACKGROUND, font=Design.FONT_MONO_TINY,
                          anchor='e').pack(side=tk.RIGHT)
 
-            # 合计行
-            total_row = tk.Frame(inner, bg=Design.BACKGROUND)
-            total_row.pack(fill=tk.X)
-            cells = [("合计", 22, 'w'), (f"{total_reqs}次", 9, 'e'),
-                     (Design.fmt_tokens(total_token), 11, 'e'),
-                     (Design.fmt_tokens(total_cache), 11, 'e')]
-            for text, width, anchor in cells:
-                tk.Label(total_row, text=text, width=width, anchor=anchor,
-                         fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
-                         font=("Consolas", 10, "bold")).pack(side=tk.LEFT)
+            # 表格按渠道分组（渠道按各自总量降序）
+            group_order = []
+            groups = {}
+            for m in models:
+                if m["source"] not in groups:
+                    group_order.append(m["source"])
+                    groups[m["source"]] = []
+                groups[m["source"]].append(m)
+            group_order.sort(key=lambda src: -sum(m["total_token"] for m in groups[src]))
 
-            tk.Frame(inner, bg=Design.CARD_BORDER, height=1).pack(fill=tk.X, pady=3)
+            for gi, src in enumerate(group_order):
+                src_models = groups[src]
+                src_token = sum(m["total_token"] for m in src_models)
 
-            # 每个模型（带专属颜色圆点）
-            for idx, m in enumerate(models):
-                row = tk.Frame(inner, bg=Design.BACKGROUND)
-                row.pack(fill=tk.X, pady=1)
+                # 渠道小节头：渠道名 + 该渠道总 Token
+                head = tk.Frame(inner, bg=Design.BACKGROUND)
+                head.pack(fill=tk.X)
+                tk.Label(head, text=f"● {self.store.source_display_name(src)}",
+                         width=20, anchor='w', fg=Design.BRAND, bg=Design.BACKGROUND,
+                         font=("Microsoft YaHei UI", 9, "bold")).pack(side=tk.LEFT)
+                tk.Label(head, text=Design.fmt_tokens(src_token), width=31, anchor='e',
+                         fg=Design.TEXT_SECONDARY, bg=Design.BACKGROUND,
+                         font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT)
+                tk.Frame(inner, bg=Design.CARD_BORDER, height=1).pack(fill=tk.X, pady=2)
 
-                # 颜色圆点（前6个有色，其余灰色）
-                color = (colors[idx % len(colors)]
-                         if idx < 6 else Design.TEXT_MUTED)
-                dot = tk.Canvas(row, width=10, height=10,
-                                bg=Design.BACKGROUND, highlightthickness=0)
-                dot.create_oval(1, 1, 9, 9, fill=color, outline="")
-                dot.pack(side=tk.LEFT, padx=(0, 4))
+                # 该渠道的每个模型（带专属颜色圆点）
+                for idx, m in enumerate(src_models):
+                    row = tk.Frame(inner, bg=Design.BACKGROUND)
+                    row.pack(fill=tk.X, pady=1)
+
+                    # 颜色圆点（前6个有色，其余灰色）
+                    color = (colors[idx % len(colors)]
+                             if gi == 0 and idx < 6 else Design.TEXT_MUTED)
+                    dot = tk.Canvas(row, width=10, height=10,
+                                    bg=Design.BACKGROUND, highlightthickness=0)
+                    dot.create_oval(1, 1, 9, 9, fill=color, outline="")
+                    dot.pack(side=tk.LEFT, padx=(0, 4))
 
                 short_name = m["model"][:18] + "…" if len(m["model"]) > 18 else m["model"]
 
@@ -2310,7 +2068,7 @@ class CcBarTray:
         today = self.query_day_stats(0)
         models = self.query_model_breakdown()
 
-        text = "ccSwitch 今日用量统计\n"
+        text = "ccBar 今日用量统计\n"
         text += "==================\n"
 
         if today:
@@ -2318,6 +2076,12 @@ class CcBarTray:
             text += f"请求数量: {today['reqs']}\n"
             text += f"输入 Token: {self.fmt_tokens(today['input'])}\n"
             text += f"输出 Token: {self.fmt_tokens(today['output'])}\n"
+
+        sources = self.query_source_breakdown()
+        if len(sources) > 1:
+            text += "\n数据源分布:\n"
+            for src in sources:
+                text += f"  {self.store.source_display_name(src['source'])}: {self.fmt_tokens(src['total'])}\n"
 
         if models:
             text += "\n模型分布:\n"
@@ -2345,9 +2109,13 @@ class CcBarTray:
 
         root = tk.Toplevel(self._ui_root)
         root.title("ccBar 设置")
-        root.geometry("520x460")
+        root.geometry("520x620")
         root.configure(bg=Design.BACKGROUND)
         root.resizable(False, False)
+
+        # 数据源控件（id → (启用变量, 路径输入框)）
+        source_vars = {}
+        source_entries = {}
 
         # 标题
         tk.Label(root, text="⚙️ 设置", font=("Microsoft YaHei UI", 15, "bold"),
@@ -2380,38 +2148,56 @@ class CcBarTray:
         interval_entry = make_row("刷新间隔 (秒):", "范围: 5 - 3000")
         interval_entry.insert(0, str(self.settings["refresh_interval"]))
 
-        # 数据库路径
-        path_row = tk.Frame(root, bg=Design.BACKGROUND)
-        path_row.pack(fill=tk.X, padx=24, pady=(14, 0))
+        # 数据源（每源一行：启用勾选 + 路径 + 浏览）
+        source_header = tk.Label(root, text="数据源", fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
+                                 font=("Microsoft YaHei UI", 10, "bold"), anchor='w')
+        source_header.pack(fill=tk.X, padx=24, pady=(16, 0))
 
-        tk.Label(path_row, text="数据库路径:", fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
-                 font=("Microsoft YaHei UI", 10), width=14, anchor='w').pack(side=tk.LEFT)
+        # 设置键映射：源 id → (启用开关键, 路径键)
+        source_keys = {"ccswitch": ("ccswitch_enabled", "db_path"),
+                       "zcode": ("zcode_enabled", "zcode_path")}
 
-        path_entry = tk.Entry(path_row, bg=Design.CARD_FILL, fg=Design.TEXT_PRIMARY,
-                              insertbackground=Design.TEXT_PRIMARY, relief="flat",
-                              font=Design.FONT_MONO_SMALL, highlightthickness=1,
-                              highlightbackground=Design.CARD_BORDER,
-                              highlightcolor=Design.BRAND)
-        path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=4)
-        path_entry.insert(0, self.settings["db_path"])
+        for adapter in SOURCE_REGISTRY:
+            enable_key, path_key = source_keys[adapter.id]
 
-        def browse():
-            filename = filedialog.askopenfilename(
-                title="选择数据库文件",
-                filetypes=[("SQLite", "*.db"), ("All", "*.*")]
-            )
-            if filename:
-                path_entry.delete(0, tk.END)
-                path_entry.insert(0, filename)
+            row = tk.Frame(root, bg=Design.BACKGROUND)
+            row.pack(fill=tk.X, padx=24, pady=(8, 0))
 
-        tk.Button(path_row, text="浏览", command=browse,
-                  bg=Design.CARD_FILL, fg=Design.TEXT_PRIMARY,
-                  activebackground=Design.CARD_BORDER, activeforeground=Design.TEXT_PRIMARY,
-                  relief="flat", bd=0, padx=12, cursor="hand2",
-                  font=Design.FONT_UI_SMALL).pack(side=tk.LEFT, padx=(8, 0))
+            var = tk.BooleanVar(value=self.settings.get(enable_key, False))
+            source_vars[adapter.id] = var
+            tk.Checkbutton(row, variable=var, bg=Design.BACKGROUND, fg=Design.TEXT_PRIMARY,
+                           activebackground=Design.BACKGROUND, activeforeground=Design.TEXT_PRIMARY,
+                           selectcolor=Design.CARD_FILL, bd=0, highlightthickness=0,
+                           cursor="hand2").pack(side=tk.LEFT)
 
-        tk.Label(root, text="默认: ~/.cc-switch/cc-switch.db", fg=Design.TEXT_MUTED,
-                 bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL).pack(anchor='w', padx=(170, 0), pady=(4, 0))
+            tk.Label(row, text=adapter.name, fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+                     font=("Microsoft YaHei UI", 10), width=10, anchor='w').pack(side=tk.LEFT)
+
+            entry = tk.Entry(row, bg=Design.CARD_FILL, fg=Design.TEXT_PRIMARY,
+                             insertbackground=Design.TEXT_PRIMARY, relief="flat",
+                             font=Design.FONT_MONO_SMALL, highlightthickness=1,
+                             highlightbackground=Design.CARD_BORDER,
+                             highlightcolor=Design.BRAND)
+            entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=4)
+            entry.insert(0, self.settings.get(path_key) or adapter.default_path)
+            source_entries[adapter.id] = entry
+
+            def make_browse(entry_box):
+                def browse():
+                    filename = filedialog.askopenfilename(
+                        title="选择数据库文件",
+                        filetypes=[("SQLite", "*.db *.sqlite"), ("All", "*.*")]
+                    )
+                    if filename:
+                        entry_box.delete(0, tk.END)
+                        entry_box.insert(0, filename)
+                return browse
+
+            tk.Button(row, text="浏览", command=make_browse(entry),
+                      bg=Design.CARD_FILL, fg=Design.TEXT_PRIMARY,
+                      activebackground=Design.CARD_BORDER, activeforeground=Design.TEXT_PRIMARY,
+                      relief="flat", bd=0, padx=12, cursor="hand2",
+                      font=Design.FONT_UI_SMALL).pack(side=tk.LEFT, padx=(8, 0))
 
         # 预警阈值
         warning_entry = make_row("预警阈值 (万):", "超过此值将弹出通知提醒")
@@ -2442,8 +2228,10 @@ class CcBarTray:
         def reset():
             interval_entry.delete(0, tk.END)
             interval_entry.insert(0, "30")
-            path_entry.delete(0, tk.END)
-            path_entry.insert(0, os.path.join(os.path.expanduser("~"), ".cc-switch", "cc-switch.db"))
+            for adapter in SOURCE_REGISTRY:
+                source_vars[adapter.id].set(adapter.id == "ccswitch")
+                source_entries[adapter.id].delete(0, tk.END)
+                source_entries[adapter.id].insert(0, adapter.default_path)
             warning_entry.delete(0, tk.END)
             warning_entry.insert(0, "50")
             warning_var.set(True)
@@ -2460,10 +2248,16 @@ class CcBarTray:
                     return
 
                 self.settings["refresh_interval"] = interval
-                self.settings["db_path"] = path_entry.get()
+                for adapter in SOURCE_REGISTRY:
+                    enable_key, path_key = source_keys[adapter.id]
+                    self.settings[enable_key] = source_vars[adapter.id].get()
+                    path_value = source_entries[adapter.id].get().strip()
+                    self.settings[path_key] = path_value or adapter.default_path
                 self.settings["warning_threshold"] = threshold
                 self.settings["warning_enabled"] = warning_var.get()
                 self.save_settings()
+                # 立即按新设置重连统计库（启用新源会触发首次全量回填）
+                self.connect_store()
                 messagebox.showinfo("成功", "设置已保存，将在下次刷新时生效")
                 root.destroy()
             except ValueError:
@@ -2482,8 +2276,8 @@ class CcBarTray:
         """更新图标和标题"""
         while True:
             time.sleep(self.settings["refresh_interval"])
-            # 检查定时备份
-            self.check_and_run_scheduled_backup()
+            # 懒惰补账：历史（昨天及更早）落后就同步进自建库
+            self.store.sync_if_needed()
             # 按用量更新图标颜色
             self.update_icon_color()
             # 检查里程碑（每1000万token冒泡通知）
@@ -2509,11 +2303,8 @@ class CcBarTray:
         # 先起 GUI 线程，后续所有窗口都投递到它上面
         self._start_gui()
 
-        # 初始化历史备份表
-        self.init_history_table()
-
-        # 启动时执行一次备份
-        self.backup_history()
+        # 初始化自建统计库并 ATTACH 各数据源（首次自动全量回填）
+        self.connect_store()
 
         # 创建图标（按当前用量着色：浅绿 → 黄 → 橙 → 红）
         today = self.query_day_stats(0)
