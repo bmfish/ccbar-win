@@ -1,6 +1,6 @@
 # ccBar Windows
 
-Windows 系统托盘工具，显示 ccSwitch token 用量。
+Windows 系统托盘 AI CLI 用量统计工具，支持**多数据源**聚合——内置 [cc-switch](https://github.com/farion1231/cc-switch)（Claude/Codex 等多应用代理统计）与 ZCode，后续可插拔扩展。与 macOS 版（ccbar-native）架构一致。
 
 ## 安装
 
@@ -34,14 +34,27 @@ pyinstaller ccBar.spec
 
 - 左键点击托盘弹出面板：今日用量 / 模型分布 / 近7天 / 近30天 / 历史总量
 - 右键菜单：今日 / 昨日 / 近7天 / 近30天 / 历史 详情窗口（带柱状图、折线图、环形图）
-- 模型分布详情（按天查看模型占比，环形图 + 列表）
+- 模型分布详情（按天查看，环形图为整体分布，列表**按渠道分组**）
 - 托盘图标随用量变色
-- 定时备份历史数据（每天 11:00 / 20:00）
-- 设置：刷新间隔 / 数据库路径 / 预警阈值
+- 设置：刷新间隔 / **数据源启停与路径**（cc-switch 默认启用、ZCode 默认关闭）/ 预警阈值
 
-## 数据库路径
+## 数据架构
 
-默认：`~/.cc-switch/cc-switch.db`
+ccbar 自带统计库（`~/.ccbar/ccbar.db`），对外部源库**全程只读**：
+历史（昨天及更早）每日懒惰补账进自家库，今日实时查各源库汇总，
+两段在 `usage_all` 视图拼接——源库清理不影响已有统计。
+
+| 数据源 | 口径 | 默认 |
+|---|---|---|
+| cc-switch | input + output + 缓存（全量） | 启用 |
+| ZCode | input + output（与 ZCode 官方统计一致，可直接对账） | 关闭，设置中勾选 |
+
+新增数据源：实现 `stats_store.py` 里的 `SourceAdapter` 并注册到 `SOURCE_REGISTRY` 即可。
+
+## 数据源路径
+
+- cc-switch：`~/.cc-switch/cc-switch.db`（可在设置中修改）
+- ZCode：`~/.zcode/cli/db/db.sqlite`（可在设置中修改，默认未启用）
 
 自动识别失败时在设置中手动指定。
 
