@@ -4,21 +4,14 @@ Windows 系统托盘 AI CLI 用量统计工具，支持**多数据源**聚合—
 
 ![windows](https://img.shields.io/badge/platform-Windows%2010%2B-blue) ![python](https://img.shields.io/badge/python-3.9%2B-yellow) ![license](https://img.shields.io/badge/license-MIT-green)
 
-<!--
-📷 截图待补：拍好后放到 docs/images/ 并解开下面的注释
-
-1. docs/images/tray.png         托盘图标 + 悬停数字（最好抓到变色/里程碑瞬间）
-2. docs/images/panel.png        左键面板（今日卡片 + 模型分布 + 趋势）
-3. docs/images/model-detail.png 模型分布详情（按渠道分组）
-4. docs/images/settings.png     设置窗口的数据源区块
-
 <p align="center">
-  <img src="docs/images/tray.png" width="260" alt="系统托盘">
-  <img src="docs/images/panel.png" width="320" alt="面板">
-  <img src="docs/images/model-detail.png" width="420" alt="模型分布详情">
-  <img src="docs/images/settings.png" width="420" alt="设置">
+  <img src="docs/images/tray.png" width="300" alt="托盘用量"/>
+  <br/>
+  <img src="docs/images/panel.png" width="270" alt="左键面板"/>
+  <img src="docs/images/settings.png" width="330" alt="数据源设置"/>
+  <br/>
+  <img src="docs/images/hourly.png" width="420" alt="每小时用量详情"/>
 </p>
--->
 
 ## English
 
