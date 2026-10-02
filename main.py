@@ -1100,52 +1100,88 @@ class CcBarTray:
             except Exception:
                 pass
 
-    def query_day_stats(self, days=0):
-        """查询统计（usage_all = 自家历史 + 各源今日实时）"""
-        now = datetime.now()
-        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        start_timestamp = int(start_of_day.timestamp())
+    # ------------------------------------------------------------ 查询辅助
 
-        if days == 0:
-            sql = """SELECT COALESCE(SUM(request_count), 0),
-                            COALESCE(SUM(input_tokens), 0),
-                            COALESCE(SUM(output_tokens), 0),
-                            COALESCE(SUM(cache_creation_tokens + cache_read_tokens), 0)
-                     FROM usage_all WHERE created_at >= ?"""
-            params = (start_timestamp,)
-        elif days == 1:
-            yesterday_start = start_of_day - timedelta(days=1)
-            sql = """SELECT COALESCE(SUM(request_count), 0),
-                            COALESCE(SUM(input_tokens), 0),
-                            COALESCE(SUM(output_tokens), 0),
-                            COALESCE(SUM(cache_creation_tokens + cache_read_tokens), 0)
-                     FROM usage_all WHERE created_at >= ? AND created_at < ?"""
-            params = (int(yesterday_start.timestamp()), start_timestamp)
-        else:
-            # 近N天
-            start_date = start_of_day - timedelta(days=days)
-            sql = """SELECT COALESCE(SUM(request_count), 0),
-                            COALESCE(SUM(input_tokens), 0),
-                            COALESCE(SUM(output_tokens), 0),
-                            COALESCE(SUM(cache_creation_tokens + cache_read_tokens), 0)
-                     FROM usage_all WHERE created_at >= ?"""
-            params = (int(start_date.timestamp()),)
+    @staticmethod
+    def _local_midnight_epoch(days_ago=0):
+        """本地时区 N 天前（0=今天，-1=明天）0 点的 epoch 秒"""
+        day = datetime.now() - timedelta(days=days_ago)
+        return int(day.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
 
-        row = self.store.query_one(sql, params)
+    @staticmethod
+    def _day_str(days_ago=0):
+        return (datetime.now() - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+
+    def _today_live(self):
+        """今日实时聚合（usage_all 的"今日"段），无数据返回 None"""
+        row = self.store.query_one("""
+            SELECT COALESCE(SUM(request_count), 0),
+                   COALESCE(SUM(input_tokens), 0),
+                   COALESCE(SUM(output_tokens), 0),
+                   COALESCE(SUM(cache_creation_tokens), 0),
+                   COALESCE(SUM(cache_read_tokens), 0)
+            FROM usage_all WHERE created_at >= ? AND created_at < ?
+        """, (self._local_midnight_epoch(0), self._local_midnight_epoch(-1)))
         if not row:
             return None
+        return self._stats_from_row(row)
 
+    def _today_live_or_zero(self):
+        t = self._today_live()
+        if not t:
+            t = {"reqs": 0, "input": 0, "output": 0, "cache_create": 0, "cache_read": 0, "total": 0}
+        return t
+
+    @staticmethod
+    def _stats_from_row(row):
         return {
             "reqs": row[0],
             "input": row[1],
             "output": row[2],
-            "cache_create": 0,
-            "cache_read": row[3],
-            "total": row[1] + row[2] + row[3],
+            "cache_create": row[3],
+            "cache_read": row[4],
+            "total": row[1] + row[2] + row[3] + row[4],
+        }
+
+    def _agg_sum(self, from_day, to_day):
+        """daily_agg 日期区间汇总（仅覆盖昨天及更早；今日由调用方叠加实时值）"""
+        row = self.store.query_one("""
+            SELECT COALESCE(SUM(reqs), 0),
+                   COALESCE(SUM(input), 0),
+                   COALESCE(SUM(output), 0),
+                   COALESCE(SUM(cache_create), 0),
+                   COALESCE(SUM(cache_read), 0)
+            FROM daily_agg WHERE date >= ? AND date <= ?
+        """, (from_day, to_day))
+        if not row:
+            return None
+        return self._stats_from_row(row)
+
+    def query_day_stats(self, days=0):
+        """查询统计：今日实时；历史区间读 daily_agg 聚合表（不再扫明细）"""
+        if days == 0:
+            return self._today_live()
+
+        if days == 1:
+            y = self._day_str(1)
+            agg = self._agg_sum(y, y)
+            return agg or self._today_live_or_zero()
+
+        agg = self._agg_sum(self._day_str(days), self._day_str(1))
+        if not agg:
+            return self._today_live()
+        today = self._today_live_or_zero()
+        return {
+            "reqs": agg["reqs"] + today["reqs"],
+            "input": agg["input"] + today["input"],
+            "output": agg["output"] + today["output"],
+            "cache_create": agg["cache_create"] + today["cache_create"],
+            "cache_read": agg["cache_read"] + today["cache_read"],
+            "total": agg["total"] + today["total"],
         }
 
     def query_hourly_stats(self, days_ago=0):
-        """查询每小时统计"""
+        """查询每小时统计（epoch 区间条件，走索引）"""
         rows = self.store.query_all("""
             SELECT
                 strftime('%H', created_at, 'unixepoch', 'localtime') as hour,
@@ -1154,10 +1190,10 @@ class CcBarTray:
                 COALESCE(SUM(input_tokens), 0) as input,
                 COALESCE(SUM(cache_read_tokens), 0) as cache_read
             FROM usage_all
-            WHERE date(created_at, 'unixepoch', 'localtime') = date('now', 'localtime', '-' || ? || ' days')
+            WHERE created_at >= ? AND created_at < ?
             GROUP BY hour
             ORDER BY hour
-        """, (days_ago,))
+        """, (self._local_midnight_epoch(days_ago), self._local_midnight_epoch(days_ago - 1)))
         if rows is None:
             return None
 
@@ -1173,18 +1209,17 @@ class CcBarTray:
         return hourly_data
 
     def query_daily_stats_for_range(self, start_date, end_date):
-        """查询日期范围内的每日统计（历史聚合已在补账时并入 usage_log）"""
+        """查询日期范围内的每日统计（历史走 daily_agg，今天实时叠加）"""
         rows = self.store.query_all("""
             SELECT
-                date(created_at, 'unixepoch', 'localtime') as day,
-                COALESCE(SUM(request_count), 0) as reqs,
-                COALESCE(SUM(output_tokens), 0) as output,
-                COALESCE(SUM(input_tokens), 0) as input,
-                COALESCE(SUM(cache_read_tokens), 0) as cache_read
-            FROM usage_all
-            WHERE date(created_at, 'unixepoch', 'localtime') >= ?
-              AND date(created_at, 'unixepoch', 'localtime') <= ?
-            GROUP BY day
+                date,
+                COALESCE(SUM(reqs), 0) as reqs,
+                COALESCE(SUM(output), 0) as output,
+                COALESCE(SUM(input), 0) as input,
+                COALESCE(SUM(cache_read), 0) as cache_read
+            FROM daily_agg
+            WHERE date >= ? AND date <= ?
+            GROUP BY date
         """, (start_date, end_date))
         if rows is None:
             return None
@@ -1197,6 +1232,18 @@ class CcBarTray:
                 "input": row[3],
                 "cache_read": row[4]
             }
+
+        # 今天不在 daily_agg 里，实时补上
+        today_str = self._day_str(0)
+        if start_date <= today_str <= end_date:
+            t = self._today_live()
+            if t:
+                daily_data[today_str] = {
+                    "reqs": t["reqs"],
+                    "output": t["output"],
+                    "input": t["input"],
+                    "cache_read": t["cache_read"]
+                }
         return daily_data
 
     def query_model_breakdown(self):
@@ -1248,19 +1295,17 @@ class CcBarTray:
         return None
 
     def query_total_stats(self):
-        """查询历史总量（历史聚合已在补账时并入 usage_log，单表即全量）"""
-        row = self.store.query_one("""
-            SELECT COALESCE(SUM(request_count), 0),
-                   COALESCE(SUM(input_tokens + output_tokens
-                                + cache_creation_tokens + cache_read_tokens), 0)
-            FROM usage_all
-        """)
-        if row and row[1]:
-            return {"reqs": row[0], "total": row[1]}
+        """查询历史总量（历史读 daily_agg + 今日实时，不再全表扫明细）"""
+        agg = self._agg_sum("0000-01-01", "9999-12-31")
+        today = self._today_live_or_zero()
+        total = (agg["total"] if agg else 0) + today["total"]
+        reqs = (agg["reqs"] if agg else 0) + today["reqs"]
+        if total:
+            return {"reqs": reqs, "total": total}
         return None
 
     def query_model_breakdown_by_day(self, days_ago=0):
-        """查询某天的模型分布（含来源渠道）"""
+        """查询某天的模型分布（含来源渠道；epoch 区间条件，走索引）"""
         rows = self.store.query_all("""
             SELECT
                 source,
@@ -1269,10 +1314,10 @@ class CcBarTray:
                 COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens), 0) as total_token,
                 COALESCE(SUM(cache_read_tokens), 0) as cache_read
             FROM usage_all
-            WHERE date(created_at, 'unixepoch', 'localtime') = date('now', 'localtime', '-' || ? || ' days')
+            WHERE created_at >= ? AND created_at < ?
             GROUP BY source, model
             ORDER BY total_token DESC
-        """, (days_ago,))
+        """, (self._local_midnight_epoch(days_ago), self._local_midnight_epoch(days_ago - 1)))
         if rows is None:
             return None
 
@@ -1295,10 +1340,10 @@ class CcBarTray:
                    COALESCE(SUM(input_tokens + output_tokens
                                 + cache_read_tokens + cache_creation_tokens), 0)
             FROM usage_all
-            WHERE date(created_at, 'unixepoch', 'localtime') = date('now', 'localtime')
+            WHERE created_at >= ? AND created_at < ?
             GROUP BY source
             ORDER BY 3 DESC
-        """)
+        """, (self._local_midnight_epoch(0), self._local_midnight_epoch(-1)))
         if not rows:
             return []
         return [{"source": r[0], "reqs": r[1], "total": r[2]} for r in rows]
