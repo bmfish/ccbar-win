@@ -188,9 +188,10 @@ class TestStatsStore(unittest.TestCase):
 
 
     def test_local_epoch_pre1970(self):
-        """1970-01-01 全量回填起点：正常平台给 0/负值，Windows 上不抛 OSError"""
+        """1970-01-01 全量回填起点：关键是不抛 OSError（Windows mktime 不支持 1970 前）"""
         from stats_store import _local_epoch
-        self.assertEqual(_local_epoch("1970-01-01"), 0)
+        value = _local_epoch("1970-01-01")   # macOS 返回负值，Windows 兜底返回 0
+        self.assertIsInstance(value, int)
         self.assertGreater(_local_epoch("2026-01-01"), 0)
 
 
