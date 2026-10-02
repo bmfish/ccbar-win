@@ -54,6 +54,19 @@ def _file_uri(path):
     return "file:///" + p.lstrip("/")
 
 
+def _local_epoch(day_str):
+    """日期字符串（yyyy-MM-dd）→ 本地零点 epoch。
+
+    1970 之前的日期 Windows 的本地时间函数不支持（timestamp() 抛 OSError），
+    此时返回 0——等价于全量回填的起点，1970 前不会有任何数据。
+    """
+    d = datetime.strptime(day_str, "%Y-%m-%d")
+    try:
+        return int(d.timestamp())
+    except (OSError, OverflowError, ValueError):
+        return 0
+
+
 class SourceAdapter:
     """数据源适配器基类"""
 
@@ -88,8 +101,8 @@ class CCSwitchAdapter(SourceAdapter):
     def sync_sqls(self, alias, from_day, today):
         # 明细：只同步"昨天及更早"，今日走实时视图。
         # 边界由 Python 侧算好的本地零点 epoch 传入（区间条件走索引，避免逐行 date()）
-        from_epoch = int(datetime.strptime(from_day, "%Y-%m-%d").timestamp())
-        today_epoch = int(datetime.strptime(today, "%Y-%m-%d").timestamp())
+        from_epoch = _local_epoch(from_day)
+        today_epoch = _local_epoch(today)
         detail = f"""
         INSERT OR IGNORE INTO usage_log
             (source, request_id, app_type, model, input_tokens, output_tokens,
@@ -150,8 +163,8 @@ class ZCodeAdapter(SourceAdapter):
         # started_at 是毫秒，折成秒。
         # 口径：按 ZCode 官方统计（computed_total_tokens = input+output），
         # 缓存命中部分不计入用量，缓存列记 0（原始值仍在 ZCode 自己的库里）。
-        from_epoch = int(datetime.strptime(from_day, "%Y-%m-%d").timestamp())
-        today_epoch = int(datetime.strptime(today, "%Y-%m-%d").timestamp())
+        from_epoch = _local_epoch(from_day)
+        today_epoch = _local_epoch(today)
         detail = f"""
         INSERT OR IGNORE INTO usage_log
             (source, request_id, app_type, model, input_tokens, output_tokens,

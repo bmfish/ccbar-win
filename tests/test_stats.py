@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from stats_store import StatsStore, CCSwitchAdapter, ZCodeAdapter, DAILY_AGG_DDL  # noqa: E402
+from stats_store import StatsStore, CCSwitchAdapter, ZCodeAdapter, DAILY_AGG_DDL, _local_epoch  # noqa: E402
 
 
 def local_midnight(days_ago=0):
@@ -185,6 +185,13 @@ class TestStatsStore(unittest.TestCase):
                    COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0)
             FROM usage_all WHERE created_at >= ?""", (local_midnight(0),))
         return {"reqs": agg[0] + today[0], "total": agg[1] + today[1]}
+
+
+    def test_local_epoch_pre1970(self):
+        """1970-01-01 全量回填起点：正常平台给 0/负值，Windows 上不抛 OSError"""
+        from stats_store import _local_epoch
+        self.assertEqual(_local_epoch("1970-01-01"), 0)
+        self.assertGreater(_local_epoch("2026-01-01"), 0)
 
 
 if __name__ == "__main__":
