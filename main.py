@@ -14,7 +14,11 @@ import pystray
 from PIL import Image, ImageDraw
 import win10toast
 
-from stats_store import StatsStore, SOURCE_REGISTRY
+from stats_store import StatsStore, SOURCE_REGISTRY, validate_db
+from update_check import fetch_latest_version, is_newer_version, RELEASES_URL
+
+# 当前版本（发布时随 tag 更新）
+APP_VERSION = "1.5.0"
 
 # 数据库路径（cc-switch 默认值，可在设置中修改）
 DB_PATH = os.path.expanduser("~/.cc-switch/cc-switch.db")
@@ -884,6 +888,7 @@ class CcBarTray:
             "zcode_path": next(a for a in SOURCE_REGISTRY if a.id == "zcode").default_path,
             "warning_threshold": 50,
             "warning_enabled": True,
+            "notify_interval": 1000,
         }
         # 自建统计库：历史每日补账 + 今日实时查询（对源库只读）
         self.store = StatsStore()
@@ -990,6 +995,8 @@ class CcBarTray:
                             self.settings["warning_threshold"] = int(value)
                         elif key == "warning_enabled":
                             self.settings["warning_enabled"] = value.lower() == "true"
+                        elif key == "notify_interval":
+                            self.settings["notify_interval"] = int(value)
 
     def save_settings(self):
         """保存设置"""
@@ -1005,6 +1012,7 @@ class CcBarTray:
             f.write(f"zcode_path={self.settings['zcode_path']}\n")
             f.write(f"warning_threshold={self.settings['warning_threshold']}\n")
             f.write(f"warning_enabled={self.settings['warning_enabled']}\n")
+            f.write(f"notify_interval={self.settings['notify_interval']}\n")
 
     def connect_store(self):
         """按当前设置（重）建统计库连接并 ATTACH 各数据源，随后补账一次"""
@@ -1061,22 +1069,31 @@ class CcBarTray:
                 pass
 
     def check_token_milestone(self, total):
-        """每1000万token跨档时触发冒泡通知和标题闪烁"""
-        tier = int(total / 10_000_000)
-        last_tier = getattr(self, "_last_token_tier", 0)
-        if tier <= last_tier or tier <= 0:
+        """每累计 N 万 token 跨档通知一次（与 macOS 版同款口径：0=关闭，每档每天最多一次）"""
+        interval_wan = self.settings.get("notify_interval", 1000)
+        if interval_wan <= 0:
             return
-        self._last_token_tier = tier
+        interval = interval_wan * 10_000
+        tier = int(total / interval)
+        if tier <= 0:
+            return
+
+        # 每个档位每天只通知一次（持久化，重启不重弹）
+        today = datetime.now().strftime("%Y-%m-%d")
+        mark = f"milestone_{today}_{tier}"
+        if self._daily_mark_seen(mark):
+            return
+        self._daily_mark_add(mark)
 
         # 计算增量
-        delta = total - (tier - 1) * 10_000_000 if tier > 1 else total
+        delta = total - (tier - 1) * interval if total % interval else interval
 
         # Toast 通知（Windows 原生）
         try:
             toaster = win10toast.ToastNotifier()
             toaster.show_toast(
                 "🫧 里程碑",
-                f"+{self.fmt_tokens(delta)} tokens！今日已达 {self.fmt_tokens(total)}",
+                f"+{self.fmt_tokens(delta)} tokens！今日已达 {self.fmt_tokens(total)}（每{interval_wan}万通知一次）",
                 duration=5,
                 threaded=True
             )
@@ -1099,6 +1116,31 @@ class CcBarTray:
                 t.start()
             except Exception:
                 pass
+
+    # ------------------------------------------------------------ 每日一次性标记（预警/里程碑共用）
+
+    def _marks_file(self):
+        config_dir = Path.home() / ".ccbar"
+        config_dir.mkdir(exist_ok=True)
+        return config_dir / "notified.txt"
+
+    def _daily_mark_seen(self, mark):
+        """标记是否已打过；顺手把文件里非今天的旧行清掉"""
+        f = self._marks_file()
+        if not f.exists():
+            return False
+        with open(f, "r") as fh:
+            lines = [l.strip() for l in fh if l.strip()]
+        today = datetime.now().strftime("%Y-%m-%d")
+        kept = [l for l in lines if today in l]
+        if kept != lines:
+            with open(f, "w") as fh:
+                fh.write("\n".join(kept) + ("\n" if kept else ""))
+        return mark in lines
+
+    def _daily_mark_add(self, mark):
+        with open(self._marks_file(), "a") as fh:
+            fh.write(mark + "\n")
 
     # ------------------------------------------------------------ 查询辅助
 
@@ -1465,6 +1507,12 @@ class CcBarTray:
 
         # 刷新
         menu_items.append(pystray.MenuItem("🔄 刷新", self.refresh_data))
+
+        # 备份数据
+        menu_items.append(pystray.MenuItem("💾 备份数据", self.backup_data))
+
+        # 检查更新
+        menu_items.append(pystray.MenuItem("⬇️ 检查更新", self.check_for_updates))
 
         # 设置
         menu_items.append(pystray.MenuItem("⚙️ 设置", self.show_settings))
@@ -2158,9 +2206,10 @@ class CcBarTray:
         root.configure(bg=Design.BACKGROUND)
         root.resizable(False, False)
 
-        # 数据源控件（id → (启用变量, 路径输入框)）
+        # 数据源控件（id → (启用变量, 路径输入框, 状态标签)）
         source_vars = {}
         source_entries = {}
+        source_status = {}
 
         # 标题
         tk.Label(root, text="⚙️ 设置", font=("Microsoft YaHei UI", 15, "bold"),
@@ -2202,11 +2251,30 @@ class CcBarTray:
         source_keys = {"ccswitch": ("ccswitch_enabled", "db_path"),
                        "zcode": ("zcode_enabled", "zcode_path")}
 
+        OK_COLOR, WARN_COLOR = "#34C759", "#FF9500"
+
+        def validate_source(adapter_id):
+            """只读试开源库并检查必需表，结果就地显示在状态行（保存时才生效）"""
+            adapter = next(a for a in SOURCE_REGISTRY if a.id == adapter_id)
+            path = source_entries[adapter_id].get().strip()
+            status = source_status[adapter_id]
+            if not path:
+                status.config(text="", fg=Design.TEXT_MUTED)
+                return
+            error = validate_db(path, adapter.required_tables)
+            if error is None:
+                status.config(text="表结构正确（保存后生效）", fg=OK_COLOR)
+            else:
+                status.config(text=error, fg=WARN_COLOR)
+
+        attached_ids = [a.id for a in self.store.attached]
         for adapter in SOURCE_REGISTRY:
             enable_key, path_key = source_keys[adapter.id]
 
-            row = tk.Frame(root, bg=Design.BACKGROUND)
-            row.pack(fill=tk.X, padx=24, pady=(8, 0))
+            src = tk.Frame(root, bg=Design.BACKGROUND)
+            src.pack(fill=tk.X, padx=24, pady=(8, 0))
+            row = tk.Frame(src, bg=Design.BACKGROUND)
+            row.pack(fill=tk.X)
 
             var = tk.BooleanVar(value=self.settings.get(enable_key, False))
             source_vars[adapter.id] = var
@@ -2227,7 +2295,7 @@ class CcBarTray:
             entry.insert(0, self.settings.get(path_key) or adapter.default_path)
             source_entries[adapter.id] = entry
 
-            def make_browse(entry_box):
+            def make_browse(entry_box, adapter_id):
                 def browse():
                     filename = filedialog.askopenfilename(
                         title="选择数据库文件",
@@ -2236,17 +2304,35 @@ class CcBarTray:
                     if filename:
                         entry_box.delete(0, tk.END)
                         entry_box.insert(0, filename)
+                        validate_source(adapter_id)
                 return browse
 
-            tk.Button(row, text="浏览", command=make_browse(entry),
+            tk.Button(row, text="浏览", command=make_browse(entry, adapter.id),
                       bg=Design.CARD_FILL, fg=Design.TEXT_PRIMARY,
                       activebackground=Design.CARD_BORDER, activeforeground=Design.TEXT_PRIMARY,
                       relief="flat", bd=0, padx=12, cursor="hand2",
                       font=Design.FONT_UI_SMALL).pack(side=tk.LEFT, padx=(8, 0))
 
+            # 连接状态行：打开窗口显示当前连接态，路径改动（失焦/浏览）即时校验
+            status = tk.Label(src, text="", fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
+                              font=Design.FONT_UI_SMALL, anchor='w')
+            status.pack(fill=tk.X, pady=(2, 0))
+            source_status[adapter.id] = status
+            if adapter.id in attached_ids:
+                status.config(text="已连接", fg=OK_COLOR)
+            elif not var.get():
+                status.config(text="未启用", fg=Design.TEXT_MUTED)
+            else:
+                status.config(text="未连接", fg=WARN_COLOR)
+            entry.bind("<FocusOut>", lambda e, aid=adapter.id: validate_source(aid))
+
         # 预警阈值
         warning_entry = make_row("预警阈值 (万):", "超过此值将弹出通知提醒")
         warning_entry.insert(0, str(self.settings["warning_threshold"]))
+
+        # 通知间隔
+        notify_entry = make_row("通知间隔 (万):", "每累计N万通知一次，0=关闭")
+        notify_entry.insert(0, str(self.settings.get("notify_interval", 1000)))
 
         # 分隔线
         tk.Frame(root, bg=Design.CARD_BORDER, height=1).pack(fill=tk.X, padx=24, pady=(20, 12))
@@ -2280,6 +2366,8 @@ class CcBarTray:
             warning_entry.delete(0, tk.END)
             warning_entry.insert(0, "50")
             warning_var.set(True)
+            notify_entry.delete(0, tk.END)
+            notify_entry.insert(0, "1000")
 
         def save():
             try:
@@ -2291,6 +2379,10 @@ class CcBarTray:
                 if threshold <= 0:
                     messagebox.showerror("错误", "预警阈值需大于 0")
                     return
+                notify = int(notify_entry.get())
+                if notify < 0:
+                    messagebox.showerror("错误", "通知间隔需 ≥ 0（0=关闭）")
+                    return
 
                 self.settings["refresh_interval"] = interval
                 for adapter in SOURCE_REGISTRY:
@@ -2300,6 +2392,7 @@ class CcBarTray:
                     self.settings[path_key] = path_value or adapter.default_path
                 self.settings["warning_threshold"] = threshold
                 self.settings["warning_enabled"] = warning_var.get()
+                self.settings["notify_interval"] = notify
                 self.save_settings()
                 # 立即按新设置重连统计库（启用新源会触发首次全量回填）
                 self.connect_store()
@@ -2312,6 +2405,51 @@ class CcBarTray:
         make_btn(btn_bar, "保存", save, primary=True).pack(side=tk.RIGHT, padx=(0, 10))
 
         self._bring_to_front(root)
+
+    @_on_gui
+    def backup_data(self, icon=None, item=None):
+        """一键备份统计库（VACUUM INTO 导出独立 db 文件，与 macOS 版同款）"""
+        from tkinter import filedialog, messagebox
+
+        stamp = datetime.now().strftime("%Y%m%d")
+        path = filedialog.asksaveasfilename(
+            title="备份统计库",
+            defaultextension=".db",
+            initialfile=f"ccbar-backup-{stamp}.db",
+            filetypes=[("SQLite", "*.db"), ("All", "*.*")])
+        if not path:
+            return
+        if self.store.backup(path):
+            messagebox.showinfo(
+                "备份完成",
+                f"统计库已备份到：\n{path}\n\n"
+                "恢复方式：退出 ccBar 后用备份文件替换\n~/.ccbar/ccbar.db")
+        else:
+            messagebox.showerror("备份失败", "统计库未打开或目标位置不可写")
+
+    def check_for_updates(self, icon=None, item=None):
+        """检查更新：后台请求 GitHub（网络不能堵 GUI 线程），完成后回 GUI 弹窗"""
+        def worker():
+            latest = fetch_latest_version()
+            self._ui(lambda: self._show_update_result(latest))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_update_result(self, latest):
+        """已在 GUI 线程：对比版本并弹窗（语义化比较）"""
+        from tkinter import messagebox
+        import webbrowser
+
+        if latest and is_newer_version(latest, APP_VERSION):
+            if messagebox.askyesno(
+                    "发现新版本",
+                    f"最新版本 v{latest}，当前 v{APP_VERSION}\n是否前往下载？"):
+                webbrowser.open(RELEASES_URL)
+            return
+        messagebox.showinfo(
+            "检查更新",
+            f"已经是最新版本（v{APP_VERSION}）" if latest
+            else "检查失败，稍后再试，或直接到 GitHub Releases 页面查看")
 
     def quit_app(self, icon, item):
         """退出应用"""

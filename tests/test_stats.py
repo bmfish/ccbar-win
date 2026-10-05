@@ -12,7 +12,8 @@ from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from stats_store import StatsStore, CCSwitchAdapter, ZCodeAdapter, DAILY_AGG_DDL, _local_epoch  # noqa: E402
+from stats_store import (StatsStore, CCSwitchAdapter, ZCodeAdapter, DAILY_AGG_DDL,
+                         _local_epoch, validate_db)  # noqa: E402
 
 
 def local_midnight(days_ago=0):
@@ -194,6 +195,39 @@ class TestStatsStore(unittest.TestCase):
         self.assertIsInstance(value, int)
         self.assertGreater(_local_epoch("2026-01-01"), 0)
 
+    # ------------------------------------------------------------ 备份与校验
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_backup_creates_independent_copy(self):
+        """VACUUM INTO 导出后可独立打开且数据一致；目标已存在必须失败"""
+        self._make_fixture_source()
+        self._insert_row("req-B", local_midnight(1) + 3600, 1000, 2000,
+                         cache_read=500, cache_create=100)
+        self._rebuild()
+        self.store.sync_if_needed()
+
+        target = os.path.join(self.tmp, "backup.db")
+        self.assertTrue(self.store.backup(target))
+
+        conn = sqlite3.connect(target)
+        rows = conn.execute("SELECT COUNT(*) FROM usage_log").fetchone()[0]
+        conn.close()
+        self.assertEqual(rows, 1)
+
+        self.assertFalse(self.store.backup(target),
+                         "VACUUM INTO 不覆盖已存在的目标，须返回 False")
+
+    def test_backup_without_connection(self):
+        store = StatsStore()  # 未 rebuild，无连接
+        self.assertFalse(store.backup(os.path.join(self.tmp, "x.db")))
+
+    def test_validate_db(self):
+        """只读试开 + 必需表检查（设置页即时校验的数据层）"""
+        self._make_fixture_source()
+        self.assertIsNone(validate_db(self.source_path, CCSwitchAdapter().required_tables))
+
+        bare = os.path.join(self.tmp, "bare.db")
+        sqlite3.connect(bare).close()
+        self.assertEqual(validate_db(bare, CCSwitchAdapter().required_tables), "缺少必需表")
+
+        self.assertEqual(validate_db(os.path.join(self.tmp, "missing.db"),
+                                     CCSwitchAdapter().required_tables), "文件不存在")

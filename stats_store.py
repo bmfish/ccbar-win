@@ -414,6 +414,21 @@ class StatsStore:
         rows = self.query_all(sql, params)
         return rows[0] if rows else None
 
+    def backup(self, path):
+        """VACUUM INTO 一键备份统计库（用量历史是长期资产）。
+
+        与 macOS 版语义一致：目标必须是未存在的空路径，成功返回 True。
+        """
+        with self._lock:
+            if self.conn is None:
+                return False
+            try:
+                self.conn.execute("VACUUM INTO ?", (path,))
+                return True
+            except sqlite3.Error as e:
+                print(f"备份失败: {e}")
+                return False
+
     def source_display_name(self, source):
         """source 标识 → 界面显示名（历史聚合行归入 cc-switch）"""
         if source == "zcode":
@@ -421,3 +436,29 @@ class StatsStore:
         if source in ("cc-switch", "cc-switch-rollup"):
             return "cc-switch"
         return source
+
+
+def validate_db(path, required_tables):
+    """只读试开一次源库并检查必需表。
+
+    返回 None 表示通过；否则返回人话错误（与 macOS 版设置页同款文案）。
+    """
+    if not os.path.isfile(path):
+        return "文件不存在"
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1)
+    except sqlite3.Error:
+        return "打不开（被占用或损坏）"
+    try:
+        placeholders = ",".join("?" * len(required_tables))
+        found = conn.execute(
+            f"SELECT COUNT(*) FROM sqlite_master "
+            f"WHERE type='table' AND name IN ({placeholders})",
+            required_tables).fetchone()[0]
+        if found < len(required_tables):
+            return "缺少必需表"
+        return None
+    except sqlite3.Error:
+        return "校验失败"
+    finally:
+        conn.close()
