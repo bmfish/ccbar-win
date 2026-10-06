@@ -2705,6 +2705,22 @@ class CcBarTray:
                        selectcolor=Design.CARD_FILL, bd=0, highlightthickness=0,
                        font=("Microsoft YaHei UI", 10), cursor="hand2").pack(anchor='w', padx=24, pady=3)
 
+        # 数据迁移（明细 CSV，导入幂等：主键去重，重复导零新增）
+        mig = tk.Frame(root, bg=Design.BACKGROUND)
+        mig.pack(fill=tk.X, padx=24, pady=(14, 0))
+        tk.Label(mig, text="数据迁移（明细 CSV）", fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
+                 font=Design.FONT_UI_SMALL).pack(side=tk.LEFT)
+        tk.Button(mig, text="导入 CSV", command=lambda: self.import_data(root),
+                  bg=Design.CARD_FILL, fg=Design.TEXT_PRIMARY,
+                  activebackground=Design.CARD_BORDER, activeforeground=Design.TEXT_PRIMARY,
+                  relief="flat", bd=0, padx=12, cursor="hand2",
+                  font=Design.FONT_UI_SMALL).pack(side=tk.RIGHT)
+        tk.Button(mig, text="导出 CSV", command=self.export_data,
+                  bg=Design.CARD_FILL, fg=Design.TEXT_PRIMARY,
+                  activebackground=Design.CARD_BORDER, activeforeground=Design.TEXT_PRIMARY,
+                  relief="flat", bd=0, padx=12, cursor="hand2",
+                  font=Design.FONT_UI_SMALL).pack(side=tk.RIGHT, padx=(0, 8))
+
         # 按钮栏
         btn_bar = tk.Frame(root, bg=Design.BACKGROUND)
         btn_bar.pack(fill=tk.X, padx=24, pady=(20, 0))
@@ -2810,6 +2826,35 @@ class CcBarTray:
             "检查更新",
             f"已经是最新版本（v{APP_VERSION}）" if latest
             else "检查失败，稍后再试，或直接到 GitHub Releases 页面查看")
+
+    def export_data(self):
+        """导出明细 CSV（换机迁移 / Excel 查看）"""
+        from tkinter import filedialog, messagebox
+        stamp = datetime.now().strftime("%Y%m%d")
+        path = filedialog.asksaveasfilename(
+            title="导出明细", defaultextension=".csv",
+            initialfile=f"ccbar-export-{stamp}.csv", filetypes=[("CSV", "*.csv")])
+        if not path:
+            return
+        n = self.store.export_csv(path)
+        if n >= 0:
+            messagebox.showinfo("导出完成", f"已导出 {n} 行明细到：\n{path}")
+        else:
+            messagebox.showerror("导出失败", "统计库未打开或目标位置不可写")
+
+    def import_data(self, root):
+        """幂等导入明细 CSV：主键去重，同一文件重复导零新增"""
+        from tkinter import filedialog, messagebox
+        path = filedialog.askopenfilename(title="导入明细",
+                                          filetypes=[("CSV", "*.csv"), ("All", "*.*")])
+        if not path:
+            return
+        read, inserted, skipped = self.store.import_csv(path)
+        if skipped == -1:
+            messagebox.showerror("导入失败", "不是 ccBar 导出的明细 CSV（表头不符）")
+            return
+        messagebox.showinfo("导入完成",
+                            f"共读取 {read} 行 · 新增 {inserted} 行 · 跳过 {skipped} 行（重复或非法）")
 
     def quit_app(self, icon, item):
         """退出应用"""

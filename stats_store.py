@@ -589,6 +589,84 @@ class StatsStore:
             ORDER BY created_at DESC LIMIT ?""", (self.local_midnight(0), limit))
         return [(r[0], r[1] or "-", r[2], r[3], r[4]) for r in rows] if rows else []
 
+    # ------------------------------------------------------------ 导出 / 导入（幂等）
+
+    EXPORT_COLUMNS = ["source", "request_id", "app_type", "model", "input_tokens", "output_tokens",
+                      "cache_read_tokens", "cache_creation_tokens", "reasoning_tokens",
+                      "total_cost_usd", "created_at", "request_count"]
+
+    def export_csv(self, path):
+        """导出 usage_log 全量明细为 CSV（带 BOM，Excel 可开）。成功返回行数，库未开返回 -1"""
+        import csv as _csv
+        with self._lock:
+            if self.conn is None:
+                return -1
+            rows = self.conn.execute("""
+                SELECT source, request_id, app_type, model, input_tokens, output_tokens,
+                       cache_read_tokens, cache_creation_tokens, reasoning_tokens,
+                       total_cost_usd, created_at, request_count
+                FROM usage_log ORDER BY created_at""").fetchall()
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            w = _csv.writer(f)
+            w.writerow(self.EXPORT_COLUMNS)
+            w.writerows(rows)
+        return len(rows)
+
+    def import_csv(self, path):
+        """幂等导入明细 CSV：主键 (source, request_id) 去重，重复/非法行跳过，
+        导入后按受影响窗口重建 daily_agg。
+        - Returns: (读取行数, 新增行数, 跳过行数)；表头不符返回 (0, 0, -1)"""
+        import csv as _csv
+        with self._lock:
+            if self.conn is None:
+                return (0, 0, 0)
+            try:
+                with open(path, newline="", encoding="utf-8-sig") as f:
+                    reader = _csv.reader(f)
+                    if next(reader, None) != self.EXPORT_COLUMNS:
+                        return (0, 0, -1)
+                    read = inserted = skipped = 0
+                    min_day = max_day = None
+                    base = self.conn.total_changes
+                    for row in reader:
+                        if len(row) != 12:
+                            skipped += 1
+                            continue
+                        try:
+                            src, rid, app, model = row[0].strip(), row[1].strip(), row[2].strip(), row[3].strip()
+                            inp, out, cr, cc, rs = int(row[4]), int(row[5]), int(row[6]), int(row[7]), int(row[8])
+                            cost, epoch, rc = float(row[9]), int(row[10]), int(row[11])
+                            if not src or not rid:
+                                raise ValueError
+                        except ValueError:
+                            skipped += 1
+                            continue
+                        read += 1
+                        self.conn.execute("""
+                            INSERT OR IGNORE INTO usage_log
+                                (source, request_id, app_type, model, input_tokens, output_tokens,
+                                 cache_read_tokens, cache_creation_tokens, reasoning_tokens, total_cost_usd,
+                                 created_at, request_count)
+                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            (src, rid, app, model, inp, out, cr, cc, rs, cost, epoch, rc))
+                        day = datetime.fromtimestamp(epoch).strftime("%Y-%m-%d")
+                        min_day = day if min_day is None else min(min_day, day)
+                        max_day = day if max_day is None else max(max_day, day)
+                    inserted = self.conn.total_changes - base
+                    skipped += read - inserted
+                    self.conn.commit()
+            except sqlite3.Error as e:
+                print(f"导入失败: {e}")
+                return (0, 0, 0)
+
+        if min_day is not None:
+            # 窗口 [from_day, today)：from 回看一天防迟到行，to 多包一天覆盖导入尾日
+            margin = (datetime.strptime(min_day, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+            end = (datetime.strptime(max_day, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+            with self._lock:
+                self._rebuild_daily_agg_window(margin, end)
+        return (read, inserted, skipped)
+
     def backup(self, path):
         """VACUUM INTO 一键备份统计库（用量历史是长期资产）。
 

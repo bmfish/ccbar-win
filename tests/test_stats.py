@@ -265,6 +265,50 @@ class TestStatsStore(unittest.TestCase):
         self.assertEqual(tl[0][3], 360)
         self.assertAlmostEqual(tl[0][4], 0.5, places=4)
 
+    def test_export_import_idempotent(self):
+        """导出 → 全新库导入 → 重复导入零新增（幂等）"""
+        self._make_fixture_source()
+        self._insert_row("req-B", local_midnight(1) + 3600, 1000, 2000, cache_read=500, cache_create=100)
+        self._insert_row("req-C", local_midnight(3) + 3600, 10000, 20000)
+        self._rebuild()
+        self.store.sync_if_needed()
+
+        path = os.path.join(self.tmp, "export.csv")
+        self.assertEqual(self.store.export_csv(path), 2)
+
+        # 新库：同一源（不再同步），纯导入路径
+        imported_path = os.path.join(self.tmp, "imported.db")
+        StatsStore.store_path = staticmethod(lambda: imported_path)
+        other = StatsStore()
+        try:
+            other.rebuild([(CCSwitchAdapter(), True, self.source_path)])
+            r1 = other.import_csv(path)
+            self.assertEqual(r1, (2, 2, 0))
+            cnt, total = other.conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+cache_creation_tokens),0) "
+                "FROM usage_log").fetchone()
+            self.assertEqual((cnt, total), (2, 33600))
+            agg = other.conn.execute(
+                "SELECT COALESCE(SUM(input+output+cache_create+cache_read),0) FROM daily_agg").fetchone()[0]
+            self.assertEqual(agg, 33600, "导入后按窗口重建 daily_agg")
+
+            # 再导一遍：幂等
+            r2 = other.import_csv(path)
+            self.assertEqual(r2, (2, 0, 2))
+            cnt2, total2 = other.conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+cache_creation_tokens),0) "
+                "FROM usage_log").fetchone()
+            self.assertEqual((cnt2, total2), (2, 33600))
+
+            # 表头不符拒收
+            bad = os.path.join(self.tmp, "bad.csv")
+            with open(bad, "w", encoding="utf-8") as f:
+                f.write("a,b,c\n1,2,3\n")
+            self.assertEqual(other.import_csv(bad), (0, 0, -1))
+        finally:
+            other._close()
+            StatsStore.store_path = staticmethod(lambda: os.path.join(self.tmp, "ccbar.db"))
+
     def test_backup_creates_independent_copy(self):
         """VACUUM INTO 导出后可独立打开且数据一致；目标已存在必须失败"""
         self._make_fixture_source()
