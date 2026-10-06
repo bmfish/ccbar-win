@@ -11,6 +11,7 @@ ccbar 自建统计库（~/.ccbar/ccbar.db）为主连接：
 """
 import os
 import sqlite3
+import sys
 # Windows 控制台默认 cp1252，中文 print 会抛 UnicodeEncodeError（CI 实锤），统一 UTF-8
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
