@@ -2538,7 +2538,7 @@ class CcBarTray:
         # ============ 流水 ============
         f_tl = tab()
         cols = ("时间", "渠道", "模型", "Token", "费用")
-        tree = ttk.Treeview(f_tl, columns=cols, show="headings", height=20, style="Insights.Treeview")
+        tree = ttk.Treeview(f_tl, columns=cols, show="headings", height=19, style="Insights.Treeview")
         widths = (90, 90, 220, 110, 80)
         for c, w in zip(cols, widths):
             tree.heading(c, text=c)
@@ -2547,11 +2547,42 @@ class CcBarTray:
         tree.configure(yscrollcommand=vsb.set)
         vsb.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 8), pady=10)
         tree.pack(fill=tk.BOTH, expand=True, padx=(12, 0), pady=10)
-        for ts, model, source, token, cost in timeline[:500]:
-            t = datetime.fromtimestamp(ts)
-            tree.insert("", tk.END, values=(
-                t.strftime("%H:%M:%S"), store.source_display_name(source), model,
-                self.fmt_tokens(token), f"${cost:.2f}" if cost > 0 else "-"))
+
+        # 渠道/模型过滤
+        all_sources = sorted({store.source_display_name(r[2]) for r in timeline})
+        all_models = sorted({r[1] for r in timeline})
+        filter_bar = tk.Frame(f_tl, bg=Design.BACKGROUND)
+        filter_bar.pack(fill=tk.X, padx=12, pady=(10, 0))
+        tk.Label(filter_bar, text="筛选", fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
+                 font=Design.FONT_UI_SMALL).pack(side=tk.LEFT)
+        style.configure("Insights.TCombobox", fieldbackground=Design.CARD_FILL,
+                        background=Design.CARD_FILL, foreground=Design.TEXT_PRIMARY)
+        src_box = ttk.Combobox(filter_bar, values=["全部渠道"] + all_sources, state="readonly",
+                               width=14, style="Insights.TCombobox")
+        src_box.set("全部渠道")
+        src_box.pack(side=tk.RIGHT)
+        model_box = ttk.Combobox(filter_bar, values=["全部模型"] + all_models, state="readonly",
+                                 width=22, style="Insights.TCombobox")
+        model_box.set("全部模型")
+        model_box.pack(side=tk.RIGHT, padx=(0, 8))
+
+        def refill(*_):
+            tree.delete(*tree.get_children())
+            src_sel, model_sel = src_box.get(), model_box.get()
+            for ts, model, source, token, cost in timeline[:500]:
+                src_name = store.source_display_name(source)
+                if src_sel != "全部渠道" and src_name != src_sel:
+                    continue
+                if model_sel != "全部模型" and model != model_sel:
+                    continue
+                t = datetime.fromtimestamp(ts)
+                tree.insert("", tk.END, values=(
+                    t.strftime("%H:%M:%S"), src_name, model,
+                    self.fmt_tokens(token), f"${cost:.2f}" if cost > 0 else "-"))
+
+        src_box.bind("<<ComboboxSelected>>", refill)
+        model_box.bind("<<ComboboxSelected>>", refill)
+        refill()
 
         self._bring_to_front(root)
 
