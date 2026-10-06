@@ -414,6 +414,181 @@ class StatsStore:
         rows = self.query_all(sql, params)
         return rows[0] if rows else None
 
+    @staticmethod
+    def local_midnight(days_ago=0):
+        """本地时区 N 天前（0=今天）0 点的 epoch 秒"""
+        day = datetime.now() - timedelta(days=days_ago)
+        return int(day.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+
+    # ------------------------------------------------------------ 洞察中心查询
+    # 与 macOS 版同款口径：费用类走 usage_all（epoch 区间走索引），
+    # 历史 token 类优先 daily_agg，今日实时统一补查。
+
+    def query_cost(self, days):
+        """近 N 天（含今天）总费用（USD）"""
+        row = self.query_one("""
+            SELECT COALESCE(SUM(total_cost_usd), 0) FROM usage_all
+            WHERE created_at >= ? AND created_at < ?""",
+            (self.local_midnight(days), self.local_midnight(-1)))
+        return row[0] if row else 0.0
+
+    def query_cost_daily(self, days):
+        """近 N 天每日费用 [(date, cost)]，日期升序（可能含空洞）"""
+        rows = self.query_all("""
+            SELECT date(created_at, 'unixepoch', 'localtime'), COALESCE(SUM(total_cost_usd), 0)
+            FROM usage_all WHERE created_at >= ? AND created_at < ?
+            GROUP BY 1 ORDER BY 1""",
+            (self.local_midnight(days), self.local_midnight(-1)))
+        return [(r[0], r[1]) for r in rows] if rows else []
+
+    def query_cost_by_model(self, days, limit=8):
+        """近 N 天按模型费用排行 [(model, cost, token)]"""
+        rows = self.query_all("""
+            SELECT model, COALESCE(SUM(total_cost_usd), 0),
+                   COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens), 0)
+            FROM usage_all WHERE created_at >= ? AND created_at < ?
+            GROUP BY model ORDER BY 2 DESC LIMIT ?""",
+            (self.local_midnight(days), self.local_midnight(-1), limit))
+        return [(r[0], r[1], r[2]) for r in rows] if rows else []
+
+    def query_streak(self):
+        """连续使用天数（今天没用就从昨天起算）"""
+        rows = self.query_all("""
+            SELECT DISTINCT date FROM daily_agg
+            WHERE input + output + cache_create + cache_read > 0 ORDER BY date DESC LIMIT 400""")
+        if not rows:
+            return 0
+        dates = [r[0] for r in rows]
+        day = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        if dates[0] != day.strftime("%Y-%m-%d"):
+            day -= timedelta(days=1)
+        streak = 0
+        for d in dates:
+            if d == day.strftime("%Y-%m-%d"):
+                streak += 1
+                day -= timedelta(days=1)
+            elif d > day.strftime("%Y-%m-%d"):
+                continue  # 游离的未来日期，跳过不打断
+            else:
+                break
+        return streak
+
+    def query_weekly_delta(self):
+        """周环比：(本周含今日, 上一个 7 天)"""
+        def ds(n):
+            return (datetime.now() - timedelta(days=n)).strftime("%Y-%m-%d")
+
+        row = self.query_one("""SELECT
+            COALESCE(SUM(CASE WHEN date >= ? AND date <= ? THEN input+output+cache_create+cache_read END), 0),
+            COALESCE(SUM(CASE WHEN date >= ? AND date <= ? THEN input+output+cache_create+cache_read END), 0)
+            FROM daily_agg""", (ds(6), ds(1), ds(13), ds(7)))
+        this_week = row[0] if row else 0
+        today = self.query_one("""SELECT COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+cache_creation_tokens), 0)
+            FROM usage_all WHERE created_at >= ?""", (self.local_midnight(0),))
+        return (this_week + (today[0] if today else 0), row[1] if row else 0)
+
+    def query_peak_day(self, days):
+        """近 N 天单日峰值（今日实时也参与竞争）→ (date, token) | None"""
+        def ds(n):
+            return (datetime.now() - timedelta(days=n)).strftime("%Y-%m-%d")
+
+        rows = self.query_all("""
+            SELECT date, COALESCE(SUM(input+output+cache_create+cache_read), 0) AS t
+            FROM daily_agg WHERE date >= ? GROUP BY date ORDER BY t DESC LIMIT 1""", (ds(days),))
+        peak = (rows[0][0], rows[0][1]) if rows else None
+        today = self.query_one("""SELECT COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+cache_creation_tokens), 0)
+            FROM usage_all WHERE created_at >= ?""", (self.local_midnight(0),))
+        if today and today[0] > (peak[1] if peak else 0):
+            peak = (ds(0), today[0])
+        return peak
+
+    def query_top_model(self, days):
+        """近 N 天使用量最大的模型 → (model, token) | None"""
+        rows = self.query_all("""
+            SELECT model, COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+cache_creation_tokens), 0) AS t
+            FROM usage_all WHERE created_at >= ? AND created_at < ?
+            GROUP BY model ORDER BY t DESC LIMIT 1""",
+            (self.local_midnight(days), self.local_midnight(-1)))
+        return (rows[0][0], rows[0][1]) if rows else None
+
+    def query_channel_daily(self, days):
+        """近 N 天渠道每日 token（daily_agg 自带 source 维度），今日实时按源补一行"""
+        rows = self.query_all("""
+            SELECT date, source, COALESCE(SUM(input+output+cache_create+cache_read), 0)
+            FROM daily_agg WHERE date >= ? GROUP BY date, source ORDER BY date""",
+            ((datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d"),))
+        result = [(r[0], r[1], r[2]) for r in rows] if rows else []
+        today = self.query_one("""
+            SELECT source, COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+cache_creation_tokens), 0)
+            FROM usage_all WHERE created_at >= ? AND created_at < ? GROUP BY source""",
+            (self.local_midnight(0), self.local_midnight(-1)))
+        if today and today[1] > 0:
+            result.append((datetime.now().strftime("%Y-%m-%d"), today[0], today[1]))
+        return result
+
+    def query_app_daily(self, days):
+        """近 N 天应用（app_type）每日 token，今日实时细分补一行"""
+        rows = self.query_all("""
+            SELECT date(created_at, 'unixepoch', 'localtime'),
+                   COALESCE(NULLIF(app_type, ''), 'unknown'),
+                   COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+cache_creation_tokens), 0)
+            FROM usage_log WHERE created_at >= ? AND created_at < ?
+            GROUP BY 1, 2""",
+            (self.local_midnight(days), self.local_midnight(-1)))
+        result = [(r[0], r[1], r[2]) for r in rows] if rows else []
+        today = self.query_all("""
+            SELECT COALESCE(NULLIF(app_type, ''), 'unknown') AS app,
+                   COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+cache_creation_tokens), 0) AS t
+            FROM usage_all WHERE created_at >= ? AND created_at < ?
+            GROUP BY app HAVING t > 0""",
+            (self.local_midnight(0), self.local_midnight(-1)))
+        if today:
+            t = datetime.now().strftime("%Y-%m-%d")
+            result += [(t, r[0], r[1]) for r in today]
+        return result
+
+    def query_composition_daily(self, days):
+        """近 N 天每日 token 构成（输入/输出/缓存读/缓存创建），含今日，日期升序"""
+        rows = self.query_all("""
+            SELECT date, COALESCE(SUM(input),0), COALESCE(SUM(output),0),
+                   COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_create),0)
+            FROM daily_agg WHERE date >= ? GROUP BY date ORDER BY date""",
+            ((datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d"),))
+        result = [(r[0], r[1], r[2], r[3], r[4]) for r in rows] if rows else []
+        today = self.query_one("""
+            SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+                   COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_creation_tokens),0)
+            FROM usage_all WHERE created_at >= ?""", (self.local_midnight(0),))
+        if today and sum(today) > 0:
+            result.append((datetime.now().strftime("%Y-%m-%d"), today[0], today[1], today[2], today[3]))
+        return result
+
+    def query_month_progress(self):
+        """本月进度：(月初至昨日+今日实时, 已过天数, 当月总天数)"""
+        now = datetime.now()
+        first = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        next_month = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
+        last_day = next_month - timedelta(days=1)
+        row = self.query_one("""
+            SELECT COALESCE(SUM(input+output+cache_create+cache_read), 0)
+            FROM daily_agg WHERE date >= ? AND date <= ?""",
+            (first.strftime("%Y-%m-%d"), last_day.strftime("%Y-%m-%d")))
+        today = self.query_one("""SELECT COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+cache_creation_tokens), 0)
+            FROM usage_all WHERE created_at >= ?""", (self.local_midnight(0),))
+        mtd = (row[0] if row else 0) + (today[0] if today else 0)
+        import calendar
+        return (mtd, max(now.day, 1), calendar.monthrange(now.year, now.month)[1])
+
+    def query_today_timeline(self, limit=500):
+        """今日请求流水（最新在前）：(时间, 模型, 渠道, token, 费用)"""
+        rows = self.query_all("""
+            SELECT created_at, model, source,
+                   COALESCE(input_tokens+output_tokens+cache_read_tokens+cache_creation_tokens, 0),
+                   COALESCE(total_cost_usd, 0)
+            FROM usage_all WHERE created_at >= ?
+            ORDER BY created_at DESC LIMIT ?""", (self.local_midnight(0), limit))
+        return [(r[0], r[1] or "-", r[2], r[3], r[4]) for r in rows] if rows else []
+
     def backup(self, path):
         """VACUUM INTO 一键备份统计库（用量历史是长期资产）。
 

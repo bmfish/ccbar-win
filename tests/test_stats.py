@@ -197,6 +197,74 @@ class TestStatsStore(unittest.TestCase):
 
     # ------------------------------------------------------------ 备份与校验
 
+    def test_insight_queries(self):
+        """洞察中心查询：费用/连续天数/环比/峰值/最大模型/渠道/应用/构成/月度/流水"""
+        self._make_fixture_source()
+        self._insert_row("req-B", local_midnight(1) + 3600, 1000, 2000, cache_read=500, cache_create=100)
+        self._insert_row("req-C", local_midnight(3) + 3600, 10000, 20000)
+        self._rebuild()
+        self.store.sync_if_needed()
+        self._insert_row("req-A", max(local_midnight(0) + 60, int(datetime.now().timestamp()) - 60),
+                         100, 200, cache_read=50, cache_create=10)
+        self.store.sync_if_needed()
+
+        # 费用（每行 $0.5，共 3 行）
+        self.assertAlmostEqual(self.store.query_cost(30), 1.5, places=4)
+        self.assertAlmostEqual(self.store.query_cost(0), 0.5, places=4)
+        cost_daily = self.store.query_cost_daily(30)
+        self.assertEqual(len(cost_daily), 3)
+        self.assertAlmostEqual(sum(c for _, c in cost_daily), 1.5, places=4)
+        models = self.store.query_cost_by_model(30)
+        self.assertEqual(len(models), 1)
+        self.assertAlmostEqual(models[0][1], 1.5, places=4)
+        self.assertEqual(models[0][2], 33960)
+
+        # 连续天数：聚合只有昨天与 3 天前（断档）→ 1
+        self.assertEqual(self.store.query_streak(), 1)
+
+        # 周环比：本周（含今日）= 33960，上周 0
+        this_week, last_week = self.store.query_weekly_delta()
+        self.assertEqual(this_week, 33960)
+        self.assertEqual(last_week, 0)
+
+        # 峰值日 = 3 天前 30000
+        peak = self.store.query_peak_day(30)
+        self.assertEqual(peak[1], 30000)
+        self.assertEqual(peak[0], (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d"))
+
+        # 使用量最大的模型
+        top = self.store.query_top_model(30)
+        self.assertEqual(top, ("test-model", 33960))
+
+        # 渠道每日：2 个历史日 + 今日 1 行
+        channels = self.store.query_channel_daily(30)
+        self.assertEqual(len(channels), 3)
+        self.assertTrue(all(r[1] == "cc-switch" for r in channels))
+
+        # 应用每日（fixture 全是 claude）
+        apps = self.store.query_app_daily(30)
+        self.assertEqual(len(apps), 3)
+        self.assertTrue(all(r[1] == "claude" for r in apps))
+
+        # 构成每日：昨天的四项
+        comp = self.store.query_composition_daily(30)
+        self.assertEqual(len(comp), 3)
+        yst = next(r for r in comp
+                   if r[0] == (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"))
+        self.assertEqual(yst[1:], (1000, 2000, 500, 100))
+
+        # 月度进度：至少含今日实时，口径合法
+        mtd, elapsed, dim = self.store.query_month_progress()
+        self.assertGreaterEqual(mtd, 360)
+        self.assertGreaterEqual(elapsed, 1)
+        self.assertTrue(28 <= dim <= 31)
+
+        # 今日流水：1 条
+        tl = self.store.query_today_timeline()
+        self.assertEqual(len(tl), 1)
+        self.assertEqual(tl[0][3], 360)
+        self.assertAlmostEqual(tl[0][4], 0.5, places=4)
+
     def test_backup_creates_independent_copy(self):
         """VACUUM INTO 导出后可独立打开且数据一致；目标已存在必须失败"""
         self._make_fixture_source()
