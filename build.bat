@@ -6,7 +6,7 @@ pip install -r requirements.txt
 pip install pyinstaller
 
 REM 打包
-pyinstaller --onefile --noconsole --name ccBar main.py
+pyinstaller --onefile --noconsole --name ccBar --icon ccBar.ico --add-data "ccBar.ico;." main.py
 
 echo Done! Output: dist/ccBar.exe
 pause

@@ -42,8 +42,10 @@ python main.py
 
 ```bash
 pip install pyinstaller
-pyinstaller ccBar.spec
+pyinstaller --onefile --noconsole --name ccBar --icon ccBar.ico --add-data "ccBar.ico;." main.py
 ```
+
+或直接双击 `build.bat`（Windows）。产物在 `dist/ccBar.exe`。
 
 ## 功能
 
