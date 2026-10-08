@@ -23,6 +23,9 @@ import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import trae_sync
+from trae_sync import TraeAuth, TraeResult
+
 DAILY_AGG_DDL = """
 CREATE TABLE IF NOT EXISTS daily_agg (
     date TEXT NOT NULL,
@@ -222,6 +225,15 @@ class StatsStore:
         self.attached = []      # 已 ATTACH 且表齐全的适配器
         self._view_day = ""     # usage_all 视图构建日期（跨零点重建用）
         self._lock = threading.Lock()
+        # Trae 是 HTTP 源（不走 ATTACH）：rebuild 时把启用状态与凭据快照进来
+        self.trae_enabled = False
+        self.trae_sessionid = ""
+        self._last_trae_sync_at = 0.0   # 上次 Trae 同步时刻（in-memory，重启无妨）
+        # 每源连接诊断（设置页展示）：已连接 / 未启用 / 具体失败原因
+        self.source_status = {}
+        # 是否有任一可用数据源（SQLite ATTACH 或 Trae HTTP）。
+        # 查询侧早退判据：Trae-only 安装也必须能出数（否则整个界面空白）
+        self.has_active_source = False
 
     @staticmethod
     def store_path():
@@ -231,13 +243,17 @@ class StatsStore:
 
     # ------------------------------------------------------------ 连接管理
 
-    def rebuild(self, configs):
+    def rebuild(self, configs, trae_enabled=False, trae_sessionid=""):
         """（重）建连接并 ATTACH 各启用源。
 
         configs: [(adapter, enabled, path), ...]
+        trae_enabled / trae_sessionid: Trae 是 HTTP 源不走 ATTACH，只登记启用状态与
+        passport 凭据。Trae-only 安装（无任何 SQLite 源）同样要能查数。
         """
         with self._lock:
             self._close()
+            self.trae_enabled = bool(trae_enabled)
+            self.trae_sessionid = (trae_sessionid or "").strip()
             try:
                 # uri=True 使 ATTACH 支持 file:...?mode=ro 只读挂载
                 self.conn = sqlite3.connect(self.store_path(), uri=True,
@@ -289,16 +305,34 @@ class StatsStore:
             self.attached = []
             for adapter, enabled, path in configs:
                 if not enabled:
+                    self.source_status[adapter.id] = "未启用"
                     continue
-                if self._attach(adapter, path):
+                error = self._attach(adapter, path)
+                if error is None:
                     self.attached.append(adapter)
+                    self.source_status[adapter.id] = "已连接"
+                else:
+                    self.source_status[adapter.id] = error
+            # 未出现在 configs 里的注册表源一律视为未启用（设置页要逐源显示状态）
+            for adapter in SOURCE_REGISTRY:
+                self.source_status.setdefault(adapter.id, "未启用")
+            # Trae（HTTP 源）：启用但没填 sessionid 时不能算"可用"，也不能算失败
+            if not self.trae_enabled:
+                self.source_status["trae"] = "未启用"
+            elif not self.trae_sessionid:
+                self.source_status["trae"] = "未配置登录"
+            else:
+                self.source_status["trae"] = "连接中…"
+
+            self.has_active_source = bool(self.attached) or self.trae_enabled
 
             self._rebuild_view()
 
     def _attach(self, adapter, path):
+        """ATTACH 一个源库并校验必需表：成功返回 None，失败返回人话错误（设置页展示）"""
         if not os.path.isfile(path):
             print(f"数据源 {adapter.name} 文件不存在，跳过: {path}")
-            return False
+            return "文件不存在"
         # 优先 mode=ro；源库是 WAL 模式且 -wal 文件不在（源应用已关闭）时
         # 只读打开会失败，此时回退普通 ATTACH——本应用保证绝不写源库。
         uri = _file_uri(path)
@@ -309,7 +343,7 @@ class StatsStore:
                 self.conn.execute(f"ATTACH DATABASE '{uri}' AS {adapter.alias}")
             except sqlite3.Error as e:
                 print(f"数据源 {adapter.name} ATTACH 失败，跳过: {e}")
-                return False
+                return "ATTACH 失败（库可能被占用或损坏）"
 
         placeholders = ",".join("?" * len(adapter.required_tables))
         found = self.conn.execute(
@@ -319,8 +353,8 @@ class StatsStore:
         if found < len(adapter.required_tables):
             print(f"数据源 {adapter.name} 缺少必需表，跳过")
             self.conn.execute(f"DETACH DATABASE {adapter.alias}")
-            return False
-        return True
+            return "缺少必需表"
+        return None
 
     def _rebuild_view(self):
         """usage_all = 自家历史 + 各源今日实时。设置变化（启停/换路径）后重建。
@@ -356,6 +390,10 @@ class StatsStore:
                 pass
         self.conn = None
         self.attached = []
+        self.source_status = {}
+        self.has_active_source = False
+        self.trae_enabled = False
+        self.trae_sessionid = ""
 
     # ------------------------------------------------------------ 懒惰补账
 
@@ -366,7 +404,7 @@ class StatsStore:
         INSERT OR IGNORE 幂等，不会重复计数。
         """
         with self._lock:
-            if self.conn is None or not self.attached:
+            if self.conn is None or not self.has_active_source:
                 return
 
             self._refresh_view_for_new_day()
@@ -407,6 +445,8 @@ class StatsStore:
 
         先 DELETE 再 INSERT：明细行消失（导入去重、源库重算）时 daily_agg 的自愈
         依赖窗口整段重算，只靠 OR REPLACE 会把已无明细的 (date, source) 陈旧行留下。
+        这里就地提交（自成一体的维护步骤）：留着未提交的写事务会让后续
+        VACUUM INTO（手动/自动备份）报 "cannot VACUUM from within a transaction"。
         """
         self.conn.execute(
             "DELETE FROM daily_agg WHERE date >= ? AND date < ?", (from_day, today))
@@ -421,13 +461,200 @@ class StatsStore:
               AND date(created_at, 'unixepoch', 'localtime') < ?
             GROUP BY 1, 2
         """, (from_day, today))
+        self.conn.commit()
+
+    def _commit_pending(self):
+        """提交连接上残留的写事务（VACUUM INTO 不允许在事务内执行）"""
+        if self.conn is None:
+            return
+        try:
+            if self.conn.in_transaction:
+                self.conn.commit()
+        except sqlite3.Error:
+            pass
+
+    # ------------------------------------------------------------ Trae（HTTP 源）同步
+    # 口径与 macOS 版 StatsStore.syncTraeIfNeeded / upsertTraeRows / traeEntSummary 一致：
+    # 网络在锁外跑（最长 ~15s×3 次），入库是短临界区；失败/过期也占掉节流窗口。
+
+    @staticmethod
+    def _now_epoch(now):
+        """now（None=此刻 / datetime / epoch 数字）→ epoch 秒"""
+        if now is None:
+            return datetime.now().timestamp()
+        if isinstance(now, datetime):
+            return now.timestamp()
+        return float(now)
+
+    def _meta_get(self, key):
+        """读 meta 值（调用方持锁；缺失/无连接返回 ""）"""
+        if self.conn is None:
+            return ""
+        row = self.conn.execute(
+            "SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return row[0] if row and row[0] is not None else ""
+
+    def _meta_set(self, key, value):
+        """写 meta（调用方持锁；commit 由调用方统一收口）"""
+        if self.conn is None:
+            return
+        self.conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+            (key, str(value)))
+
+    def _meta_float(self, key, default=0.0):
+        try:
+            return float(self._meta_get(key))
+        except (TypeError, ValueError):
+            return default
+
+    def sync_trae_if_needed(self, now=None, interactive=False):
+        """按需同步 Trae 用量（HTTP 源）。返回 TraeResult 或 None（被守卫拦下）。
+
+        interactive=True 是用户点开弹窗的主动刷新，间隔更短（60s vs 900s）。
+        夜间静默（0–9 点本地时间）直接返回且**不占**节流窗口：凌晨会话由 9 点后
+        第一次同步的"水位 - 2 天"窗口覆盖，不丢数。
+        """
+        now_epoch = self._now_epoch(now)
+        now_dt = datetime.fromtimestamp(now_epoch)
+
+        # ---- 守卫 1~5（锁内取快照；网络绝不在锁内跑）----
+        with self._lock:
+            if self.conn is None:
+                return None
+            if not self.trae_enabled:
+                self.source_status["trae"] = "未启用"
+                return None
+            if trae_sync.is_night_silent(now_dt):
+                return None   # 0–9 点静默，不消耗节流
+            if not self.trae_sessionid:
+                self.source_status["trae"] = "未配置登录"
+                return None   # 没有凭据就不发 HTTP
+            interval = (trae_sync.INTERACTIVE_MIN_INTERVAL if interactive
+                        else trae_sync.BG_MIN_INTERVAL)
+            if now_epoch - self._last_trae_sync_at < interval:
+                return None   # 节流窗口内
+
+            # ---- 拉取窗口：水位 -2 天回看（跨零点迟到会话 + 会话跨天推进），首次 90 天全量
+            water = self._meta_get("trae_synced_day")
+            from_epoch = self.local_midnight(trae_sync.FIRST_FETCH_DAYS, now=now_dt)
+            if water:
+                try:
+                    back = (datetime.strptime(water, "%Y-%m-%d")
+                            - timedelta(days=trae_sync.PAGE_LOOKBACK_DAYS))
+                    from_epoch = self.local_midnight(0, now=back)
+                except ValueError:
+                    pass   # 水位坏了当首次全量
+            to_epoch = int(now_epoch)
+            # 积分账单（只喂设置页）按小时节流，不必跟着每次同步拉
+            fetch_ent = now_epoch - self._meta_float("trae_ent_at") >= trae_sync.ENT_MIN_INTERVAL
+            auth = TraeAuth.from_json(self._meta_get("trae_auth")) or TraeAuth()
+
+        # ---- 网络（锁外）----
+        try:
+            result = trae_sync.run(self.trae_sessionid, auth=auth,
+                                   from_epoch=from_epoch, to_epoch=to_epoch,
+                                   fetch_ent=fetch_ent, now=now_epoch)
+        except Exception as e:   # 注入的 transport 等异常也不许把界面打挂
+            result = TraeResult("failed", message=str(e))
+
+        # ---- 入库 + 状态（锁内）。节流时间戳在所有出口都推进：
+        # 失败/过期也占掉窗口，防弹窗反复开关把接口打爆（下次后台周期自然重试）
+        with self._lock:
+            self._last_trae_sync_at = now_epoch
+            if self.conn is None:
+                return result
+            # 换签结果（run 就地更新了 auth）必须持久化，重启不丢
+            self._meta_set("trae_auth", auth.to_json())
+            if result.status == "ok":
+                self.upsert_trae_rows(result.rows)
+                # 今日行由 usage_all 实时可见，daily_agg 只结算完整日（< 今天）
+                today = now_dt.strftime("%Y-%m-%d")
+                self._rebuild_daily_agg_window(
+                    datetime.fromtimestamp(from_epoch).strftime("%Y-%m-%d"), today)
+                self._meta_set("trae_synced_day", today)
+                if result.consumed is not None and result.total is not None:
+                    self._meta_set("trae_ent", "%s|%s" % (result.consumed, result.total))
+                    self._meta_set("trae_ent_at", int(now_epoch))
+                self.source_status["trae"] = "已连接"
+            elif result.status == "auth_expired":
+                self.source_status["trae"] = "登录已过期，请重新提供 sessionid"
+            elif result.status == "not_configured":
+                self.source_status["trae"] = "未配置登录"
+            else:
+                print(f"Trae 同步失败: {result.message}")
+                self.source_status["trae"] = "同步失败：" + (result.message or "")
+            self.conn.commit()
+        return result
+
+    def upsert_trae_rows(self, rows):
+        """Trae 明细入库：会话级 UPSERT（同一会话用量随对话推进增长，覆盖旧值）。
+
+        与其他源的 INSERT OR IGNORE 不同——Trae 行是"会话聚合快照"而非不可变流水；
+        request_count 是会话数口径，更新时不动。cache_write → cache_creation_tokens。
+        调用方持锁（内部不再加锁，threading.Lock 非重入）；一个事务提交。
+        """
+        if self.conn is None or not rows:
+            return 0
+        sql = """
+        INSERT INTO usage_log
+            (source, request_id, app_type, model, input_tokens, output_tokens,
+             cache_read_tokens, cache_creation_tokens, reasoning_tokens,
+             total_cost_usd, credits, created_at, request_count)
+        VALUES ('trae', ?, 'trae', ?, ?, ?, ?, ?, 0, ?, ?, ?, 1)
+        ON CONFLICT(source, request_id) DO UPDATE SET
+            model=excluded.model,
+            input_tokens=excluded.input_tokens,
+            output_tokens=excluded.output_tokens,
+            cache_read_tokens=excluded.cache_read_tokens,
+            cache_creation_tokens=excluded.cache_creation_tokens,
+            total_cost_usd=excluded.total_cost_usd,
+            credits=excluded.credits,
+            created_at=excluded.created_at
+        """
+        written = 0
+        try:
+            try:
+                self.conn.execute("BEGIN IMMEDIATE")
+            except sqlite3.Error:
+                pass   # Python 驱动可能已隐式开启事务，直接复用
+            for row in rows:
+                self.conn.execute(sql, (row.request_id, row.model, row.input, row.output,
+                                        row.cache_read, row.cache_write, row.cost_usd,
+                                        row.credits, row.epoch))
+                written += 1
+            self.conn.commit()
+        except sqlite3.Error as e:
+            print(f"Trae 行入库失败: {e}")
+            try:
+                self.conn.rollback()
+            except sqlite3.Error:
+                pass
+            return 0
+        return written
+
+    def trae_ent_summary(self):
+        """Trae 官方积分账单 meta "consumed|total" → (consumed, total)；缺失/坏数据 None"""
+        with self._lock:
+            raw = self._meta_get("trae_ent")
+        parts = (raw or "").split("|")
+        if len(parts) != 2:
+            return None
+        try:
+            return (float(parts[0]), float(parts[1]))
+        except ValueError:
+            return None
 
     # ------------------------------------------------------------ 查询
 
     def query_all(self, sql, params=()):
-        """对 usage_all 执行查询，返回全部行；无可用数据源时返回 None"""
+        """对 usage_all 执行查询，返回全部行；无可用数据源时返回 None
+
+        Trae 是 HTTP 源，没有 ATTACH：判据用 has_active_source 而非 attached，
+        否则 Trae-only 安装会被判成"无数据源"、整个界面空白。
+        """
         with self._lock:
-            if self.conn is None or not self.attached:
+            if self.conn is None or not self.has_active_source:
                 return None
             try:
                 return self.conn.execute(sql, params).fetchall()
@@ -440,9 +667,19 @@ class StatsStore:
         return rows[0] if rows else None
 
     @staticmethod
-    def local_midnight(days_ago=0):
-        """本地时区 N 天前（0=今天）0 点的 epoch 秒"""
-        day = datetime.now() - timedelta(days=days_ago)
+    def local_midnight(days_ago=0, now=None):
+        """本地时区 N 天前（0=今天）0 点的 epoch 秒
+
+        now 可注入（None=此刻 / datetime / epoch 秒）：Trae 拉取窗口要按注入时刻算，
+        测试才能脱网断言窗口边界。
+        """
+        if now is None:
+            day = datetime.now()
+        elif isinstance(now, datetime):
+            day = now
+        else:
+            day = datetime.fromtimestamp(float(now))
+        day = day - timedelta(days=days_ago)
         return int(day.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
 
     # ------------------------------------------------------------ 洞察中心查询
@@ -1025,11 +1262,14 @@ class StatsStore:
         """VACUUM INTO 一键备份统计库（用量历史是长期资产）。
 
         与 macOS 版语义一致：目标必须是未存在的空路径，成功返回 True。
+        备份前防御性提交残留写事务：用户按"备份"不该因维护工作留下的
+        未提交事务而失败（VACUUM 不允许在事务内执行）。
         """
         with self._lock:
             if self.conn is None:
                 return False
             try:
+                self._commit_pending()
                 self.conn.execute("VACUUM INTO ?", (path,))
                 return True
             except sqlite3.Error as e:
@@ -1067,6 +1307,7 @@ class StatsStore:
             if self.conn is None:
                 return None
             try:
+                self._commit_pending()   # 残留写事务会让 VACUUM INTO 失败
                 self.conn.execute("VACUUM INTO ?", (target,))
             except sqlite3.Error as e:
                 print(f"自动备份失败: {e}")

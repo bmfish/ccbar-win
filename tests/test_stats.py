@@ -10,11 +10,31 @@ import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import trae_sync  # noqa: E402
 from stats_store import (StatsStore, CCSwitchAdapter, ZCodeAdapter, DAILY_AGG_DDL,
                          USAGE_LOG_DDL, _local_epoch, validate_db)  # noqa: E402
+from trae_sync import TraeAuth, TraeResult, TraeRow  # noqa: E402
+
+
+class _FakeTraeRunner:
+    """假的 trae_sync.run：记录调用参数、按脚本返回 TraeResult，测试全程不碰网络"""
+
+    def __init__(self, results=None):
+        self.calls = []
+        self.results = list(results or [])
+
+    def __call__(self, sessionid, auth=None, from_epoch=0, to_epoch=None,
+                 fetch_ent=False, post=None, now=None):
+        self.calls.append({"sessionid": sessionid, "auth": auth,
+                           "from_epoch": from_epoch, "to_epoch": to_epoch,
+                           "fetch_ent": fetch_ent, "now": now})
+        if self.results:
+            return self.results.pop(0)
+        return TraeResult("ok", rows=[])
 
 
 def local_midnight(days_ago=0):
@@ -824,3 +844,404 @@ class TestStatsStore(unittest.TestCase):
         bare_dir = os.path.join(self.tmp, "backups-bare")
         self.assertIsNone(StatsStore().auto_backup(bare_dir))
         self.assertFalse(os.path.exists(bare_dir), "无连接不该创建目录")
+
+    # ------------------------------------------------------------ 批次 3a：Trae HTTP 源
+
+    def _trae_store(self, sessionid="sid-1", enabled=True):
+        """Trae-only 安装：不 ATTACH 任何 SQLite 源"""
+        self.store.rebuild([], trae_enabled=enabled, trae_sessionid=sessionid)
+        return self.store
+
+    @staticmethod
+    def _at(hour=10, minute=0, day_offset=0):
+        """今天（或偏移 N 天）的本地整点时刻；用于注入 now，脱网断言节流/窗口"""
+        d = (datetime.now() + timedelta(days=day_offset)).replace(
+            hour=hour, minute=minute, second=0, microsecond=0)
+        return d
+
+    def test_trae_only_install_serves_queries(self):
+        """Trae-only（无 SQLite 源）：查询不得判 None，逐源状态可见"""
+        self.store.rebuild([], trae_enabled=True, trae_sessionid="sid-1")
+        self.assertEqual(self.store.attached, [])
+        self.assertTrue(self.store.has_active_source)
+        self.assertEqual(self.store.source_status["trae"], "连接中…")
+        self.assertEqual(self.store.source_status["ccswitch"], "未启用")
+        self.assertEqual(self.store.source_status["zcode"], "未启用")
+
+        # 视图可查（返回 [] 而不是 None），聚合查询出 0 而不是把界面打空
+        self.assertEqual(self.store.query_all("SELECT * FROM usage_all"), [])
+        self.assertEqual(self.store.query_one(
+            "SELECT COALESCE(SUM(credits), 0) FROM usage_all")[0], 0)
+        self.assertEqual(self.store.query_today_credits(), 0.0)
+        self.store.sync_if_needed()   # Trae-only 下也必须能跑（内部 attached 为空）
+
+        # 关掉 Trae 且无任何源 → 回到"无数据源"
+        self.store.rebuild([], trae_enabled=False)
+        self.assertFalse(self.store.has_active_source)
+        self.assertEqual(self.store.source_status["trae"], "未启用")
+        self.assertIsNone(self.store.query_all("SELECT * FROM usage_all"))
+
+        # 未 rebuild（无连接）也必须是 False
+        self.assertFalse(StatsStore().has_active_source)
+
+    def test_trae_upsert_snapshot_and_idempotent(self):
+        """会话快照 UPSERT：首插、生长覆盖、request_count 不动、重复同步幂等"""
+        self._trae_store()
+        epoch = int(self._at().timestamp())
+        row = TraeRow("sess-1", "claude-sonnet-4", 100, 200, 30, 40, 0.5, 2.5, epoch)
+        self.assertEqual(self.store.upsert_trae_rows([row]), 1)
+        self.assertEqual(self.store.conn.execute(
+            "SELECT source, app_type, model, input_tokens, output_tokens, cache_read_tokens,"
+            " cache_creation_tokens, reasoning_tokens, total_cost_usd, credits, created_at,"
+            " request_count FROM usage_log").fetchall(),
+            [("trae", "trae", "claude-sonnet-4", 100, 200, 30, 40, 0, 0.5, 2.5, epoch, 1)],
+            "cache_write 进 cache_creation_tokens，request_count 固定 1")
+
+        # 会话随对话推进：同一 request_id 覆盖旧值，不新增行；request_count 绝不改写
+        self.store.conn.execute("UPDATE usage_log SET request_count = 7")
+        self.store.conn.commit()
+        grown = TraeRow("sess-1", "gpt-5", 500, 600, 70, 80, 1.25, 9.5, epoch + 60)
+        self.assertEqual(self.store.upsert_trae_rows([grown]), 1)
+        self.assertEqual(self.store.conn.execute(
+            "SELECT model, input_tokens, output_tokens, cache_read_tokens,"
+            " cache_creation_tokens, total_cost_usd, credits, created_at, request_count"
+            " FROM usage_log").fetchall(),
+            [("gpt-5", 500, 600, 70, 80, 1.25, 9.5, epoch + 60, 7)])
+        self.assertEqual(self.store.conn.execute(
+            "SELECT COUNT(*) FROM usage_log").fetchone()[0], 1, "同一会话只有一行")
+
+        # 再同步一遍（同数据）：幂等
+        self.store.upsert_trae_rows([grown])
+        self.assertEqual(self.store.conn.execute(
+            "SELECT COUNT(*) FROM usage_log").fetchone()[0], 1)
+        self.assertEqual(self.store.upsert_trae_rows([]), 0, "空列表不写库")
+
+    def test_trae_credits_visible_in_queries(self):
+        """积分/费用查询必须把 Trae 行算进去（今日实时走 usage_all）"""
+        self._trae_store()
+        today_e = int(self._at().timestamp()) - 60
+        yday_e = int(self._at(hour=9, day_offset=-1).timestamp())
+        self.store.upsert_trae_rows([
+            TraeRow("s-today", "m-trae", 10, 20, 0, 0, 0.1, 3.5, today_e),
+            TraeRow("s-yday", "m-trae", 30, 40, 0, 0, 0.2, 1.5, yday_e),
+        ])
+
+        self.assertEqual(self.store.query_today_credits(), 3.5)
+        self.assertEqual(self.store.query_credits_sum(0), 3.5)
+        self.assertEqual(self.store.query_credits_sum(7), 5.0)
+        self.assertEqual(self.store.query_credits_daily(7), [
+            ((datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"), 1.5),
+            (datetime.now().strftime("%Y-%m-%d"), 3.5)])
+        self.assertAlmostEqual(self.store.query_cost(1), 0.3, places=6)
+        self.assertEqual(self.store.query_source_breakdown(), [("trae", 1, 30)])
+        self.assertEqual(self.store.source_display_name("trae"), "Trae")
+
+    def test_trae_today_visible_but_not_in_daily_agg(self):
+        """今日 Trae 行走 usage_all 实时可见，绝不进 daily_agg（只结算完整日）"""
+        self._trae_store()
+        t0 = self._at(hour=10)
+        yday = t0 - timedelta(days=1)
+        fake = _FakeTraeRunner([TraeResult("ok", rows=[
+            TraeRow("s-today", "m", 10, 20, 0, 0, 0.0, 1.0, int(t0.timestamp()) - 60),
+            TraeRow("s-yday", "m", 100, 200, 0, 0, 0.0, 2.0, int(yday.timestamp()) + 3600),
+        ])])
+        with mock.patch.object(trae_sync, "run", fake):
+            result = self.store.sync_trae_if_needed(now=t0)
+        self.assertTrue(result.is_ok)
+
+        self.assertEqual(self.store.query_one(
+            "SELECT COUNT(*) FROM usage_all WHERE source='trae'")[0], 2,
+            "两条都在 usage_all")
+        self.assertEqual(self.store.conn.execute(
+            "SELECT date, reqs, input, output FROM daily_agg WHERE source='trae'").fetchall(),
+            [(yday.strftime("%Y-%m-%d"), 1, 100, 200)], "daily_agg 只含昨天")
+        self.assertEqual(self.store.query_one(
+            "SELECT COALESCE(SUM(input_tokens + output_tokens), 0) FROM usage_all "
+            "WHERE source='trae' AND created_at >= ?", (StatsStore.local_midnight(0),))[0],
+            30, "今日实时 token 只有今天那条")
+        self.assertEqual(self.store.query_today_credits(), 1.0)
+
+    def test_trae_night_silent_no_http(self):
+        """0–9 点静默：不发 HTTP，也不消耗节流窗口"""
+        self._trae_store()
+        fake = _FakeTraeRunner()
+        night = self._at(hour=3)
+        with mock.patch.object(trae_sync, "run", fake):
+            self.assertIsNone(self.store.sync_trae_if_needed(now=night))
+        self.assertEqual(fake.calls, [], "夜间不得发请求")
+        self.assertEqual(self.store._last_trae_sync_at, 0.0, "静默不占节流窗口")
+
+        with mock.patch.object(trae_sync, "run", fake):
+            self.assertIsNotNone(self.store.sync_trae_if_needed(now=self._at(hour=9)))
+        self.assertEqual(len(fake.calls), 1, "9 点整起恢复同步")
+
+    def test_trae_throttle_background_and_interactive(self):
+        """后台 900s / 交互式 60s 节流（失败也占窗口，见下个用例）"""
+        self._trae_store()
+        fake = _FakeTraeRunner()
+        t0 = self._at(hour=10)
+        with mock.patch.object(trae_sync, "run", fake):
+            self.assertIsNotNone(self.store.sync_trae_if_needed(now=t0))
+            self.store.sync_trae_if_needed(now=t0 + timedelta(seconds=899))
+            self.assertEqual(len(fake.calls), 1, "900s 内不再请求")
+            self.store.sync_trae_if_needed(now=t0 + timedelta(seconds=900))
+            self.assertEqual(len(fake.calls), 2, "满 900s 放行")
+
+            self.store.sync_trae_if_needed(now=t0 + timedelta(seconds=959), interactive=True)
+            self.assertEqual(len(fake.calls), 2, "交互式也要满 60s")
+            self.store.sync_trae_if_needed(now=t0 + timedelta(seconds=960), interactive=True)
+            self.assertEqual(len(fake.calls), 3)
+            self.store.sync_trae_if_needed(now=t0 + timedelta(seconds=1860))
+            self.assertEqual(len(fake.calls), 4, "交互式刷新后后台按新时间戳算")
+
+    def test_trae_failure_advances_throttle_and_persists_auth(self):
+        """失败/过期也推进节流；换签结果落 meta 并在下次同步被复用"""
+        self._trae_store(sessionid="old-sid")
+        t0 = self._at(hour=10)
+        calls = []
+
+        def failing(sessionid, auth=None, from_epoch=0, to_epoch=None,
+                    fetch_ent=False, post=None, now=None):
+            calls.append({"sessionid": sessionid, "auth": auth, "now": now})
+            auth.cloudide_session = "new-session"   # 模拟换签就地更新
+            auth.jwt = "a.b.c"
+            auth.jwt_exp = int(t0.timestamp()) + 3600
+            return TraeResult("failed", message="boom")
+
+        with mock.patch.object(trae_sync, "run", failing):
+            result = self.store.sync_trae_if_needed(now=t0)
+            self.assertEqual(result.status, "failed")
+            self.assertEqual(self.store.source_status["trae"], "同步失败：boom")
+            self.assertEqual(self.store._last_trae_sync_at, t0.timestamp())
+            self.assertIsNone(self.store.sync_trae_if_needed(
+                now=t0 + timedelta(seconds=1)), "失败也占掉节流窗口")
+            self.assertEqual(len(calls), 1)
+
+        persisted = TraeAuth.from_json(self.store._meta_get("trae_auth"))
+        self.assertEqual(persisted.cloudide_session, "new-session")
+        self.assertEqual(persisted.jwt, "a.b.c")
+        self.assertEqual(persisted.jwt_exp, int(t0.timestamp()) + 3600)
+
+        # 新实例（模拟重启）仍从 meta 读回凭据，交给 run 复用
+        other = StatsStore()
+        try:
+            other.rebuild([], trae_enabled=True, trae_sessionid="old-sid")
+            ok = _FakeTraeRunner()
+            with mock.patch.object(trae_sync, "run", ok):
+                other.sync_trae_if_needed(now=t0 + timedelta(seconds=20))
+            self.assertEqual(ok.calls[0]["auth"], persisted, "缓存的换签凭据必须被复用")
+        finally:
+            other._close()
+
+    def test_trae_fetch_window_from_watermark(self):
+        """首次 90 天全量；有水位按"水位 - PAGE_LOOKBACK_DAYS"回看；to_epoch = now"""
+        self._trae_store()
+        t0 = self._at(hour=10)
+        fake = _FakeTraeRunner()
+        with mock.patch.object(trae_sync, "run", fake):
+            self.store.sync_trae_if_needed(now=t0)
+        first = fake.calls[0]
+        self.assertEqual(first["from_epoch"], StatsStore.local_midnight(
+            trae_sync.FIRST_FETCH_DAYS, now=t0), "首次全量 90 天")
+        self.assertEqual(first["to_epoch"], int(t0.timestamp()))
+        self.assertEqual(self.store._meta_get("trae_synced_day"),
+                         t0.strftime("%Y-%m-%d"), "同步成功后写水位")
+
+        t1 = t0 + timedelta(seconds=1000)
+        with mock.patch.object(trae_sync, "run", fake):
+            self.store.sync_trae_if_needed(now=t1)
+        back = t0.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(
+            days=trae_sync.PAGE_LOOKBACK_DAYS)
+        self.assertEqual(fake.calls[1]["from_epoch"],
+                         StatsStore.local_midnight(0, now=back), "水位 -2 天回看")
+        self.assertEqual(fake.calls[1]["to_epoch"], int(t1.timestamp()))
+
+        # 水位坏了：回落首次全量，不抛
+        self.store.conn.execute("UPDATE meta SET value='garbage' WHERE key='trae_synced_day'")
+        self.store.conn.commit()
+        t2 = t1 + timedelta(seconds=1000)
+        with mock.patch.object(trae_sync, "run", fake):
+            self.store.sync_trae_if_needed(now=t2)
+        self.assertEqual(fake.calls[2]["from_epoch"], StatsStore.local_midnight(
+            trae_sync.FIRST_FETCH_DAYS, now=t2))
+
+    def test_trae_ent_meta_and_summary(self):
+        """积分账单：只在真正拉到（1 小时间隔）且 consumed/total 齐全时落 meta"""
+        self._trae_store()
+        t0 = self._at(hour=10)
+        fake = _FakeTraeRunner([
+            TraeResult("ok", rows=[], consumed=10.5, total=100.0),
+            TraeResult("ok", rows=[]),                       # 这次没拉账单
+            TraeResult("ok", rows=[], consumed=99.0, total=200.0),
+        ])
+        with mock.patch.object(trae_sync, "run", fake):
+            self.store.sync_trae_if_needed(now=t0)
+            self.assertTrue(fake.calls[0]["fetch_ent"], "首次没有账单时间戳 → 拉")
+            self.assertEqual(self.store._meta_get("trae_ent"), "10.5|100.0")
+            self.assertEqual(self.store._meta_get("trae_ent_at"), str(int(t0.timestamp())))
+            self.assertEqual(self.store.trae_ent_summary(), (10.5, 100.0))
+
+            # 900s 后：同步放行但账单不满 1 小时 → fetch_ent False，旧值不动
+            self.store.sync_trae_if_needed(now=t0 + timedelta(seconds=900))
+            self.assertFalse(fake.calls[1]["fetch_ent"])
+            self.assertEqual(self.store._meta_get("trae_ent"), "10.5|100.0")
+            self.assertEqual(self.store._meta_get("trae_ent_at"), str(int(t0.timestamp())),
+                             "没拉账单不得推进账单时间戳")
+
+            # 满 1 小时 → 再拉并覆盖
+            self.store.sync_trae_if_needed(now=t0 + timedelta(seconds=3600))
+            self.assertTrue(fake.calls[2]["fetch_ent"])
+            self.assertEqual(self.store.trae_ent_summary(), (99.0, 200.0))
+
+        # 解析：缺失/坏数据一律 None
+        for bad in ("", "abc", "1", "1|", "1|2|3", "x|y"):
+            self.store._meta_set("trae_ent", bad)
+            self.store.conn.commit()
+            self.assertIsNone(self.store.trae_ent_summary(), repr(bad))
+        self.store._meta_set("trae_ent", "3|4.5")
+        self.store.conn.commit()
+        self.assertEqual(self.store.trae_ent_summary(), (3.0, 4.5))
+
+    def test_trae_status_strings_and_guards(self):
+        """逐出口状态文案 + 无连接/未启用/未配置登录守卫（全程无网络）"""
+        bare = StatsStore()   # 无连接
+        self.assertFalse(bare.has_active_source)
+        self.assertIsNone(bare.sync_trae_if_needed())
+        self.assertIsNone(bare.query_all("SELECT * FROM usage_all"))
+        self.assertIsNone(bare.trae_ent_summary())
+
+        self.store.rebuild([], trae_enabled=False)
+        self.assertIsNone(self.store.sync_trae_if_needed(now=self._at(hour=10)))
+        self.assertEqual(self.store.source_status["trae"], "未启用")
+
+        fake = _FakeTraeRunner()
+        self.store.rebuild([], trae_enabled=True, trae_sessionid="   ")
+        self.assertEqual(self.store.source_status["trae"], "未配置登录")
+        with mock.patch.object(trae_sync, "run", fake):
+            self.assertIsNone(self.store.sync_trae_if_needed(now=self._at(hour=10)))
+        self.assertEqual(fake.calls, [], "没 sessionid 不得发 HTTP")
+        self.assertEqual(self.store.source_status["trae"], "未配置登录")
+
+        t0 = self._at(hour=10)
+        cases = [
+            (TraeResult("ok", rows=[]), "已连接"),
+            (TraeResult("auth_expired", message="会话失效"), "登录已过期，请重新提供 sessionid"),
+            (TraeResult("failed", message="网络不通"), "同步失败：网络不通"),
+            (TraeResult("not_configured"), "未配置登录"),
+        ]
+        for i, (result, status) in enumerate(cases):
+            self.store.rebuild([], trae_enabled=True, trae_sessionid="sid-1")
+            case_fake = _FakeTraeRunner([result])
+            when = t0 + timedelta(seconds=1000 * i)
+            with mock.patch.object(trae_sync, "run", case_fake):
+                self.assertIsNotNone(self.store.sync_trae_if_needed(now=when))
+            self.assertEqual(self.store.source_status["trae"], status)
+
+    def test_source_status_for_registry_adapters(self):
+        """逐源状态：已连接 / 未启用 / ATTACH 失败原因（设置页诊断用）"""
+        self._make_fixture_source()
+        self.store.rebuild([(CCSwitchAdapter(), True, self.source_path),
+                            (ZCodeAdapter(), True, os.path.join(self.tmp, "nope.sqlite"))])
+        self.assertEqual(self.store.source_status["ccswitch"], "已连接")
+        self.assertEqual(self.store.source_status["zcode"], "文件不存在")
+        self.assertEqual(self.store.source_status["trae"], "未启用")
+        self.assertTrue(self.store.has_active_source)
+
+        bare = os.path.join(self.tmp, "bare-status.db")
+        sqlite3.connect(bare).close()
+        self.store.rebuild([(CCSwitchAdapter(), True, bare), (ZCodeAdapter(), False, "")])
+        self.assertEqual(self.store.source_status["ccswitch"], "缺少必需表")
+        self.assertEqual(self.store.source_status["zcode"], "未启用")
+        self.assertFalse(self.store.has_active_source, "没有任何可用源")
+
+    def test_trae_sync_after_close_is_noop(self):
+        """_close 后 has_active_source/状态清零，任何 Trae 调用都安全返回"""
+        self._trae_store()
+        self.store._close()
+        self.assertFalse(self.store.has_active_source)
+        self.assertEqual(self.store.source_status, {})
+        fake = _FakeTraeRunner()
+        with mock.patch.object(trae_sync, "run", fake):
+            self.assertIsNone(self.store.sync_trae_if_needed(now=self._at(hour=10)))
+        self.assertEqual(fake.calls, [])
+        self.assertIsNone(self.store.query_all("SELECT * FROM usage_all"))
+
+    # ------------------------------------------------------------ 批次 3a：事务收口
+    # 残留写事务会让 VACUUM INTO 报 "cannot VACUUM from within a transaction"
+
+    def test_daily_agg_window_commits(self):
+        """窗口重算是自成一体的维护步骤：内部就地提交，不把写事务留给调用方"""
+        self._make_fixture_source()
+        self._insert_row("req-B", local_midnight(1) + 3600, 1000, 2000)
+        self._rebuild()
+        self.store.sync_if_needed()
+        self.assertFalse(self.store.conn.in_transaction)
+
+        yday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        self.store._rebuild_daily_agg_window(yday, datetime.now().strftime("%Y-%m-%d"))
+        self.assertFalse(self.store.conn.in_transaction, "窗口重算必须就地提交")
+
+    def test_backup_and_auto_backup_after_import(self):
+        """import_csv 重建窗口后，手动/自动备份都不得因残留事务失败"""
+        self._make_fixture_source()
+        self._insert_row("req-B", local_midnight(1) + 3600, 1000, 2000, cache_read=500)
+        self._insert_row("req-C", local_midnight(3) + 3600, 10000, 20000)
+        self._rebuild()
+        self.store.sync_if_needed()
+
+        path = os.path.join(self.tmp, "export-tx.csv")
+        self.assertEqual(self.store.export_csv(path), 2)
+
+        target = os.path.join(self.tmp, "imported-tx.db")
+        StatsStore.store_path = staticmethod(lambda: target)
+        other = StatsStore()
+        try:
+            other.rebuild([(CCSwitchAdapter(), True, self.source_path)])
+            self.assertEqual(other.import_csv(path), (2, 2, 0))
+            self.assertFalse(other.conn.in_transaction, "导入收尾不得残留写事务")
+
+            backup = os.path.join(self.tmp, "manual-tx.db")
+            self.assertTrue(other.backup(backup), "残留事务会让 VACUUM INTO 失败")
+            conn = sqlite3.connect(backup)
+            try:
+                self.assertEqual(conn.execute(
+                    "SELECT COALESCE(SUM(input + output + cache_create + cache_read), 0) "
+                    "FROM daily_agg").fetchone()[0],
+                    33500, "备份里的 daily_agg 必须是重建后的完整结果")
+            finally:
+                conn.close()
+
+            auto = other.auto_backup(os.path.join(self.tmp, "backups-tx"),
+                                     today="2026-03-01")
+            self.assertEqual(os.path.basename(auto), "ccbar-auto-2026-03-01.db")
+            conn = sqlite3.connect(auto)
+            try:
+                self.assertEqual(conn.execute(
+                    "SELECT COUNT(*) FROM usage_log").fetchone()[0], 2)
+            finally:
+                conn.close()
+        finally:
+            other._close()
+            StatsStore.store_path = staticmethod(lambda: os.path.join(self.tmp, "ccbar.db"))
+
+    def test_backup_commits_leaked_transaction(self):
+        """防御性提交：维护工作留下的未提交写事务不该让"备份"失败"""
+        self._make_fixture_source()
+        self._insert_row("req-B", local_midnight(1) + 3600, 1000, 2000)
+        self._rebuild()
+        self.store.sync_if_needed()
+
+        self.store.conn.execute("DELETE FROM daily_agg")   # 故意留下未提交写事务
+        self.assertTrue(self.store.conn.in_transaction)
+        target = os.path.join(self.tmp, "leaked-tx.db")
+        self.assertTrue(self.store.backup(target))
+        self.assertFalse(self.store.conn.in_transaction)
+
+        self.store.conn.execute("DELETE FROM daily_agg")
+        self.assertTrue(self.store.conn.in_transaction)
+        auto = self.store.auto_backup(os.path.join(self.tmp, "backups-leak"),
+                                      today="2026-03-02")
+        self.assertEqual(os.path.basename(auto), "ccbar-auto-2026-03-02.db")
+        self.assertFalse(self.store.conn.in_transaction)
+
+
