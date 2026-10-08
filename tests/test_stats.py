@@ -3,6 +3,7 @@
 运行：python -m unittest discover -s tests -v
 不依赖 pystray 等界面包，只用标准库 + stats_store。
 """
+import csv
 import os
 import sqlite3
 import sys
@@ -13,7 +14,7 @@ from datetime import datetime, timedelta
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from stats_store import (StatsStore, CCSwitchAdapter, ZCodeAdapter, DAILY_AGG_DDL,
-                         _local_epoch, validate_db)  # noqa: E402
+                         USAGE_LOG_DDL, _local_epoch, validate_db)  # noqa: E402
 
 
 def local_midnight(days_ago=0):
@@ -63,6 +64,16 @@ class TestStatsStore(unittest.TestCase):
         conn.execute(
             "INSERT INTO proxy_request_logs VALUES (?, 'claude', 'test-model', ?, ?, ?, ?, 0.5, ?)",
             (rid, inp, out, cache_read, cache_create, created_at))
+        conn.commit()
+        conn.close()
+
+    def _insert_row_ex(self, rid, created_at, model="test-model", inp=0, out=0,
+                       cache_read=0, cache_create=0, cost=0.5, app="claude"):
+        """自定义模型/费用的明细行（对应源库 proxy_request_logs）"""
+        conn = sqlite3.connect(self.source_path)
+        conn.execute(
+            "INSERT INTO proxy_request_logs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (rid, app, model, inp, out, cache_read, cache_create, cost, created_at))
         conn.commit()
         conn.close()
 
@@ -427,3 +438,389 @@ class TestStatsStore(unittest.TestCase):
         left = self.store.conn.execute(
             "SELECT COUNT(*) FROM daily_agg WHERE date = ?", (yday,)).fetchone()[0]
         self.assertEqual(left, 0, "明细已消失，daily_agg 陈旧行必须被清掉")
+
+    # ------------------------------------------------------------ 批次 1：credits / CSV 13 列
+
+    def test_credits_column_migration(self):
+        """v1.7 老库（12 列）升级：幂等补 credits 列，老行补 0"""
+        store_path = StatsStore.store_path()
+        conn = sqlite3.connect(store_path)
+        conn.executescript("""
+        CREATE TABLE usage_log (
+            source TEXT NOT NULL, request_id TEXT NOT NULL, app_type TEXT, model TEXT,
+            input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+            reasoning_tokens INTEGER NOT NULL DEFAULT 0, total_cost_usd REAL NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL, request_count INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (source, request_id)
+        );
+        """)
+        conn.execute("INSERT INTO usage_log (source, request_id, model, input_tokens, created_at) "
+                     "VALUES ('cc-switch', 'old-1', 'm', 100, ?)",
+                     (local_midnight(2) + 3600,))
+        conn.commit()
+        conn.close()
+
+        self._rebuild()
+        cols = [r[1] for r in self.store.conn.execute("PRAGMA table_info(usage_log)")]
+        self.assertIn("credits", cols)
+        self.assertEqual(self.store.conn.execute(
+            "SELECT credits FROM usage_log WHERE request_id='old-1'").fetchone()[0], 0)
+
+        # 再 rebuild 一次：列已存在，不重复 ALTER、不报错
+        self._rebuild()
+        cols2 = [r[1] for r in self.store.conn.execute("PRAGMA table_info(usage_log)")]
+        self.assertEqual(cols2.count("credits"), 1)
+
+    def test_export_import_roundtrip_with_credits(self):
+        """13 列导出/导入：表头正确，credits 与非整费用精确往返"""
+        self._make_fixture_source()
+        self._insert_row("req-B", local_midnight(1) + 3600, 1000, 2000,
+                         cache_read=500, cache_create=100)
+        self._insert_row("req-C", local_midnight(3) + 3600, 10000, 20000)
+        self._rebuild()
+        self.store.sync_if_needed()
+        # credits 只有 Trae 源才会写，这里直接改库模拟
+        self.store.conn.execute("UPDATE usage_log SET credits = 12.5, "
+                                "total_cost_usd = 0.123456789 WHERE request_id='req-B'")
+        self.store.conn.commit()
+
+        path = os.path.join(self.tmp, "export13.csv")
+        self.assertEqual(self.store.export_csv(path), 2)
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            header = next(csv.reader(f))
+        self.assertEqual(header, StatsStore.EXPORT_COLUMNS)
+        self.assertEqual(len(header), 13)
+
+        imported_path = os.path.join(self.tmp, "imported13.db")
+        StatsStore.store_path = staticmethod(lambda: imported_path)
+        other = StatsStore()
+        try:
+            other.rebuild([(CCSwitchAdapter(), True, self.source_path)])
+            self.assertEqual(other.import_csv(path), (2, 2, 0))
+            row = other.conn.execute("SELECT credits, total_cost_usd FROM usage_log "
+                                     "WHERE request_id='req-B'").fetchone()
+            self.assertEqual(row[0], 12.5, "credits 必须精确往返")
+            self.assertEqual(row[1], 0.123456789, "费用必须精确往返")
+            self.assertEqual(other.conn.execute(
+                "SELECT COUNT(*) FROM usage_log WHERE credits = 0").fetchone()[0], 1)
+        finally:
+            other._close()
+            StatsStore.store_path = staticmethod(lambda: os.path.join(self.tmp, "ccbar.db"))
+
+    def test_import_legacy_12_columns(self):
+        """旧版 12 列 CSV 仍可导入，credits 按 0 处理"""
+        self._make_fixture_source()
+        self._rebuild()
+        path = os.path.join(self.tmp, "legacy12.csv")
+        epoch = local_midnight(1) + 3600
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f)
+            w.writerow(StatsStore.LEGACY_EXPORT_COLUMNS)
+            w.writerow(["cc-switch", "legacy-1", "claude", "m", 10, 20, 0, 0, 0, 0.25, epoch, 1])
+
+        self.assertEqual(self.store.import_csv(path), (1, 1, 0))
+        self.assertEqual(self.store.conn.execute(
+            "SELECT credits, total_cost_usd, input_tokens FROM usage_log "
+            "WHERE request_id='legacy-1'").fetchone(), (0, 0.25, 10))
+        self.assertEqual(self.store.conn.execute(
+            "SELECT COALESCE(SUM(input+output),0) FROM daily_agg").fetchone()[0], 30,
+            "导入后按窗口重建 daily_agg")
+        self.assertEqual(self.store.import_csv(path), (1, 0, 1), "重复导入幂等")
+
+    def test_source_display_name(self):
+        self.assertEqual(self.store.source_display_name("trae"), "Trae")
+        self.assertEqual(self.store.source_display_name("zcode"), "ZCode")
+        self.assertEqual(self.store.source_display_name("cc-switch-rollup"), "cc-switch")
+        self.assertEqual(self.store.source_display_name("other"), "other")
+
+    # ------------------------------------------------------------ 批次 1：新查询口径
+
+    def test_query_credits_sum_and_daily(self):
+        """积分查询：今日/近 N 天/每日曲线（今日实时由其他源补，恒 0）"""
+        self._make_fixture_source()
+        self._insert_row("req-B", local_midnight(1) + 3600, 1000, 2000)
+        self._insert_row("req-C", local_midnight(3) + 3600, 10000, 20000)
+        self._rebuild()
+        self.store.sync_if_needed()
+        self.store.conn.execute("UPDATE usage_log SET credits = 5.0 WHERE request_id='req-B'")
+        self.store.conn.execute("UPDATE usage_log SET credits = 2.0 WHERE request_id='req-C'")
+        self.store.conn.commit()
+
+        self.assertEqual(self.store.query_credits_sum(30), 7.0)
+        self.assertEqual(self.store.query_credits_sum(1), 5.0)
+        self.assertEqual(self.store.query_credits_daily(30), [
+            ((datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d"), 2.0),
+            ((datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"), 5.0)])
+
+        self._insert_row("req-A", max(local_midnight(0) + 60,
+                                      int(datetime.now().timestamp()) - 60), 100, 200)
+        self.store.sync_if_needed()
+        self.assertEqual(self.store.query_today_credits(), 0.0)
+        self.assertEqual(self.store.query_credits_sum(0), 0.0)
+
+    def test_query_cost_mtd(self):
+        """本月累计费用：月初至今日实时，跨月行不计入"""
+        import calendar
+        self._make_fixture_source()
+        now = datetime.now()
+        first = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        self._insert_row("req-prev", int((first - timedelta(days=2)).timestamp()) + 3600, 100, 200)
+        self._rebuild()
+        self.store.sync_if_needed()
+        self._insert_row("req-today", max(local_midnight(0) + 60,
+                                          int(now.timestamp()) - 60), 10, 20)
+        self.store.sync_if_needed()
+
+        mtd, elapsed, dim = self.store.query_cost_mtd()
+        self.assertAlmostEqual(mtd, 0.5, places=6, msg="只算本月今日实时的 0.5")
+        self.assertEqual(elapsed, now.day)
+        self.assertEqual(dim, calendar.monthrange(now.year, now.month)[1])
+
+    def test_query_unmetered_tokens(self):
+        """未计费渠道 token：只统计 total_cost_usd = 0 的行"""
+        self._make_fixture_source()
+        self._insert_row_ex("req-free-B", local_midnight(1) + 3600, inp=1000, out=2000, cost=0.0)
+        self._insert_row("req-paid-B", local_midnight(1) + 7200, 100, 200)
+        self._rebuild()
+        self.store.sync_if_needed()
+        self._insert_row_ex("req-free-A", max(local_midnight(0) + 60,
+                                              int(datetime.now().timestamp()) - 60),
+                            inp=100, out=200, cost=0.0)
+        self.store.sync_if_needed()
+
+        # days=1 窗口是 [昨天 0 点, 明日 0 点)，含今日；days=0 只看今日
+        self.assertEqual(self.store.query_unmetered_tokens(1), 3300)
+        self.assertEqual(self.store.query_unmetered_tokens(0), 300)
+
+    def test_model_history_norm_and_merge(self):
+        """模型编年史 / 归一化 key / 手动合并 / 自动合并"""
+        self._make_fixture_source()
+        self._insert_row_ex("r-1", local_midnight(5) + 3600,
+                            model="global.anthropic.claude-sonnet-4", inp=1000, out=2000)
+        self._insert_row_ex("r-2", local_midnight(3) + 3600,
+                            model="claude-sonnet-4", inp=10, out=20)
+        self._insert_row_ex("r-3", local_midnight(1) + 3600,
+                            model="openai/gpt-5", inp=100, out=200)
+        self._rebuild()
+        self.store.sync_if_needed()
+
+        self.assertEqual(StatsStore.model_norm_key("global.anthropic.claude-sonnet-4"),
+                         "claude-sonnet-4")
+        self.assertEqual(StatsStore.model_norm_key("OpenAI/GPT-5"), "gpt-5")
+        self.assertEqual(StatsStore.model_norm_key("vendor/anthropic.claude-3-5"), "claude-3-5")
+        self.assertEqual(StatsStore.model_norm_key(""), "")
+
+        hist = self.store.query_model_history()
+        self.assertEqual([h[0] for h in hist],
+                         ["global.anthropic.claude-sonnet-4", "claude-sonnet-4", "openai/gpt-5"],
+                         "按首用时间升序")
+        self.assertEqual(hist[0][1], local_midnight(5) + 3600)
+        self.assertEqual(hist[0][2], local_midnight(5) + 3600)
+        self.assertEqual(hist[0][3], 3000)
+
+        # 自动合并：canonical = 组内 token 最大者（global.anthropic.* 与裸名同 key）
+        groups, changed = self.store.auto_merge_models()
+        self.assertEqual(groups, 1, "只有 claude 组同名")
+        self.assertEqual(changed, 1, "小组并入 token 最大的标准名")
+        self.assertEqual([r[0] for r in self.store.conn.execute(
+            "SELECT DISTINCT model FROM usage_log ORDER BY model")],
+            ["global.anthropic.claude-sonnet-4", "openai/gpt-5"])
+        self.assertEqual(self.store.auto_merge_models(), (0, 0), "再跑一次无事可做")
+
+        # 手动合并：改写行数与守卫
+        self.assertEqual(self.store.merge_model("openai/gpt-5", "gpt-5"), 1)
+        self.assertEqual(self.store.merge_model("gpt-5", "gpt-5"), 0)
+        self.assertEqual(self.store.merge_model("", "gpt-5"), 0)
+        self.assertEqual(self.store.merge_model("nope", "gpt-5"), 0)
+
+    def test_merge_from_db(self):
+        """合并另一台机器的 ccbar.db：主键去重、credits 不合并、幂等"""
+        self._make_fixture_source()
+        self._insert_row("req-B", local_midnight(1) + 3600, 1000, 2000)
+        self._rebuild()
+        self.store.sync_if_needed()
+
+        other_path = os.path.join(self.tmp, "other.db")
+        conn = sqlite3.connect(other_path)
+        conn.executescript(USAGE_LOG_DDL)
+        conn.execute("INSERT INTO usage_log (source, request_id, app_type, model, input_tokens, "
+                     "output_tokens, cache_read_tokens, cache_creation_tokens, reasoning_tokens, "
+                     "total_cost_usd, credits, created_at, request_count) "
+                     "VALUES ('cc-switch','req-B','claude','m',1,2,0,0,0,0.5,9.9,?,1)",
+                     (local_midnight(1) + 4000,))
+        conn.execute("INSERT INTO usage_log (source, request_id, app_type, model, input_tokens, "
+                     "output_tokens, cache_read_tokens, cache_creation_tokens, reasoning_tokens, "
+                     "total_cost_usd, credits, created_at, request_count) "
+                     "VALUES ('cc-switch','req-Z','claude','m',300,400,0,0,0,0.5,9.9,?,1)",
+                     (local_midnight(2) + 4000,))
+        conn.commit()
+        conn.close()
+
+        self.assertEqual(self.store.merge_from_db(other_path), (2, 1))
+        self.assertEqual(self.store.merge_from_db(other_path), (2, 0), "第二次零新增")
+        self.assertEqual(self.store.conn.execute(
+            "SELECT request_id, credits FROM usage_log ORDER BY request_id").fetchall(),
+            [("req-B", 0.0), ("req-Z", 0.0)], "credits 刻意不参与合并")
+        self.assertEqual(self.store.conn.execute(
+            "SELECT COALESCE(SUM(input+output),0) FROM daily_agg").fetchone()[0],
+            3000 + 700, "合并窗口已重算")
+
+        bare = os.path.join(self.tmp, "bare2.db")
+        sqlite3.connect(bare).close()
+        self.assertEqual(self.store.merge_from_db(bare), (0, 0), "缺 usage_log 表")
+        self.assertEqual(self.store.merge_from_db(
+            os.path.join(self.tmp, "nope.db")), (0, 0), "文件不存在")
+
+    def test_window_queries_exclude_today(self):
+        """区间查询读 daily_agg：今日实时不入区间"""
+        self._make_fixture_source()
+        self._insert_row("req-B", local_midnight(1) + 3600, 1000, 2000,
+                         cache_read=500, cache_create=100)
+        self._insert_row("req-C", local_midnight(3) + 3600, 10000, 20000)
+        self._rebuild()
+        self.store.sync_if_needed()
+        self._insert_row("req-A", max(local_midnight(0) + 60,
+                                      int(datetime.now().timestamp()) - 60), 100, 200)
+        self.store.sync_if_needed()
+
+        self.assertEqual(self.store.query_daily_tokens_between(6, 1), [
+            ((datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d"), 30000),
+            ((datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"), 3600)])
+
+        stats = self.store.query_window_stats(6, 1)
+        self.assertEqual(stats, {"reqs": 2, "input": 11000, "output": 22000,
+                                 "cache_create": 100, "cache_read": 500, "total": 33600})
+        # 窗口上界含"今天"时也不含今日实时
+        self.assertEqual(self.store.query_window_stats(6, 0)["total"], 33600)
+        self.assertNotIn(datetime.now().strftime("%Y-%m-%d"),
+                         [d for d, _ in self.store.query_daily_tokens_between(6, 0)])
+
+    def test_query_hour_histogram(self):
+        """时段分布：本地小时边界（偏移作为参数绑定）"""
+        self._make_fixture_source()
+        yday_14 = (datetime.now() - timedelta(days=1)).replace(
+            hour=14, minute=30, second=0, microsecond=0)
+        self._insert_row("req-B", int(yday_14.timestamp()), 1000, 2000)
+        self._rebuild()
+        self.store.sync_if_needed()
+        today_9 = datetime.now().replace(hour=9, minute=5, second=0, microsecond=0)
+        self._insert_row("req-A", int(today_9.timestamp()), 100, 200)
+        self.store.sync_if_needed()
+
+        hist = self.store.query_hour_histogram(1)
+        self.assertEqual(hist.get(14), 3000)
+        self.assertEqual(hist.get(9), 300)
+        self.assertEqual(sum(hist.values()), 3300)
+
+    def test_query_timeline_past_and_today(self):
+        """指定日流水走 usage_log；今天/None 走实时视图；最新在前"""
+        self._make_fixture_source()
+        yday = datetime.now() - timedelta(days=1)
+        t10 = yday.replace(hour=10, minute=0, second=0, microsecond=0)
+        t11 = yday.replace(hour=11, minute=0, second=0, microsecond=0)
+        self._insert_row_ex("r-10", int(t10.timestamp()), inp=100, out=200)
+        self._insert_row_ex("r-11", int(t11.timestamp()), inp=300, out=400)
+        self._rebuild()
+        self.store.sync_if_needed()
+        self._insert_row_ex("r-today", int(datetime.now().replace(
+            hour=8, minute=0, second=0, microsecond=0).timestamp()), inp=10, out=20)
+        self.store.sync_if_needed()
+
+        rows = self.store.query_timeline(yday.strftime("%Y-%m-%d"))
+        self.assertEqual(len(rows), 2)
+        self.assertEqual([r[3] for r in rows], [700, 300], "最新在前")
+        self.assertEqual(rows[0][1], "test-model")
+        self.assertEqual(rows[0][2], "cc-switch")
+        self.assertAlmostEqual(rows[0][4], 0.5, places=6)
+        self.assertEqual(rows[0][5], 0.0)
+        self.assertEqual(rows[0][0], int(t11.timestamp()))
+
+        live = self.store.query_timeline()
+        self.assertEqual(len(live), 1)
+        self.assertEqual(live[0][3], 30)
+        self.assertEqual(self.store.query_timeline(datetime.now()), live,
+                         "今天等价于实时视图")
+        self.assertEqual(self.store.query_timeline("2099-01-01"), [])
+
+    def test_query_monthly_totals(self):
+        """按月汇总：月份倒序，带 token 与 cache_read"""
+        self._make_fixture_source()
+        self._insert_row("req-old", local_midnight(40) + 3600, 10000, 20000)
+        self._insert_row("req-new", local_midnight(5) + 3600, 1000, 2000, cache_read=500)
+        self._rebuild()
+        self.store.sync_if_needed()
+
+        months = self.store.query_monthly_totals()
+        self.assertEqual(len(months), 2, "两个不同月份")
+        self.assertGreater(months[0][0], months[1][0], "月份倒序")
+        self.assertEqual(months[0], ((datetime.now() - timedelta(days=5)).strftime("%Y-%m"), 1, 3500, 500))
+        self.assertEqual(months[1], ((datetime.now() - timedelta(days=40)).strftime("%Y-%m"), 1, 30000, 0))
+        self.assertEqual(self.store.query_monthly_totals(limit=1), months[:1])
+
+    def test_query_source_breakdown(self):
+        """今日各源分账：按 token 倒序"""
+        self._make_fixture_source()
+        zcode_path = self._make_zcode_source()
+        now = int(datetime.now().timestamp())
+        stamp = max(local_midnight(0) + 60, now - 60)
+        self._insert_row("req-today", stamp, 100, 200)
+        conn = sqlite3.connect(zcode_path)
+        conn.execute("INSERT INTO model_usage VALUES ('zc-1', 'glm-4', 500, 700, 0, ?, 'done')",
+                     (stamp * 1000,))
+        conn.commit()
+        conn.close()
+        self.store.rebuild([(CCSwitchAdapter(), True, self.source_path),
+                            (ZCodeAdapter(), True, zcode_path)])
+        self.store.sync_if_needed()
+
+        self.assertEqual(self.store.query_source_breakdown(),
+                         [("zcode", 1, 1200), ("cc-switch", 1, 300)])
+
+    # ------------------------------------------------------------ 批次 1：自动备份
+
+    def test_auto_backup_and_rotation(self):
+        """自动备份：ISO 文件名、当天幂等、滚动保留 keep 份且不碰其他文件"""
+        self._make_fixture_source()
+        self._insert_row("req-B", local_midnight(1) + 3600, 1000, 2000)
+        self._rebuild()
+        self.store.sync_if_needed()
+
+        backups = os.path.join(self.tmp, "backups")
+        path = self.store.auto_backup(backups, keep=7, today="2026-01-11")
+        self.assertEqual(os.path.basename(path), "ccbar-auto-2026-01-11.db")
+        conn = sqlite3.connect(path)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM usage_log").fetchone()[0], 1)
+        conn.close()
+
+        # 当天第二次：no-op
+        self.assertIsNone(self.store.auto_backup(backups, keep=7, today="2026-01-11"))
+        self.assertEqual(os.listdir(backups), ["ccbar-auto-2026-01-11.db"])
+
+        # 预置 10 份老备份 + 一个非匹配文件，第 11 份触发滚动清理
+        for i in range(1, 11):
+            with open(os.path.join(backups, f"ccbar-auto-2026-01-{i:02d}.db"), "w") as f:
+                f.write("x")
+        with open(os.path.join(backups, "keepme.txt"), "w") as f:
+            f.write("x")
+
+        path2 = self.store.auto_backup(backups, keep=7, today="2026-01-12")
+        self.assertIsNotNone(path2)
+        self.assertEqual([n for n in sorted(os.listdir(backups)) if n.startswith("ccbar-auto-")],
+                         [f"ccbar-auto-2026-01-{i:02d}.db" for i in range(6, 13)],
+                         "只保留最新 7 份")
+        self.assertTrue(os.path.exists(os.path.join(backups, "keepme.txt")),
+                        "不匹配模式的文件不得被删")
+
+    def test_auto_backup_iso_date_and_no_connection(self):
+        """today=None 用 ISO 日期；无连接返回 None 且不建目录"""
+        self._make_fixture_source()
+        self._rebuild()
+        backups = os.path.join(self.tmp, "backups-iso")
+        path = self.store.auto_backup(backups)
+        self.assertEqual(os.path.basename(path),
+                         "ccbar-auto-" + datetime.now().strftime("%Y-%m-%d") + ".db")
+
+        bare_dir = os.path.join(self.tmp, "backups-bare")
+        self.assertIsNone(StatsStore().auto_backup(bare_dir))
+        self.assertFalse(os.path.exists(bare_dir), "无连接不该创建目录")

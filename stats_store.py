@@ -9,6 +9,7 @@ ccbar 自建统计库（~/.ccbar/ccbar.db）为主连接：
 新增数据源：实现 SourceAdapter 三个方法并注册到 SOURCE_REGISTRY 即可，
 同步、视图、设置界面自动生效。
 """
+import fnmatch
 import os
 import sqlite3
 import sys
@@ -47,6 +48,7 @@ CREATE TABLE IF NOT EXISTS usage_log (
     cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
     reasoning_tokens INTEGER NOT NULL DEFAULT 0,
     total_cost_usd REAL NOT NULL DEFAULT 0,
+    credits REAL NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     request_count INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (source, request_id)
@@ -150,7 +152,8 @@ class CCSwitchAdapter(SourceAdapter):
         return f"""
         SELECT 'cc-switch' AS source, app_type, model, input_tokens, output_tokens,
                cache_read_tokens, cache_creation_tokens, 0 AS reasoning_tokens,
-               CAST(total_cost_usd AS REAL) AS total_cost_usd, created_at, 1 AS request_count
+               CAST(total_cost_usd AS REAL) AS total_cost_usd, 0.0 AS credits,
+               created_at, 1 AS request_count
         FROM {alias}.proxy_request_logs
         WHERE created_at >= {today_start}
         """
@@ -192,7 +195,7 @@ class ZCodeAdapter(SourceAdapter):
         SELECT 'zcode' AS source, 'zcode' AS app_type, model_id AS model,
                input_tokens, output_tokens,
                0 AS cache_read_tokens, 0 AS cache_creation_tokens,
-               reasoning_tokens, 0.0 AS total_cost_usd,
+               reasoning_tokens, 0.0 AS total_cost_usd, 0.0 AS credits,
                started_at / 1000 AS created_at, 1 AS request_count
         FROM {alias}.model_usage
         WHERE status != 'running'
@@ -251,6 +254,12 @@ class StatsStore:
                 self.conn.execute(USAGE_LOG_DDL)
                 self.conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_usage_created ON usage_log(created_at)")
+                # v1.8 新增 credits 列（Trae 积分口径，其他源为 0）。老库 ALTER 迁移，列已存在则跳过。
+                cols = [r[1] for r in self.conn.execute(
+                    "PRAGMA table_info(usage_log)").fetchall()]
+                if "credits" not in cols:
+                    self.conn.execute(
+                        "ALTER TABLE usage_log ADD COLUMN credits REAL NOT NULL DEFAULT 0")
                 self.conn.execute(
                     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
                 # 每日聚合缓存：区间/总量查询直接读它，不再扫明细。
@@ -259,13 +268,16 @@ class StatsStore:
                 flag = self.conn.execute(
                     "SELECT value FROM meta WHERE key='daily_agg_full'").fetchone()
                 if not flag:
+                    # daily_agg 只结算完整日（≤昨天）；今天由查询侧实时补
                     self.conn.execute("""
                         INSERT OR REPLACE INTO daily_agg
                             (date, source, reqs, input, output, cache_create, cache_read)
                         SELECT date(created_at, 'unixepoch', 'localtime'), source,
                                SUM(request_count), SUM(input_tokens), SUM(output_tokens),
                                SUM(cache_creation_tokens), SUM(cache_read_tokens)
-                        FROM usage_log GROUP BY 1, 2
+                        FROM usage_log
+                        WHERE date(created_at, 'unixepoch', 'localtime') < date('now', 'localtime')
+                        GROUP BY 1, 2
                     """)
                     self.conn.execute(
                         "INSERT OR REPLACE INTO meta (key, value) VALUES ('daily_agg_full', '1')")
@@ -323,7 +335,7 @@ class StatsStore:
         parts = ["""
         SELECT source, app_type, model, input_tokens, output_tokens,
                cache_read_tokens, cache_creation_tokens, reasoning_tokens,
-               total_cost_usd, created_at, request_count
+               total_cost_usd, credits, created_at, request_count
         FROM usage_log
         """]
         for adapter in self.attached:
@@ -619,11 +631,317 @@ class StatsStore:
             ORDER BY created_at DESC LIMIT ?""", (self.local_midnight(0), limit))
         return [(r[0], r[1] or "-", r[2], r[3], r[4]) for r in rows] if rows else []
 
+    # ------------------------------------------------------------ 费用 / 积分 / 模型治理
+
+    def query_cost_mtd(self):
+        """本月累计费用（月初 0 点 ~ 明日 0 点）→ (费用, 已过天数, 当月总天数)"""
+        import calendar
+        now = datetime.now()
+        first = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        row = self.query_one("""
+            SELECT COALESCE(SUM(total_cost_usd), 0) FROM usage_all
+            WHERE created_at >= ? AND created_at < ?""",
+            (int(first.timestamp()), self.local_midnight(-1)))
+        return (row[0] if row else 0.0,
+                max(now.day, 1), calendar.monthrange(now.year, now.month)[1])
+
+    def query_unmetered_tokens(self, days):
+        """近 N 天（含今天）未计费渠道（total_cost_usd 为 0/空）消耗的 token。
+
+        供"默认单价估算"折算——cc-switch 只记部分渠道成本，ZCode 等渠道费用为 0。
+        """
+        row = self.query_one("""
+            SELECT COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens), 0)
+            FROM usage_all
+            WHERE created_at >= ? AND created_at < ? AND COALESCE(total_cost_usd, 0) = 0""",
+            (self.local_midnight(days), self.local_midnight(-1)))
+        return int(row[0]) if row else 0
+
+    def query_today_credits(self):
+        """今日积分消耗（Trae 行有值，其他源恒为 0）"""
+        row = self.query_one(
+            "SELECT COALESCE(SUM(credits), 0) FROM usage_all WHERE created_at >= ?",
+            (self.local_midnight(0),))
+        return float(row[0]) if row else 0.0
+
+    def query_credits_sum(self, days):
+        """近 N 天（含今天）积分消耗，0 天即今日"""
+        row = self.query_one(
+            "SELECT COALESCE(SUM(credits), 0) FROM usage_all WHERE created_at >= ?",
+            (self.local_midnight(days),))
+        return float(row[0]) if row else 0.0
+
+    def query_credits_daily(self, days):
+        """近 N 天每日积分曲线 [(date, credits)]，日期升序（可能含空洞）"""
+        rows = self.query_all("""
+            SELECT date(created_at, 'unixepoch', 'localtime'), COALESCE(SUM(credits), 0)
+            FROM usage_all WHERE created_at >= ? AND created_at < ?
+            GROUP BY 1 ORDER BY 1""",
+            (self.local_midnight(days), self.local_midnight(-1)))
+        return [(r[0], float(r[1])) for r in rows] if rows else []
+
+    def query_model_history(self):
+        """模型编年史：[(model, 首用 epoch, 末用 epoch, 总 token)]，按首用时间升序"""
+        with self._lock:
+            if self.conn is None:
+                return []
+            try:
+                rows = self.conn.execute("""
+                    SELECT model, MIN(created_at), MAX(created_at),
+                           COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens), 0) AS t
+                    FROM usage_log
+                    GROUP BY model ORDER BY MIN(created_at)""").fetchall()
+            except sqlite3.Error as e:
+                print(f"查询失败: {e}")
+                return []
+        return [(r[0] or "", r[1], r[2], r[3]) for r in rows]
+
+    @staticmethod
+    def model_norm_key(model):
+        """归一化 key：小写 + 去掉 "vendor/" 路径前缀 + 去掉 anthropic./openai. 区域前缀。
+
+        保守策略：只合这些明显同款；带后缀变体（-ps-gcp-dst、[1m]）视为不同模型不动。
+        """
+        m = (model or "").lower()
+        if "/" in m:
+            m = m.rsplit("/", 1)[-1]
+        for vendor in ("anthropic.", "openai."):
+            idx = m.find(vendor)
+            if idx >= 0:
+                m = m[idx + len(vendor):]
+                break
+        return m
+
+    def merge_model(self, from_model, to_model):
+        """手动合并：把 from 的所有明细行并入 to（usage_log 直接 UPDATE，不可撤销）"""
+        with self._lock:
+            changed = self._merge_model_unlocked(from_model, to_model)
+            if changed:
+                self.conn.commit()
+            return changed
+
+    def _merge_model_unlocked(self, from_model, to_model):
+        """已持锁版本的行合并（auto_merge_models 内部用）"""
+        if (self.conn is None or not from_model or not to_model
+                or from_model == to_model):
+            return 0
+        try:
+            cur = self.conn.execute(
+                "UPDATE usage_log SET model = ? WHERE model = ?", (to_model, from_model))
+        except sqlite3.Error as e:
+            print(f"合并模型失败: {e}")
+            return 0
+        return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+
+    def auto_merge_models(self):
+        """自动合并同名模型：按归一化 key 分组，组内以用量最大者为标准名。
+
+        - Returns: (合并的组数, 改写的行数)
+        """
+        with self._lock:
+            if self.conn is None:
+                return (0, 0)
+            try:
+                rows = self.conn.execute("""
+                    SELECT model, COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens), 0)
+                    FROM usage_log GROUP BY model""").fetchall()
+            except sqlite3.Error as e:
+                print(f"查询失败: {e}")
+                return (0, 0)
+
+            groups = {}
+            for name, token in rows:
+                groups.setdefault(self.model_norm_key(name), []).append((name or "", token))
+            merged = changed = 0
+            for members in groups.values():
+                if len(members) < 2:
+                    continue
+                canonical = max(members, key=lambda m: m[1])[0]
+                for name, _ in members:
+                    if name != canonical:
+                        changed += self._merge_model_unlocked(name, canonical)
+                merged += 1
+            if changed:
+                self.conn.commit()
+            return (merged, changed)
+
+    def merge_from_db(self, path):
+        """从另一台机器的 ccbar.db 合并明细（主键去重，重复行自动跳过）。
+
+        12 列拷贝，credits 刻意不合并（与 macOS 版一致）。
+        - Returns: (对方总行数, 实际新增行数)；对方缺 usage_log 表返回 (0, 0)
+        """
+        with self._lock:
+            if self.conn is None:
+                return (0, 0)
+            # 先只读试开校验结构，避免 ATTACH 坏库
+            try:
+                probe = sqlite3.connect(_file_uri(path) + "?mode=ro", uri=True, timeout=1)
+            except sqlite3.Error:
+                return (0, 0)
+            try:
+                row = probe.execute("SELECT COUNT(*) FROM sqlite_master "
+                                    "WHERE type='table' AND name='usage_log'").fetchone()
+                found = row[0] if row else 0
+            except sqlite3.Error:
+                found = 0
+            finally:
+                try:
+                    probe.close()
+                except sqlite3.Error:
+                    pass
+            if not found:
+                return (0, 0)
+
+            try:
+                self.conn.execute("ATTACH DATABASE ? AS merge_src", (path,))
+            except sqlite3.Error as e:
+                print(f"合并源库打开失败: {e}")
+                return (0, 0)
+            read = inserted = 0
+            try:
+                row = self.conn.execute("SELECT COUNT(*) FROM merge_src.usage_log").fetchone()
+                read = row[0] if row else 0
+                base = self.conn.total_changes
+                self.conn.execute("""
+                    INSERT OR IGNORE INTO usage_log
+                        (source, request_id, app_type, model, input_tokens, output_tokens,
+                         cache_read_tokens, cache_creation_tokens, reasoning_tokens, total_cost_usd,
+                         created_at, request_count)
+                    SELECT source, request_id, app_type, model, input_tokens, output_tokens,
+                           cache_read_tokens, cache_creation_tokens, reasoning_tokens, total_cost_usd,
+                           created_at, request_count
+                    FROM merge_src.usage_log
+                """)
+                inserted = self.conn.total_changes - base
+                # 重算受影响区间的聚合缓存（多包一天覆盖跨时区迟到行）
+                span = self.conn.execute(
+                    "SELECT MIN(created_at), MAX(created_at) FROM merge_src.usage_log").fetchone()
+                if span and span[0] is not None:
+                    self._rebuild_daily_agg_window(
+                        (datetime.fromtimestamp(span[0]) - timedelta(days=1)).strftime("%Y-%m-%d"),
+                        (datetime.fromtimestamp(span[1]) + timedelta(days=1)).strftime("%Y-%m-%d"))
+                self.conn.commit()
+            except (sqlite3.Error, OSError, OverflowError, ValueError) as e:
+                print(f"合并失败: {e}")
+                try:
+                    self.conn.rollback()
+                except sqlite3.Error:
+                    pass
+                return (read, 0)
+            finally:
+                try:
+                    self.conn.execute("DETACH DATABASE merge_src")
+                except sqlite3.Error:
+                    pass
+            return (read, inserted)
+
+    # ------------------------------------------------------------ 区间 / 时段 / 流水 / 月度
+
+    def query_daily_tokens_between(self, days_ago_from, days_ago_to):
+        """任意历史窗口（days_ago_from ~ days_ago_to，均含）的日 token 序列，日期升序。
+
+        数据源是 daily_agg，不含今日实时。
+        """
+        def ds(n):
+            return (datetime.now() - timedelta(days=n)).strftime("%Y-%m-%d")
+
+        rows = self.query_all("""
+            SELECT date, COALESCE(SUM(input + output + cache_create + cache_read), 0)
+            FROM daily_agg WHERE date >= ? AND date <= ? GROUP BY date ORDER BY date""",
+            (ds(days_ago_from), ds(days_ago_to)))
+        return [(r[0], r[1]) for r in rows] if rows else []
+
+    def query_window_stats(self, days_ago_from, days_ago_to):
+        """任意历史窗口（均含）的完整统计，不含今日实时 → dict"""
+        def ds(n):
+            return (datetime.now() - timedelta(days=n)).strftime("%Y-%m-%d")
+
+        row = self.query_one("""
+            SELECT COALESCE(SUM(reqs), 0), COALESCE(SUM(input), 0), COALESCE(SUM(output), 0),
+                   COALESCE(SUM(cache_create), 0), COALESCE(SUM(cache_read), 0)
+            FROM daily_agg WHERE date >= ? AND date <= ?""",
+            (ds(days_ago_from), ds(days_ago_to)))
+        stats = {"reqs": 0, "input": 0, "output": 0, "cache_create": 0,
+                 "cache_read": 0, "total": 0}
+        if row:
+            stats.update(reqs=row[0], input=row[1], output=row[2],
+                         cache_create=row[3], cache_read=row[4])
+            stats["total"] = row[1] + row[2] + row[3] + row[4]
+        return stats
+
+    def query_hour_histogram(self, days):
+        """近 N 天时段分布 {小时: token}（本地时区偏移烘进参数，避免逐行 localtime）"""
+        offset = int(datetime.now().astimezone().utcoffset().total_seconds())
+        rows = self.query_all("""
+            SELECT ((created_at + ?) % 86400) / 3600,
+                   COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens), 0)
+            FROM usage_all
+            WHERE created_at >= ? AND created_at < ?
+            GROUP BY 1""",
+            (offset, self.local_midnight(days), self.local_midnight(-1)))
+        return {int(r[0]): r[1] for r in rows} if rows else {}
+
+    def query_timeline(self, day=None, limit=800):
+        """指定日期的逐笔流水（最新在前）：(时间, 模型, 渠道, token, 费用, 积分)。
+
+        day 为 None 或今天走实时视图；历史日期走已同步的 usage_log（本地 0 点起 24 小时）。
+        """
+        if day is None:
+            day_str = datetime.now().strftime("%Y-%m-%d")
+        elif hasattr(day, "strftime"):
+            day_str = day.strftime("%Y-%m-%d")
+        else:
+            day_str = str(day)
+        limit = max(1, limit)
+
+        cols = """
+            SELECT created_at, model, source,
+                   COALESCE(input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens, 0),
+                   COALESCE(total_cost_usd, 0), COALESCE(credits, 0)
+        """
+        if day_str == datetime.now().strftime("%Y-%m-%d"):
+            rows = self.query_all(cols + """
+            FROM usage_all WHERE created_at >= ?
+            ORDER BY created_at DESC LIMIT ?""", (self.local_midnight(0), limit))
+        else:
+            try:
+                start = _local_epoch(day_str)
+            except ValueError:
+                return []
+            rows = self.query_all(cols + """
+            FROM usage_log WHERE created_at >= ? AND created_at < ?
+            ORDER BY created_at DESC LIMIT ?""", (start, start + 86400, limit))
+        return [(r[0], r[1] or "-", r[2], r[3], r[4], r[5]) for r in rows] if rows else []
+
+    def query_monthly_totals(self, limit=36):
+        """按月汇总 [(month, reqs, token, cache_read)]，月份倒序，最多 limit 个月"""
+        rows = self.query_all("""
+            SELECT substr(date, 1, 7), COALESCE(SUM(reqs), 0),
+                   COALESCE(SUM(input + output + cache_create + cache_read), 0),
+                   COALESCE(SUM(cache_read), 0)
+            FROM daily_agg GROUP BY 1 ORDER BY 1 DESC LIMIT ?""", (max(1, limit),))
+        return [(r[0], r[1], r[2], r[3]) for r in rows] if rows else []
+
+    def query_source_breakdown(self):
+        """今日各数据源分账 [(source, reqs, token)]，按 token 倒序"""
+        rows = self.query_all("""
+            SELECT source, COALESCE(SUM(request_count), 0),
+                   COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens), 0)
+            FROM usage_all WHERE created_at >= ? AND created_at < ?
+            GROUP BY source ORDER BY 3 DESC""",
+            (self.local_midnight(0), self.local_midnight(-1)))
+        return [(r[0], r[1], r[2]) for r in rows] if rows else []
+
     # ------------------------------------------------------------ 导出 / 导入（幂等）
 
     EXPORT_COLUMNS = ["source", "request_id", "app_type", "model", "input_tokens", "output_tokens",
                       "cache_read_tokens", "cache_creation_tokens", "reasoning_tokens",
-                      "total_cost_usd", "created_at", "request_count"]
+                      "total_cost_usd", "credits", "created_at", "request_count"]
+    # v1.7 及更早的导出布局（12 列，无 credits），导入时按 0 补齐
+    LEGACY_EXPORT_COLUMNS = ["source", "request_id", "app_type", "model", "input_tokens",
+                             "output_tokens", "cache_read_tokens", "cache_creation_tokens",
+                             "reasoning_tokens", "total_cost_usd", "created_at", "request_count"]
 
     def export_csv(self, path):
         """导出 usage_log 全量明细为 CSV（带 BOM，Excel 可开）。成功返回行数，库未开返回 -1"""
@@ -634,7 +952,7 @@ class StatsStore:
             rows = self.conn.execute("""
                 SELECT source, request_id, app_type, model, input_tokens, output_tokens,
                        cache_read_tokens, cache_creation_tokens, reasoning_tokens,
-                       total_cost_usd, created_at, request_count
+                       total_cost_usd, credits, created_at, request_count
                 FROM usage_log ORDER BY created_at""").fetchall()
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             w = _csv.writer(f)
@@ -645,6 +963,8 @@ class StatsStore:
     def import_csv(self, path):
         """幂等导入明细 CSV：主键 (source, request_id) 去重，重复/非法行跳过，
         导入后按受影响窗口重建 daily_agg。
+
+        兼容 v1.8 的 13 列（含 credits）与旧版 12 列布局（credits 记 0）。
         - Returns: (读取行数, 新增行数, 跳过行数)；表头不符返回 (0, 0, -1)"""
         import csv as _csv
         with self._lock:
@@ -653,19 +973,23 @@ class StatsStore:
             try:
                 with open(path, newline="", encoding="utf-8-sig") as f:
                     reader = _csv.reader(f)
-                    if next(reader, None) != self.EXPORT_COLUMNS:
+                    header = next(reader, None)
+                    if header not in (self.EXPORT_COLUMNS, self.LEGACY_EXPORT_COLUMNS):
                         return (0, 0, -1)
                     read = inserted = skipped = 0
                     min_day = max_day = None
                     base = self.conn.total_changes
                     for row in reader:
-                        if len(row) != 12:
+                        n = len(row)
+                        if n not in (12, 13):
                             skipped += 1
                             continue
                         try:
                             src, rid, app, model = row[0].strip(), row[1].strip(), row[2].strip(), row[3].strip()
                             inp, out, cr, cc, rs = int(row[4]), int(row[5]), int(row[6]), int(row[7]), int(row[8])
-                            cost, epoch, rc = float(row[9]), int(row[10]), int(row[11])
+                            cost = float(row[9])
+                            credits = float(row[10]) if n == 13 else 0.0
+                            epoch, rc = int(row[n - 2]), int(row[n - 1])
                             if not src or not rid:
                                 raise ValueError
                         except ValueError:
@@ -676,9 +1000,9 @@ class StatsStore:
                             INSERT OR IGNORE INTO usage_log
                                 (source, request_id, app_type, model, input_tokens, output_tokens,
                                  cache_read_tokens, cache_creation_tokens, reasoning_tokens, total_cost_usd,
-                                 created_at, request_count)
-                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                            (src, rid, app, model, inp, out, cr, cc, rs, cost, epoch, rc))
+                                 credits, created_at, request_count)
+                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            (src, rid, app, model, inp, out, cr, cc, rs, cost, credits, epoch, rc))
                         day = datetime.fromtimestamp(epoch).strftime("%Y-%m-%d")
                         min_day = day if min_day is None else min(min_day, day)
                         max_day = day if max_day is None else max(max_day, day)
@@ -712,10 +1036,73 @@ class StatsStore:
                 print(f"备份失败: {e}")
                 return False
 
+    def auto_backup(self, directory, keep=7, today=None):
+        """每日自动备份到 directory（VACUUM INTO，滚动保留最近 keep 份）。
+
+        文件名一律用 ISO 日期 ccbar-auto-<YYYY-MM-DD>.db——绝不用本地化日期格式
+        （macOS 版曾因本地化日期里的 "/" 变成多级路径，导致 VACUUM INTO 永久失败）。
+        当天已备份过直接跳过（返回 None），成功返回备份路径。
+        """
+        if today is None:
+            stamp = datetime.now().strftime("%Y-%m-%d")
+        elif hasattr(today, "strftime"):
+            stamp = today.strftime("%Y-%m-%d")
+        else:
+            stamp = str(today)
+
+        with self._lock:
+            if self.conn is None:
+                return None
+        try:
+            os.makedirs(directory, exist_ok=True)
+        except OSError as e:
+            print(f"备份目录创建失败: {e}")
+            return None
+
+        target = os.path.join(directory, f"ccbar-auto-{stamp}.db")
+        if os.path.exists(target):
+            return None   # 当天已备份，幂等跳过
+
+        with self._lock:
+            if self.conn is None:
+                return None
+            try:
+                self.conn.execute("VACUUM INTO ?", (target,))
+            except sqlite3.Error as e:
+                print(f"自动备份失败: {e}")
+                return None
+
+        self._prune_auto_backups(directory, keep)
+        return target
+
+    @staticmethod
+    def _prune_auto_backups(directory, keep):
+        """滚动清理目录内的 ccbar-auto-*.db，只保留文件名最大的 keep 份。
+
+        只删给定目录内、匹配该模式且解析后仍在该目录内的普通文件。
+        """
+        try:
+            names = sorted(n for n in os.listdir(directory)
+                           if fnmatch.fnmatch(n, "ccbar-auto-*.db")
+                           and os.path.isfile(os.path.join(directory, n)))
+        except OSError:
+            return
+        base = os.path.realpath(directory)
+        for name in (names[:-keep] if keep > 0 else names):
+            target = os.path.realpath(os.path.join(directory, name))
+            if os.path.dirname(target) != base:
+                continue   # 符号链接等越界目标不删
+            try:
+                os.remove(target)
+            except OSError:
+                pass
+
     def source_display_name(self, source):
         """source 标识 → 界面显示名（历史聚合行归入 cc-switch）"""
         if source == "zcode":
             return "ZCode"
+        if source == "trae":
+            return "Trae"
         if source in ("cc-switch", "cc-switch-rollup"):
             return "cc-switch"
         return source
