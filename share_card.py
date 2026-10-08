@@ -61,12 +61,34 @@ def _qr_image(url, size):
         return None
 
 
+# 两种卡片的版式几何（显式给出，避免按比例算出来的位置互相压字）
+# 校验点：大数字底 < 趋势顶 < 趋势底 < 统计标签 < 统计值 < 分隔线 < 页脚，
+# 且二维码框（qr_size + 8）不与第三列统计在横向重叠。
+CARD_GEOM = {
+    # 今日战报卡：640x420
+    "share": dict(width=640, height=420, brand_y=30, date_y=70, label_y=104,
+                  big_y=126, big_size=44, trend_top=186, trend_bottom=250,
+                  stats_label_y=276, stats_value_y=298, divider_y=330,
+                  footer_y=364, qr_size=64),
+    # 用量周报卡：460x400（比战报卡窄，字号与二维码都要小一号）
+    "weekly": dict(width=460, height=400, brand_y=28, date_y=66, label_y=98,
+                   big_y=118, big_size=36, trend_top=170, trend_bottom=226,
+                   stats_label_y=250, stats_value_y=272, divider_y=302,
+                   footer_y=350, qr_size=44),
+}
+
+
 def card_image(title, date_text, big_label, big_value, stats, trend,
-               width=640, height=420, accent="#E86D45", big_number=None,
-               url=QR_URL, qr_size=64):
-    """通用卡片：stats = [(标签, 值)]，trend = [(标签, 数值)]（可为空）"""
+               accent="#E86D45", big_number=None, url=QR_URL, geom=None):
+    """通用卡片：stats = [(标签, 值)]，trend = [(标签, 数值)]（可为空）
+
+    版式由 geom（CARD_GEOM 之一）决定；二维码贴右下角，分隔线在二维码左边收住，
+    页脚文字与二维码同排——窄卡（周报）也不会压字。
+    """
     from PIL import Image, ImageDraw
 
+    geom = dict(CARD_GEOM["share"] if geom is None else geom)
+    width, height = geom["width"], geom["height"]
     accent = accent or "#E86D45"
     big_number = big_number or accent
     img = Image.new("RGB", (width, height), CARD_BG)
@@ -75,22 +97,25 @@ def card_image(title, date_text, big_label, big_value, stats, trend,
                         outline=CARD_BORDER, width=1)
 
     pad = 36
+    qr_size = int(geom.get("qr_size", 0) or 0)
+    box = qr_size + 8 if qr_size > 0 else 0
     f_brand = pil_font(22, bold=True)
     f_mid = pil_font(15)
-    f_big = pil_font(52, bold=True)
+    f_big = pil_font(geom["big_size"], bold=True)
     f_small = pil_font(12)
     f_value = pil_font(18, bold=True)
 
-    d.text((pad, 32), "CCBar", font=f_brand, fill=accent)
-    d.text((width - pad, 38), title, font=f_mid, fill=MUTED, anchor="ra")
-    d.text((pad, 78), date_text, font=f_small, fill=MUTED)
+    d.text((pad, geom["brand_y"]), "CCBar", font=f_brand, fill=accent)
+    d.text((width - pad, geom["brand_y"] + 6), title, font=f_mid,
+           fill=MUTED, anchor="ra")
+    d.text((pad, geom["date_y"]), date_text, font=f_small, fill=MUTED)
 
-    d.text((pad, 116), big_label, font=f_mid, fill=MUTED)
-    d.text((pad, 142), big_value, font=f_big, fill=big_number)
+    d.text((pad, geom["label_y"]), big_label, font=f_mid, fill=MUTED)
+    d.text((pad, geom["big_y"]), big_value, font=f_big, fill=big_number)
 
     # 趋势折线（面积填充用同色压暗近似）
     if len(trend) >= 2:
-        top, bottom = height * 0.57, height * 0.71
+        top, bottom = geom["trend_top"], geom["trend_bottom"]
         values = [v for _, v in trend]
         maxv = max(values) or 1
         step = (width - pad * 2) / (len(trend) - 1)
@@ -100,27 +125,29 @@ def card_image(title, date_text, big_label, big_value, stats, trend,
         d.polygon(fill_pts, fill=themes.blend(accent, CARD_BG, 0.22))
         d.line(pts, fill=accent, width=2, joint="curve")
 
-    # 三列统计
-    col_w = (width - pad * 2) / max(len(stats), 1)
-    y_label, y_value = height * 0.78, height * 0.83
+    # 三列统计：有二维码时第三列必须收在二维码左边
+    qr_x1 = width - pad - box if box else width - pad
+    avail = (qr_x1 - pad - 16) if box else (width - pad * 2)
+    col_w = avail / max(len(stats), 1)
     for i, (label, value) in enumerate(stats[:3]):
         x = pad + i * col_w
-        d.text((x, y_label), label, font=f_small, fill=MUTED)
-        d.text((x, y_value), value, font=f_value, fill="#FFFFFF")
+        d.text((x, geom["stats_label_y"]), label, font=f_small, fill=MUTED)
+        d.text((x, geom["stats_value_y"]), value, font=f_value, fill="#FFFFFF")
 
-    d.line([(pad, height - 52), (width - pad, height - 52)], fill="#2A2A2A")
-    d.text((pad, height - 42), "CCBar · github.com/bmfish/ccbar-win",
+    # 分隔线在二维码左边收住，不与二维码相交
+    d.line([(pad, geom["divider_y"]), (qr_x1 - 12 if box else width - pad,
+                                      geom["divider_y"])], fill="#2A2A2A")
+    d.text((pad, geom["footer_y"]), "CCBar · github.com/bmfish/ccbar-win",
            font=f_small, fill=FAINT)
 
     # 右下角二维码（白底圆角，与 mac 版一致）
-    if qr_size > 0:
+    if box:
         payload = _qr_image(url, qr_size)
         if payload is not None:
-            box = qr_size + 8
-            x1, y1 = width - pad - box, height - pad - box
-            d.rounded_rectangle([x1, y1, x1 + box, y1 + box], radius=6,
+            y1 = height - pad - box
+            d.rounded_rectangle([qr_x1, y1, qr_x1 + box, y1 + box], radius=6,
                                 fill="#FFFFFF")
-            img.paste(payload, (x1 + 4, y1 + 4))
+            img.paste(payload, (qr_x1 + 4, y1 + 4))
     return img
 
 
@@ -142,10 +169,10 @@ def share_card_image(today_total, week_total, month_total, all_total, trend,
         big_value=_fmt_tokens(today_total),
         stats=stats,
         trend=trend or [],
-        width=640, height=420,
         accent=tokens["BRAND"],
         big_number=tokens["BIG_NUMBER"],
-        url=url)
+        url=url,
+        geom=CARD_GEOM["share"])
 
 
 def weekly_card_image(date_text, total, reqs, peak, trend, theme=None,
@@ -162,10 +189,10 @@ def weekly_card_image(date_text, total, reqs, peak, trend, theme=None,
                ("峰值", _fmt_tokens(peak)),
                ("请求数", str(int(reqs or 0)))],
         trend=trend or [],
-        width=460, height=360,
         accent=tokens["BRAND"],
         big_number=tokens["BIG_NUMBER"],
-        url=url, qr_size=56)
+        url=url,
+        geom=CARD_GEOM["weekly"])
 
 
 def png_bytes(img):

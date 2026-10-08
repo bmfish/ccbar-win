@@ -53,7 +53,7 @@ class TestShareCard(unittest.TestCase):
         img = share_card.weekly_card_image("2026年7月27日 ~ 2026年8月2日",
                                           70_000, 12, 20_000,
                                           [("07-27", 1000), ("07-28", 2000)])
-        self.assertEqual(img.size, (460, 360))
+        self.assertEqual(img.size, (460, 400))
         self.assertGreater(distinct_colors(img), 10)
 
     def test_weekly_card_png_bytes(self):
@@ -109,7 +109,7 @@ class TestWeeklyReportIntegration(unittest.TestCase):
 
         from PIL import Image
         with Image.open(path) as img:
-            self.assertEqual(img.size, (460, 360))
+            self.assertEqual(img.size, (460, 400))
 
     def test_no_usage_no_file(self):
         path = weekly_report.generate_if_needed(

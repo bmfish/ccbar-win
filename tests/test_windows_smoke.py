@@ -22,7 +22,9 @@ import win_stubs  # noqa: E402
 win_stubs.install()
 
 import main  # noqa: E402
-from main import CcBarTray  # noqa: E402
+import app_settings  # noqa: E402
+import themes  # noqa: E402
+from main import CcBarTray, Design  # noqa: E402
 from stats_store import StatsStore  # noqa: E402
 
 try:
@@ -75,16 +77,15 @@ class TestInsightsWindowBuilds(unittest.TestCase):
         self.app._ui_queue = __import__("queue").Queue()
         self.app._ui_root = self.root
         self.app._last_icon_color = None
-        self.app.settings = {
-            "refresh_interval": 60,
-            "db_path": self.source_path,
-            "ccswitch_enabled": True,
-            "zcode_enabled": False,
-            "zcode_path": "",
-            "warning_threshold": 50,
-            "warning_enabled": True,
-            "notify_interval": 1000,
-        }
+        # 用真实的设置对象（临时目录），但不碰 ~/.ccbar
+        self.app.settings = app_settings.Settings(self.tmp)
+        self.app.settings.set("db_path", self.source_path)
+        self.app.settings.set("ccswitch_enabled", True)
+        self.app.settings.set("zcode_enabled", False)
+        self.app.settings.set("zcode_path", "")
+        self.app.theme = None
+        self.app.apply_language()
+        self.app.apply_theme()
         self.app.store = StatsStore()
         self.app.connect_store()
 
@@ -142,21 +143,37 @@ class TestInsightsWindowBuilds(unittest.TestCase):
                 return found
         return None
 
+    def _build_insights(self):
+        """绕过 @_on_gui 直接在当前线程建窗口（不泵事件），返回 (窗口, Notebook)"""
+        CcBarTray.show_insights.__wrapped__(self.app)
+        toplevels = [w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)]
+        insights = [w for w in toplevels if w.title() == "洞察中心"]
+        self.assertEqual(len(insights), 1, "洞察中心窗口没建出来")
+        nb = self._find_notebook(insights[0])
+        self.assertIsNotNone(nb, "洞察中心里没有 Notebook")
+        return insights[0], nb
+
+    def _texts(self, widget, acc=None):
+        """递归收集控件树里所有 label/button 文案（Canvas 等没有 text 选项会抛，忽略）"""
+        if acc is None:
+            acc = []
+        try:
+            text = widget.cget("text")
+        except Exception:
+            text = None
+        if isinstance(text, str) and text:
+            acc.append(text)
+        for child in widget.winfo_children():
+            self._texts(child, acc)
+        return acc
+
     # ------------------------------------------------------------ 用例
 
     def test_insights_builds_all_tabs(self):
         # 只构建、不跑事件循环：macOS Tk 8.5 在非 app bundle 进程里
         # update()/update_idletasks() 会挂住（Windows 无此问题），
         # 而本用例要断言的是"构建过程中没抛异常 + 控件树完整"，两者都不需要泵事件。
-        # 绕过 @_on_gui：直接在当前线程跑窗口构建体
-        CcBarTray.show_insights.__wrapped__(self.app)
-
-        toplevels = [w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)]
-        insights = [w for w in toplevels if w.title() == "洞察中心"]
-        self.assertEqual(len(insights), 1, "洞察中心窗口没建出来")
-
-        nb = self._find_notebook(insights[0])
-        self.assertIsNotNone(nb, "洞察中心里没有 Notebook")
+        _win, nb = self._build_insights()
 
         labels = [nb.tab(t, "text") for t in nb.tabs()]
         self.assertEqual(labels, self.EXPECTED_TABS,
@@ -168,10 +185,109 @@ class TestInsightsWindowBuilds(unittest.TestCase):
             self.assertTrue(frame.winfo_children(),
                             f"页签 {nb.tab(tab_id, 'text')} 是空的")
 
+    def test_insights_builds_with_budget_and_price(self):
+        """月度预算 > 0 要点出预算卡与日预算虚线；默认单价 > 0 要在费用页标注估算"""
+        self.app.settings.set("monthly_budget_usd", 100.0)
+        self.app.settings.set("default_token_price", 3.0)
+        _win, nb = self._build_insights()
+        self.assertEqual([nb.tab(t, "text") for t in nb.tabs()], self.EXPECTED_TABS)
+
+        texts = self._texts(nb.nametowidget(nb.tabs()[0]))
+        self.assertTrue(any(t.startswith("本月预算 $100.00") for t in texts),
+                        f"费用页缺少月度预算卡：{texts}")
+        self.assertTrue(any("已用预算" in t for t in texts), "缺少预算进度副行")
+        self.assertTrue(any("性价比榜" in t for t in texts), "费用页缺性价比榜")
+        self.assertTrue(any("估算" in t for t in texts), "默认单价 > 0 时费用卡要标注估算")
+
+    def test_cost_page_has_richer_content(self):
+        """费用页在 batch 2b 之后内容变多（卡片/走势/排行/性价比/脚注）"""
+        _win, nb = self._build_insights()
+        self.assertGreaterEqual(len(self._texts(nb.nametowidget(nb.tabs()[0]))), 12,
+                                "费用页内容比 batch 2a 少")
+
+    def test_insights_page_new_sections(self):
+        """洞察页新增：今日会话 / 星期分布 / 热力图 / 模型编年史 / 导出长图"""
+        _win, nb = self._build_insights()
+        texts = self._texts(nb.nametowidget(nb.tabs()[1]))
+        for expect in ("今日会话", "星期分布（近 90 天）", "近 90 天用量热力图",
+                       "模型编年史", "导出长图"):
+            self.assertTrue(any(expect in t for t in texts), f"洞察页缺少 {expect}")
+
+    def test_share_page_renders_two_cards(self):
+        """分享页同时预览战报卡（640x420）与周报卡（460x360）"""
+        self.assertEqual(self.app._share_card_png().size, (640, 420))
+        self.assertEqual(self.app._weekly_card_png().size, (460, 400))
+
+    def test_timeline_page_has_day_nav_and_csv_export(self):
+        """流水页新增：任意日期回看 + 导出 CSV"""
+        _win, nb = self._build_insights()
+        texts = self._texts(nb.nametowidget(nb.tabs()[4]))
+        for expect in ("‹ 前一天", "后一天 ›", "今天", "导出 CSV"):
+            self.assertTrue(any(expect in t for t in texts), f"流水页缺少 {expect}")
+
+    def test_insights_restores_last_tab(self):
+        """页签记忆：按设置选中，非法值回落「费用」"""
+        self.app.settings.set("insights_last_page", "分享")
+        win, nb = self._build_insights()
+        self.assertEqual(nb.tab(nb.select(), "text"), "分享")
+        win.destroy()
+
+        self.app.settings.set("insights_last_page", "不存在的页")
+        _win, nb = self._build_insights()
+        self.assertEqual(nb.tab(nb.select(), "text"), "费用")
+
+    def test_session_stats_matches_mac(self):
+        """会话判定：相邻间隔 > 30 分钟切新会话，时长取会话内末次-首次"""
+        base = int(datetime(2026, 1, 1, 9, 0).timestamp())
+        rows = [(base, "m", "cc-switch", 0, 0.0, 0.0),
+                (base + 600, "m", "cc-switch", 0, 0.0, 0.0),
+                (base + 3 * 3600, "m", "cc-switch", 0, 0.0, 0.0)]
+        self.assertEqual(CcBarTray._session_stats(rows), (2, 5, 10))
+        self.assertEqual(CcBarTray._session_stats([]), (0, 0, 0))
+
+    def test_bar_chart_accepts_budget_line(self):
+        """费用走势图的日预算虚线：新增可选参数后仍返回同尺寸图"""
+        img = CcBarTray._bar_chart_png(
+            [("08-01", {"费用": 1.0}), ("08-02", {"费用": 3.0})], {"费用": Design.BRAND},
+            budget_line=2.0, value_fmt=lambda v: "$%.2f" % v)
+        self.assertEqual(img.size, (680, 150))
+
     def test_share_tab_renders_card(self):
         """分享页依赖 store.query_daily_tokens（曾缺失导致 AttributeError）"""
         img = self.app._share_card_png()
         self.assertEqual(img.size, (640, 420))
+
+    def test_settings_window_builds(self):
+        """设置页新增长列表后仍要能完整建出来（内容滚动 + 钉底按钮栏）"""
+        CcBarTray.show_settings.__wrapped__(self.app)
+        toplevels = [w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)]
+        settings = [w for w in toplevels if w.title() == "ccBar 设置"]
+        self.assertEqual(len(settings), 1, "设置窗口没建出来")
+        self.assertTrue(settings[0].winfo_children(), "设置窗口是空的")
+
+    def test_theme_switch_applies_to_design(self):
+        """换主题后 Design 令牌要跟着变（海蓝主色 #2E8CF2）"""
+        self.app.settings.set("theme", "海蓝")
+        self.app.apply_theme()
+        self.assertEqual(Design.BRAND, "#2E8CF2")
+        self.assertEqual(Design.MODEL_COLORS, themes.find("海蓝")["models"])
+
+        self.app.settings.set("theme", "默认主题")
+        self.app.apply_theme()
+        # 默认主题的主色以主题包为准（mac 版 #E86E45；旧硬编码 #E86D45 差一位）
+        self.assertEqual(Design.BRAND, themes.find("默认主题")["accent"])
+        self.assertEqual(Design.BIG_NUMBER, themes.find("默认主题")["accent"],
+                         "bigNumber 为空时跟随 accent")
+
+    def test_daily_tokens_backs_the_share_card(self):
+        """分享卡折线的数据源：历史来自 daily_agg（昨天），今天走实时"""
+        from datetime import datetime, timedelta
+
+        rows = self.app.store.query_daily_tokens(7)
+        today = datetime.now().strftime("%Y-%m-%d")
+        self.assertIn(today, [d for d, _ in rows], "今日实时行必须出现")
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        self.assertIn(yesterday, [d for d, _ in rows], "昨天的历史行必须出现")
 
 
 if __name__ == "__main__":
