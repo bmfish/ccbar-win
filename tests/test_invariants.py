@@ -174,5 +174,44 @@ class TestSourceReadOnly(unittest.TestCase):
         self.assertEqual(before[2], after[2])
 
 
+class TestNoDeadSettings(unittest.TestCase):
+    """设置项不得是"死键"：只在设置页里出现、却没有任何行为读它。
+
+    背景：`led_red_threshold` 曾经只在设置页读写，界面上能改但完全没生效，
+    静态扫描很难发现（文本上"有引用"），所以这里按"必须在设置页之外被读"来卡。
+    数据源路径类键（db_path / zcode_path / *_enabled）不在此列——它们由
+    app_settings.source_configs() 统一消费；launch_at_login 由设置页保存时
+    调 autostart.apply() 落地（与 macOS 版同位置）。
+    """
+
+    # 必须有"设置页之外"的行为引用
+    BEHAVIOR_KEYS = {
+        "refresh_interval", "warning_threshold", "warning_enabled", "notify_interval",
+        "trae_enabled", "trae_sessionid", "led_red_threshold",
+        "monthly_budget_usd", "default_token_price", "auto_weekly_report",
+        "app_language", "theme", "custom_themes", "insights_last_page",
+        "last_auto_backup_date", "last_update_check_date",
+    }
+
+    def test_behavior_keys_are_read_outside_the_settings_window(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "main.py"), encoding="utf-8") as f:
+            src = f.read()
+        start = src.index("    def show_settings(self")
+        end = src.index("    @_on_gui\n    def backup_data")
+        outside = src[:start] + src[end:]
+
+        import re
+        missing = [k for k in sorted(self.BEHAVIOR_KEYS)
+                   if not re.search(r"\b%s\b" % re.escape(k), outside)]
+        self.assertEqual(missing, [],
+                         "这些设置项没有任何行为读它（死键）：%s" % missing)
+
+    def test_behavior_keys_exist_in_defaults(self):
+        import app_settings
+        unknown = sorted(self.BEHAVIOR_KEYS - set(app_settings.DEFAULTS))
+        self.assertEqual(unknown, [], "测试里写了 DEFAULTS 不存在的键：%s" % unknown)
+
+
 if __name__ == "__main__":
     unittest.main()
