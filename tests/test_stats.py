@@ -343,3 +343,87 @@ class TestStatsStore(unittest.TestCase):
 
         self.assertEqual(validate_db(os.path.join(self.tmp, "missing.db"),
                                      CCSwitchAdapter().required_tables), "文件不存在")
+
+    # ------------------------------------------------------------ 批次 0 回归
+
+    def _make_zcode_source(self):
+        """第二个数据源（ZCode）夹具，用于验证"今日按源补行"能出多行"""
+        path = os.path.join(self.tmp, "zcode.sqlite")
+        conn = sqlite3.connect(path)
+        conn.executescript("""
+        CREATE TABLE model_usage (
+            id TEXT PRIMARY KEY, model_id TEXT, input_tokens INTEGER, output_tokens INTEGER,
+            reasoning_tokens INTEGER, started_at INTEGER, status TEXT
+        );
+        """)
+        conn.commit()
+        conn.close()
+        return path
+
+    def test_query_daily_tokens_includes_today(self):
+        """近 N 天每日 token：历史走 daily_agg，今日实时补一行（分享卡折线依赖它）"""
+        self._make_fixture_source()
+        self._insert_row("req-B", local_midnight(1) + 3600, 1000, 2000,
+                         cache_read=500, cache_create=100)
+        self._rebuild()
+        self.store.sync_if_needed()
+
+        rows = self.store.query_daily_tokens(7)
+        self.assertEqual(len(rows), 1, "昨天有数据、今天还没有")
+        self.assertEqual(rows[0][1], 3600)
+
+        # 今天出现实时行 → 追加为最后一行
+        self._insert_row("req-A", max(local_midnight(0) + 60,
+                                      int(datetime.now().timestamp()) - 60), 100, 200)
+        self.store.sync_if_needed()
+        rows = self.store.query_daily_tokens(7)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[-1][0], datetime.now().strftime("%Y-%m-%d"))
+        self.assertEqual(rows[-1][1], 300)
+        self.assertEqual([d for d, _ in rows], sorted(d for d, _ in rows), "日期必须升序")
+
+    def test_channel_daily_includes_all_today_sources(self):
+        """今日渠道分布必须每个启用源各一行（曾用 query_one 只留第一行）"""
+        self._make_fixture_source()
+        zcode_path = self._make_zcode_source()
+        now = int(datetime.now().timestamp())
+
+        self._insert_row("req-today", max(local_midnight(0) + 60, now - 60), 100, 200)
+        conn = sqlite3.connect(zcode_path)
+        conn.execute("INSERT INTO model_usage VALUES ('zc-1', 'glm-4', 500, 700, 0, ?, 'done')",
+                     ((max(local_midnight(0) + 60, now - 60)) * 1000,))
+        conn.commit()
+        conn.close()
+
+        self.store.rebuild([(CCSwitchAdapter(), True, self.source_path),
+                            (ZCodeAdapter(), True, zcode_path)])
+        self.assertEqual(len(self.store.attached), 2)
+        self.store.sync_if_needed()
+
+        rows = self.store.query_channel_daily(30)
+        today = datetime.now().strftime("%Y-%m-%d")
+        today_rows = {r[1]: r[2] for r in rows if r[0] == today}
+        self.assertEqual(set(today_rows), {"cc-switch", "zcode"},
+                         "今天的每个渠道都要出现，不能只剩第一行")
+        self.assertEqual(today_rows["cc-switch"], 300)
+        self.assertEqual(today_rows["zcode"], 1200)
+
+    def test_daily_agg_window_prunes_stale_rows(self):
+        """窗口重算要先清后写：明细没了，daily_agg 不能留下陈旧行"""
+        self._make_fixture_source()
+        self._insert_row("req-B", local_midnight(1) + 3600, 1000, 2000)
+        self._rebuild()
+        self.store.sync_if_needed()
+
+        yday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        row = self.store.conn.execute(
+            "SELECT SUM(input) FROM daily_agg WHERE date = ?", (yday,)).fetchone()
+        self.assertEqual(row[0], 1000)
+
+        # 明细被清掉（模拟导入去重 / 源库重算）后再重算同一窗口
+        self.store.conn.execute("DELETE FROM usage_log")
+        self.store._rebuild_daily_agg_window(
+            yday, datetime.now().strftime("%Y-%m-%d"))
+        left = self.store.conn.execute(
+            "SELECT COUNT(*) FROM daily_agg WHERE date = ?", (yday,)).fetchone()[0]
+        self.assertEqual(left, 0, "明细已消失，daily_agg 陈旧行必须被清掉")

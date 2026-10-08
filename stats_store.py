@@ -90,7 +90,7 @@ class SourceAdapter:
         """历史补账 SQL（INSERT OR IGNORE 幂等，按本地日期字符串过滤）"""
         raise NotImplementedError
 
-    def today_fragment(self, alias):
+    def today_fragment(self, alias, today_start):
         """usage_all 视图中该源"今日"数据的 UNION ALL 段"""
         raise NotImplementedError
 
@@ -391,18 +391,24 @@ class StatsStore:
                     return
 
     def _rebuild_daily_agg_window(self, from_day, today):
-        """重算 [from_day, today) 窗口的每日聚合（数据源：usage_log 明细，OR REPLACE 自愈）。"""
-        self.conn.execute(f"""
+        """重算 [from_day, today) 窗口的每日聚合（数据源：usage_log 明细）。
+
+        先 DELETE 再 INSERT：明细行消失（导入去重、源库重算）时 daily_agg 的自愈
+        依赖窗口整段重算，只靠 OR REPLACE 会把已无明细的 (date, source) 陈旧行留下。
+        """
+        self.conn.execute(
+            "DELETE FROM daily_agg WHERE date >= ? AND date < ?", (from_day, today))
+        self.conn.execute("""
             INSERT OR REPLACE INTO daily_agg
                 (date, source, reqs, input, output, cache_create, cache_read)
             SELECT date(created_at, 'unixepoch', 'localtime'), source,
                    SUM(request_count), SUM(input_tokens), SUM(output_tokens),
                    SUM(cache_creation_tokens), SUM(cache_read_tokens)
             FROM usage_log
-            WHERE date(created_at, 'unixepoch', 'localtime') >= '{from_day}'
-              AND date(created_at, 'unixepoch', 'localtime') < '{today}'
+            WHERE date(created_at, 'unixepoch', 'localtime') >= ?
+              AND date(created_at, 'unixepoch', 'localtime') < ?
             GROUP BY 1, 2
-        """)
+        """, (from_day, today))
 
     # ------------------------------------------------------------ 查询
 
@@ -525,12 +531,29 @@ class StatsStore:
             FROM daily_agg WHERE date >= ? GROUP BY date, source ORDER BY date""",
             ((datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d"),))
         result = [(r[0], r[1], r[2]) for r in rows] if rows else []
-        today = self.query_one("""
-            SELECT source, COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+cache_creation_tokens), 0)
-            FROM usage_all WHERE created_at >= ? AND created_at < ? GROUP BY source""",
+        # 今日实时按源逐个补行：这里必须用 query_all（GROUP BY source 会有多行），
+        # 用 query_one 只会留下第一行渠道。
+        today = self.query_all("""
+            SELECT source, COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+cache_creation_tokens), 0) AS t
+            FROM usage_all WHERE created_at >= ? AND created_at < ?
+            GROUP BY source HAVING t > 0""",
             (self.local_midnight(0), self.local_midnight(-1)))
-        if today and today[1] > 0:
-            result.append((datetime.now().strftime("%Y-%m-%d"), today[0], today[1]))
+        if today:
+            d = datetime.now().strftime("%Y-%m-%d")
+            result += [(d, r[0], r[1]) for r in today]
+        return result
+
+    def query_daily_tokens(self, days):
+        """近 N 天每日总 token（跨渠道，含今天实时），日期升序 [(date, token)]"""
+        rows = self.query_all("""
+            SELECT date, COALESCE(SUM(input+output+cache_create+cache_read), 0)
+            FROM daily_agg WHERE date >= ? GROUP BY date ORDER BY date""",
+            ((datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d"),))
+        result = [(r[0], r[1]) for r in rows] if rows else []
+        today = self.query_one("""SELECT COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+cache_creation_tokens), 0)
+            FROM usage_all WHERE created_at >= ?""", (self.local_midnight(0),))
+        if today and today[0] > 0:
+            result.append((datetime.now().strftime("%Y-%m-%d"), today[0]))
         return result
 
     def query_app_daily(self, days):

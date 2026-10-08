@@ -7,7 +7,6 @@ try:
 except Exception:
     pass
 import  os
-import sqlite3
 import threading
 import time
 import queue
@@ -2201,7 +2200,6 @@ class CcBarTray:
             menu = pystray.Menu(*self.build_menu())
             self.icon.menu = menu
 
-    @_on_gui
     # ------------------------------------------------------------ 洞察中心
 
     @staticmethod
@@ -2387,9 +2385,10 @@ class CcBarTray:
         nb = ttk.Notebook(root)
         nb.pack(fill=tk.BOTH, expand=True, padx=12, pady=(12, 12))
 
-        def tab():
+        def tab(title):
+            # 注意：必须显式 nb.add()——把 Frame pack 进 Notebook 不会自动生成页签
             f = tk.Frame(nb, bg=Design.BACKGROUND)
-            f.pack(fill=tk.BOTH, expand=True)
+            nb.add(f, text=title)
             return f
 
         def png_label(frame, img):
@@ -2401,7 +2400,7 @@ class CcBarTray:
             return lbl
 
         # ============ 费用 ============
-        f_cost = tab()
+        f_cost = tab("费用")
         money = lambda v: f"${v:.2f}"
         cards = [("今日费用", cost_today), ("近 7 天", cost7), ("近 30 天", cost30)]
         for i, (t, v) in enumerate(cards):
@@ -2415,7 +2414,8 @@ class CcBarTray:
                      font=("Microsoft YaHei UI", 19, "bold")).pack(anchor='w')
         tk.Label(f_cost, text="近 30 天费用走势", fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
                  font=("Microsoft YaHei UI", 10, "bold")).pack(anchor='w', padx=16, pady=(14, 2))
-        png_label(f_cost, self._bar_chart_png([(d, c) for d, c in cost_daily], Design.BRAND))
+        png_label(f_cost, self._bar_chart_png(
+            [(d[5:], {"费用": c}) for d, c in cost_daily], {"费用": Design.BRAND}))
         tk.Label(f_cost, text="模型费用排行（近 30 天）", fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
                  font=("Microsoft YaHei UI", 10, "bold")).pack(anchor='w', padx=16, pady=(12, 2))
         for m, c, tok in cost_models:
@@ -2431,7 +2431,7 @@ class CcBarTray:
                  font=Design.FONT_UI_SMALL).pack(anchor='w', padx=16, pady=(14, 8))
 
         # ============ 洞察 ============
-        f_ins = tab()
+        f_ins = tab("洞察")
         grid = tk.Frame(f_ins, bg=Design.BACKGROUND)
         grid.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         for c in range(2):
@@ -2461,7 +2461,7 @@ class CcBarTray:
             self._insight_card(grid, i // 2, i % 2, t, v, sub)
 
         # ============ 分享 ============
-        f_share = tab()
+        f_share = tab("分享")
         card_lbl = tk.Label(f_share, bg=Design.BACKGROUND)
         card_lbl.pack(pady=(18, 10))
         card_img = ImageTk.PhotoImage(self._share_card_png())
@@ -2485,7 +2485,7 @@ class CcBarTray:
                  font=Design.FONT_UI_SMALL).pack()
 
         # ============ 渠道 ============
-        f_ch = tab()
+        f_ch = tab("渠道")
         tk.Label(f_ch, text="近 30 天渠道用量（堆叠）", fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
                  font=("Microsoft YaHei UI", 10, "bold")).pack(anchor='w', padx=16, pady=(14, 2))
         src_names = sorted({r[1] for r in channels})
@@ -2543,7 +2543,7 @@ class CcBarTray:
         png_label(f_ch, self._line_chart_png(hit_pts, Design.BRAND, suffix="%"))
 
         # ============ 流水 ============
-        f_tl = tab()
+        f_tl = tab("流水")
         cols = ("时间", "渠道", "模型", "Token", "费用")
         tree = ttk.Treeview(f_tl, columns=cols, show="headings", height=19, style="Insights.Treeview")
         widths = (90, 90, 220, 110, 80)
@@ -2593,6 +2593,7 @@ class CcBarTray:
 
         self._bring_to_front(root)
 
+    @_on_gui
     def show_settings(self, icon=None, item=None):
         """显示设置窗口（统一深色风格）"""
         import tkinter as tk
