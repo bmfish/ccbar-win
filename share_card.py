@@ -8,6 +8,7 @@
 import os
 
 import l10n
+from l10n import L          # 卡片文案统一走 L(中文原文)
 import themes
 import qr
 
@@ -152,20 +153,19 @@ def card_image(title, date_text, big_label, big_value, stats, trend,
 
 
 def share_card_image(today_total, week_total, month_total, all_total, trend,
-                     today_credits=0.0, now=None, theme=None,
-                     url=QR_URL, credits_label="积分"):
+                     today_credits=0.0, now=None, theme=None, url=QR_URL):
     """今日战报卡：今日消耗 + 近7天/近30天/累计（有积分时额外列一行）"""
     from datetime import datetime
 
     tokens = themes.design_tokens(theme) if theme else themes.design_tokens(None)
     now = now or datetime.now()
-    stats = [("近 7 天", _fmt_tokens(week_total)),
-             ("近 30 天", _fmt_tokens(month_total)),
-             ("累计", _fmt_tokens(all_total))]
+    stats = [(L("近 7 天"), _fmt_tokens(week_total)),
+             (L("近 30 天"), _fmt_tokens(month_total)),
+             (L("累计"), _fmt_tokens(all_total))]
     return card_image(
-        title="AI 用量战报",
+        title=L("AI 用量战报"),
         date_text=now.strftime("%Y-%m-%d"),
-        big_label="今日消耗",
+        big_label=L("今日消耗"),
         big_value=_fmt_tokens(today_total),
         stats=stats,
         trend=trend or [],
@@ -181,13 +181,13 @@ def weekly_card_image(date_text, total, reqs, peak, trend, theme=None,
     tokens = themes.design_tokens(theme) if theme else themes.design_tokens(None)
     total = int(total or 0)
     return card_image(
-        title="AI 用量周报",
+        title=L("AI 用量周报"),
         date_text=date_text,
-        big_label="周消耗",
+        big_label=L("周消耗"),
         big_value=_fmt_tokens(total),
-        stats=[("日均", _fmt_tokens(total // 7)),
-               ("峰值", _fmt_tokens(peak)),
-               ("请求数", str(int(reqs or 0)))],
+        stats=[(L("日均"), _fmt_tokens(total // 7)),
+               (L("峰值"), _fmt_tokens(peak)),
+               (L("请求数"), str(int(reqs or 0)))],
         trend=trend or [],
         accent=tokens["BRAND"],
         big_number=tokens["BIG_NUMBER"],

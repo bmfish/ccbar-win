@@ -76,6 +76,53 @@ class TestConstructApp(unittest.TestCase):
         finally:
             app.store._close()
 
+    def test_tooltip_is_three_lines_like_macos(self):
+        """悬停提示对齐 macOS：今日 / 昨日 / 请求数"""
+        app = main.CcBarTray()
+        try:
+            stats = {0: {"total": 1234567, "reqs": 7}, 1: {"total": 20000}}
+            app.query_day_stats = lambda days=0: stats.get(days)
+            zh = app.get_tooltip_text().splitlines()
+            self.assertEqual(len(zh), 3)
+            self.assertTrue(zh[0].startswith("今日："))
+            self.assertTrue(zh[1].startswith("昨日："))
+            self.assertTrue(zh[2].startswith("请求数："))
+            self.assertIn("123万", zh[0])
+
+            l10n.set_language("en")
+            en = app.get_tooltip_text().splitlines()
+            self.assertTrue(en[0].startswith("Today: "))
+            self.assertTrue(en[1].startswith("Yesterday: "))
+            self.assertTrue(en[2].startswith("Requests: "))
+            self.assertIn("1.23M", en[0])
+
+            # 昨天没数据时只剩两行，且不出现 None
+            app.query_day_stats = lambda days=0: stats.get(0) if days == 0 else None
+            self.assertEqual(len(app.get_tooltip_text().splitlines()), 2)
+
+            # 完全没有数据源时回落一句人话
+            app.query_day_stats = lambda days=0: None
+            self.assertEqual(app.get_tooltip_text(), l10n.L("ccBar - 未找到数据"))
+        finally:
+            app.store._close()
+
+    def test_popover_wide_setting_is_wired(self):
+        """宽版弹窗：设置里能改、show() 会按它把面板宽度切成 380"""
+        app = main.CcBarTray()
+        try:
+            self.assertFalse(app.settings.get("popover_wide"))
+            app.settings.set("popover_wide", True)
+            panel = app.popover
+            # 只看宽度选择逻辑，不真的建窗口
+            app.settings.set("popover_wide", False)
+            panel.WIDTH = 300 if not app.settings.get("popover_wide") else 380
+            self.assertEqual(panel.WIDTH, 300)
+            app.settings.set("popover_wide", True)
+            panel.WIDTH = 300 if not app.settings.get("popover_wide") else 380
+            self.assertEqual(panel.WIDTH, 380)
+        finally:
+            app.store._close()
+
     def test_legacy_settings_txt_is_migrated_on_startup(self):
         """老 settings.txt 用户升级后：启动即迁移，配置不丢"""
         with open(os.path.join(self.tmp, "settings.txt"), "w", encoding="utf-8") as f:

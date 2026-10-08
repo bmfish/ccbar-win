@@ -190,7 +190,7 @@ class TestNoDeadSettings(unittest.TestCase):
         "trae_enabled", "trae_sessionid", "led_red_threshold",
         "monthly_budget_usd", "default_token_price", "auto_weekly_report",
         "app_language", "theme", "custom_themes", "insights_last_page",
-        "last_auto_backup_date", "last_update_check_date",
+        "last_auto_backup_date", "last_update_check_date", "popover_wide",
     }
 
     def test_behavior_keys_are_read_outside_the_settings_window(self):

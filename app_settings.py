@@ -58,6 +58,7 @@ DEFAULTS = {
     "default_token_price": 0.0,           # 未计费渠道默认单价（$/M tokens），0=关闭
     "auto_weekly_report": True,
     "launch_at_login": False,
+    "popover_wide": False,
     "app_language": "system",
     "theme": "默认主题",
     "custom_themes": [],

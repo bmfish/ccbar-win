@@ -25,6 +25,7 @@ from update_check import fetch_latest_version, is_newer_version, RELEASES_URL
 import app_settings
 import autostart
 import l10n
+from l10n import L          # 界面文案统一走 L(中文原文)；当前语言由 l10n 维护
 import share_card
 import themes
 import weekly_report
@@ -545,7 +546,7 @@ class PopoverWindow:
     只在 GUI 线程上操作，外部调用一律经 CcBarTray._ui() 投递。
     """
 
-    WIDTH = 300
+    WIDTH = 300          # 默认宽；设置里开了宽版弹窗后为 380
     PAD = 12
     RADIUS = 10
     BTN_HEIGHT = 40
@@ -585,6 +586,9 @@ class PopoverWindow:
 
         if self.win is not None:
             self.close()
+
+        # 宽版弹窗（macOS 同款设置）：布局是纵向堆叠，加宽只是给模型名更多空间
+        self.WIDTH = 380 if self.app.settings.get("popover_wide") else PopoverWindow.WIDTH
 
         # 打开面板时拉一次 Trae（交互档 1 分钟节流）：拿不到新数据也不影响建面板，
         # 同步在线程里跑，下一次刷新会把结果带进来
@@ -682,7 +686,7 @@ class PopoverWindow:
         """面板贴在光标上方（托盘在右下角），并钳制在工作区内"""
         cx, cy = win.winfo_pointerxy()
         left, top, right, bottom = PopoverWindow._work_area(win)
-        width = PopoverWindow.WIDTH
+        width = self.WIDTH
 
         x = min(max(cx - width // 2, left + 8), right - width - 8)
         y = cy - height - 12
@@ -738,7 +742,7 @@ class PopoverWindow:
         work_hours = app.query_work_hours()
 
         # 问候语
-        greeting = random.choice(app.GREETINGS)
+        greeting = L(random.choice(app.GREETINGS))
         if len(greeting) > 20:
             greeting = greeting[:19] + "…"
         tk.Label(parent, text=greeting, fg=Design.TEXT_SECONDARY,
@@ -747,7 +751,7 @@ class PopoverWindow:
 
         # 今日用量
         if today:
-            self._section_header(parent, "📊 今日用量",
+            self._section_header(parent, L("📊 今日用量"),
                                  self._open(app.show_hourly_detail_today))
             # 大数字 + 今日积分（mac TodayCard：大数字后透出当日积分）
             big_row = tk.Frame(parent, bg=Design.BACKGROUND)
@@ -757,7 +761,7 @@ class PopoverWindow:
                      font=Design.FONT_BIG, anchor='w').pack(side=tk.LEFT)
             credits = self._today_credits()
             if credits > 0:
-                tk.Label(big_row, text="%s 积分" % format_credits(credits),
+                tk.Label(big_row, text=L("%s 积分") % format_credits(credits),
                          fg=Design.TEXT_SECONDARY, bg=Design.BACKGROUND,
                          font=Design.FONT_UI_SMALL, anchor='w').pack(
                              side=tk.LEFT, padx=(8, 2), pady=(0, 2))
@@ -778,17 +782,17 @@ class PopoverWindow:
                          anchor='w').pack(fill=tk.X, pady=(2, 0))
         else:
             if app.store.attached:
-                tk.Label(parent, text="📊 今日暂无数据", fg=Design.TEXT_MUTED,
+                tk.Label(parent, text=L("📊 今日暂无数据"), fg=Design.TEXT_MUTED,
                          bg=Design.BACKGROUND, font=Design.FONT_UI).pack(
                              fill=tk.X, pady=6)
             else:
-                self._stat_row(parent, "🌶️", "未找到数据源", "去设置",
+                self._stat_row(parent, "🌶️", L("未找到数据源"), L("去设置"),
                                self._open(app.show_settings))
         self._separator(parent)
 
         # 模型分布
         if models:
-            self._section_header(parent, "🤖 模型分布",
+            self._section_header(parent, L("🤖 模型分布"),
                                  self._open(app.show_model_detail))
             max_total = models[0]["total"] if models else 1
             colors = model_colors()
@@ -802,16 +806,16 @@ class PopoverWindow:
 
         # 时间段统计
         if yesterday:
-            self._stat_row(parent, "📅", "昨日", Design.fmt_tokens(yesterday["total"]),
+            self._stat_row(parent, "📅", L("昨日"), Design.fmt_tokens(yesterday["total"]),
                            self._open(app.show_hourly_detail_yesterday))
         if week:
-            self._stat_row(parent, "📊", "近7天", Design.fmt_tokens(week["total"]),
+            self._stat_row(parent, "📊", L("近7天"), Design.fmt_tokens(week["total"]),
                            self._open(app.show_weekly_detail))
         if month:
-            self._stat_row(parent, "📆", "近30天", Design.fmt_tokens(month["total"]),
+            self._stat_row(parent, "📆", L("近30天"), Design.fmt_tokens(month["total"]),
                            self._open(app.show_monthly_detail))
         if total:
-            self._stat_row(parent, "📈", "历史总量", Design.fmt_tokens(total["total"]),
+            self._stat_row(parent, "📈", L("历史总量"), Design.fmt_tokens(total["total"]),
                            self._open(app.show_all_time_detail))
         # 今日每小时 sparkline（垫在趋势行下面）
         self._hourly_sparkline(parent)
@@ -819,11 +823,11 @@ class PopoverWindow:
 
         # 按钮栏（复制 / 刷新 / 洞察 / 设置 / 退出：5 格等宽，300px 面板放得下）
         self._button_bar(parent, [
-            ("📋", "复制", self._on_copy),
-            ("🔄", "刷新", self._on_refresh),
-            ("📈", "洞察", self._on_insights),
-            ("⚙️", "设置", self._on_settings),
-            ("❌", "退出", self._on_quit),
+            ("📋", L("复制"), self._on_copy),
+            ("🔄", L("刷新"), self._on_refresh),
+            ("📈", L("洞察"), self._on_insights),
+            ("⚙️", L("设置"), self._on_settings),
+            ("❌", L("退出"), self._on_quit),
         ])
 
     def _separator(self, parent):
@@ -864,7 +868,7 @@ class PopoverWindow:
         count, avg, longest = CcBarTray._session_stats(rows)
         if count <= 0:
             return ""
-        return "今日会话  %d 个 · 平均 %d 分钟 · 最长 %d 分钟" % (count, avg, longest)
+        return L("今日会话  %d 个 · 平均 %d 分钟 · 最长 %d 分钟") % (count, avg, longest)
 
     @staticmethod
     def _prediction_text(today, work_hours):
@@ -878,7 +882,7 @@ class PopoverWindow:
         if hours <= 0.2:
             return None
         predicted = today["total"] / hours * 24
-        return "按当前速率到 24:00 约 %s" % Design.fmt_tokens(int(predicted))
+        return L("按当前速率到 24:00 约 %s") % Design.fmt_tokens(int(predicted))
 
     @staticmethod
     def _hour_values(hourly):
@@ -930,12 +934,12 @@ class PopoverWindow:
         cache_rate = (today["cache_read"] / total_input * 100) if total_input > 0 else 0
 
         columns = [
-            ("请求数", f"{today['reqs']}次", Design.TEXT_PRIMARY),
-            ("缓存命中", f"{cache_rate:.0f}%",
+            (L("请求数"), L("%d次") % today['reqs'], Design.TEXT_PRIMARY),
+            (L("缓存命中"), f"{cache_rate:.0f}%",
              Design.SUCCESS if cache_rate > 80 else Design.WARNING),
         ]
         if work_hours:
-            columns.append(("时长", f"{work_hours}h", Design.TEXT_PRIMARY))
+            columns.append((L("时长"), f"{work_hours}h", Design.TEXT_PRIMARY))
 
         row = tk.Frame(parent, bg=Design.BACKGROUND)
         row.pack(fill=tk.X, pady=(0, 4))
@@ -1133,28 +1137,9 @@ class PopoverWindow:
 
 
 class CcBarTray:
-    GREETINGS = [
-        "今天也要加油写 Bug 哦 ✨",
-        "代码如诗，Bug 如风 🌸",
-        "写代码不如谈恋爱 💕",
-        "需求又改了，习惯就好 🫠",
-        "今天不出 Bug，明天出什么 🎯",
-        "写代码使我快乐（并不）🎭",
-        "技术债也是债 💸",
-        "今天的需求明天再做 🌙",
-        "码农的一天从咖啡开始 ☕",
-        "Git commit -m '又一个 Bug' 🔧",
-        "产品经理说很简单 🤡",
-        "这个需求一天就能做完 📝",
-        "代码能跑就行 🏃",
-        "今天也是充满 Bug 的一天 🐛",
-        "先实现，再优化（永远不优化）⏳",
-        "这个接口我三分钟就写完 ⚡",
-        "测试？什么测试？ 🎲",
-        "线上出 Bug 了？不可能 🚫",
-        "重构？先加个 if 吧 🤔",
-        "这个功能很简单的 🎪",
-    ]
+    # 问候语原文表在 l10n 里（原文即词条 key）；显示时才经 L() 取词条，
+    # 免得模块导入期把语言定死成中文
+    GREETINGS = l10n.GREETINGS
 
     def __init__(self):
         self.icon = None
@@ -1201,7 +1186,7 @@ class CcBarTray:
             try:
                 fn()
             except Exception as e:
-                print(f"UI 回调异常: {e}")
+                print(L("UI 回调异常: ") + str(e))
 
         if self._ui_root is not None:
             self._ui_root.after(50, self._drain_ui)
@@ -1209,7 +1194,7 @@ class CcBarTray:
     def _ui(self, fn):
         """把回调投递到 GUI 线程执行（可从任意线程调用）"""
         if self._ui_root is None:
-            print("GUI 线程未就绪，忽略 UI 请求")
+            print(L("GUI 线程未就绪，忽略 UI 请求"))
             return
         self._ui_queue.put(fn)
 
@@ -1257,8 +1242,9 @@ class CcBarTray:
 
     def apply_theme(self):
         """按设置套用主题，返回当前主题字典"""
-        self.theme = themes.find(self.settings.get("theme") or "默认主题",
-                                self.settings.get("custom_themes") or [])
+        self.theme = themes.find(
+            self.settings.get("theme") or themes.default_theme()["id"],
+            self.settings.get("custom_themes") or [])
         Design.apply(self.theme)
         return self.theme
 
@@ -1310,7 +1296,7 @@ class CcBarTray:
                 auto=bool(self.settings.get("auto_weekly_report", True)),
                 english=l10n.is_english())
         except Exception as e:
-            print("周报生成失败:", e)
+            print(L("周报生成失败:"), e)
             return None
 
     def _weekly_card_png_bytes(self, date_text, total, reqs, peak, trend):
@@ -1319,8 +1305,8 @@ class CcBarTray:
                                          theme=self.theme)
 
     def _notify_weekly_report(self, title, body):
-        """周报落盘后的系统通知"""
-        self._toast(title, body)
+        """周报落盘后的系统通知（weekly_report 只给中文原文，显示时过 L）"""
+        self._toast(L(title), L(body))
 
     def _toast(self, title, body, duration=5):
         """Windows 原生 Toast。
@@ -1332,7 +1318,7 @@ class CcBarTray:
             win10toast.ToastNotifier().show_toast(
                 title, body, duration=duration, threaded=True)
         except Exception as e:
-            print("通知发送失败:", e)
+            print(L("通知发送失败:"), e)
 
     def create_icon(self, color=None):
         """生成闪电图标
@@ -1408,8 +1394,9 @@ class CcBarTray:
 
         # Toast 通知（Windows 原生）
         self._toast(
-            "🫧 里程碑",
-            f"+{self.fmt_tokens(delta)} tokens！今日已达 {self.fmt_tokens(total)}（每{interval_wan}万通知一次）")
+            L("🫧 里程碑"),
+            L("+%s tokens！今日已达 %s（每%d万通知一次）")
+            % (self.fmt_tokens(delta), self.fmt_tokens(total), interval_wan))
 
         # 托盘标题闪烁（加 ✨ 前缀，0.6秒后恢复）
         if self.icon:
@@ -1724,28 +1711,24 @@ class CcBarTray:
         threshold_tokens = self.settings["warning_threshold"] * 10000
         if stats["total"] >= threshold_tokens:
             self._toast(
-                "用量预警",
-                f"今日 Token 用量已达 {self.fmt_tokens(stats['total'])}，"
-                f"超过预警阈值 {self.settings['warning_threshold']}万",
+                L("用量预警"),
+                L("今日 Token 用量已达 %s，超过预警阈值 %d万")
+                % (self.fmt_tokens(stats['total']),
+                   self.settings['warning_threshold']),
                 duration=10)
 
             with open(notified_file, "a") as f:
                 f.write(f"{today_key}\n")
 
     def fmt_tokens(self, tokens):
-        """格式化 token 数量"""
-        if tokens >= 100000000:
-            return f"{tokens/100000000:.2f}亿"
-        elif tokens >= 10000:
-            return f"{tokens//10000}万"
-        else:
-            return str(tokens)
+        """格式化 token 数量（中英双语：万/亿 ↔ K/M/B）"""
+        return l10n.format_tokens(tokens)
 
     def get_menu_text(self):
         """获取菜单显示文本"""
         today = self.query_day_stats(0)
         if not today:
-            return "未找到数据源"
+            return L("未找到数据源")
 
         total_str = self.fmt_tokens(today["total"])
         return total_str
@@ -1763,9 +1746,9 @@ class CcBarTray:
         menu_items = []
 
         # default=True 的项会被左键点击触发，右键仍出原生菜单
-        menu_items.append(pystray.MenuItem("打开面板", self.toggle_popover, default=True))
+        menu_items.append(pystray.MenuItem(L("打开面板"), self.toggle_popover, default=True))
 
-        greeting = random.choice(self.GREETINGS)
+        greeting = L(random.choice(self.GREETINGS))
         menu_items.append(pystray.MenuItem(greeting[:16], None, enabled=False))
         menu_items.append(pystray.Menu.SEPARATOR)
 
@@ -1774,28 +1757,32 @@ class CcBarTray:
             self.check_warning(today)
 
             today_str = self.fmt_tokens(today["total"])
-            menu_items.append(pystray.MenuItem(f"📊 今日: {today_str}", self.show_hourly_detail_today))
+            menu_items.append(pystray.MenuItem(L("📊 今日: %s") % today_str,
+                                               self.show_hourly_detail_today))
 
-            menu_items.append(pystray.MenuItem(f"  🔢 请求: {today['reqs']}次", None, enabled=False))
+            menu_items.append(pystray.MenuItem(
+                L("  🔢 请求: %d次") % today['reqs'], None, enabled=False))
 
             # 缓存命中率
             total_input = today["input"] + today["cache_create"] + today["cache_read"]
             cache_rate = (today["cache_read"] / total_input * 100) if total_input > 0 else 0
-            menu_items.append(pystray.MenuItem(f"  💾 缓存命中: {cache_rate:.1f}%", None, enabled=False))
+            menu_items.append(pystray.MenuItem(
+                L("  💾 缓存命中: %.1f%%") % cache_rate, None, enabled=False))
 
             if work_hours:
-                menu_items.append(pystray.MenuItem(f"  ⏱️ 时长: {work_hours}h", None, enabled=False))
+                menu_items.append(pystray.MenuItem(
+                    L("  ⏱️ 时长: %sh") % work_hours, None, enabled=False))
         else:
             if self.store.attached:
-                menu_items.append(pystray.MenuItem("📊 今日暂无数据", None, enabled=False))
+                menu_items.append(pystray.MenuItem(L("📊 今日暂无数据"), None, enabled=False))
             else:
-                menu_items.append(pystray.MenuItem("🌶️ 未找到数据源，请去设置", self.show_settings))
+                menu_items.append(pystray.MenuItem(L("🌶️ 未找到数据源，请去设置"), self.show_settings))
 
         menu_items.append(pystray.Menu.SEPARATOR)
 
         # 模型分布
         if models:
-            menu_items.append(pystray.MenuItem("🤖 模型分布", self.show_model_detail))
+            menu_items.append(pystray.MenuItem(L("🤖 模型分布"), self.show_model_detail))
             for m in models[:3]:
                 model_name = m["model"][:15] + "…" if len(m["model"]) > 15 else m["model"]
                 menu_items.append(pystray.MenuItem(f"  {model_name}: {self.fmt_tokens(m['total'])}", None, enabled=False))
@@ -1803,40 +1790,47 @@ class CcBarTray:
 
         # 昨日
         if yesterday:
-            menu_items.append(pystray.MenuItem(f"📅 昨日: {self.fmt_tokens(yesterday['total'])}", self.show_hourly_detail_yesterday))
+            menu_items.append(pystray.MenuItem(
+                L("📅 昨日: %s") % self.fmt_tokens(yesterday['total']),
+                self.show_hourly_detail_yesterday))
 
         # 近7天
         if week:
-            menu_items.append(pystray.MenuItem(f"📅 近7天: {self.fmt_tokens(week['total'])}", self.show_weekly_detail))
+            menu_items.append(pystray.MenuItem(
+                L("📅 近7天: %s") % self.fmt_tokens(week['total']),
+                self.show_weekly_detail))
 
         # 近30天
         if month:
-            menu_items.append(pystray.MenuItem(f"📆 近30天: {self.fmt_tokens(month['total'])}", self.show_monthly_detail))
+            menu_items.append(pystray.MenuItem(
+                L("📆 近30天: %s") % self.fmt_tokens(month['total']),
+                self.show_monthly_detail))
 
         # 历史总量（按月汇总窗口，不是近30天）
         if total:
-            menu_items.append(pystray.MenuItem(f"📈 历史总量: {self.fmt_tokens(total['total'])}",
-                                               self.show_all_time_detail))
+            menu_items.append(pystray.MenuItem(
+                L("📈 历史总量: %s") % self.fmt_tokens(total['total']),
+                self.show_all_time_detail))
 
         menu_items.append(pystray.Menu.SEPARATOR)
 
         # 刷新
-        menu_items.append(pystray.MenuItem("🔄 刷新", self.refresh_data))
+        menu_items.append(pystray.MenuItem(L("🔄 刷新"), self.refresh_data))
 
         # 洞察中心
-        menu_items.append(pystray.MenuItem("📈 洞察中心", self.show_insights))
+        menu_items.append(pystray.MenuItem(L("📈 洞察中心"), self.show_insights))
 
         # 备份数据
-        menu_items.append(pystray.MenuItem("💾 备份数据", self.backup_data))
+        menu_items.append(pystray.MenuItem(L("💾 备份数据"), self.backup_data))
 
         # 检查更新
-        menu_items.append(pystray.MenuItem("⬇️ 检查更新", self.check_for_updates))
+        menu_items.append(pystray.MenuItem(L("⬇️ 检查更新"), self.check_for_updates))
 
         # 设置
-        menu_items.append(pystray.MenuItem("⚙️ 设置", self.show_settings))
+        menu_items.append(pystray.MenuItem(L("⚙️ 设置"), self.show_settings))
 
         # 退出
-        menu_items.append(pystray.MenuItem("❌ 退出", self.quit_app))
+        menu_items.append(pystray.MenuItem(L("❌ 退出"), self.quit_app))
 
         return menu_items
 
@@ -1860,7 +1854,7 @@ class CcBarTray:
     def _detail_today_chip(parent, command):
         """「回到今天」胶囊（只在非当前周期显示，对齐 mac DetailRootView.onToday）"""
         import tkinter as tk
-        return tk.Button(parent, text="回到今天", command=command,
+        return tk.Button(parent, text=L("回到今天"), command=command,
                          bg=Design.CARD_FILL, fg=Design.BRAND,
                          activebackground=Design.CARD_BORDER,
                          activeforeground=Design.BRAND,
@@ -1871,7 +1865,7 @@ class CcBarTray:
     def _detail_export_button(parent, command):
         """详情窗口的 CSV 导出按钮（mac 导航栏上的导出图标）"""
         import tkinter as tk
-        return tk.Button(parent, text="导出 CSV", command=command,
+        return tk.Button(parent, text=L("导出 CSV"), command=command,
                          bg=Design.CARD_FILL, fg=Design.TEXT_PRIMARY,
                          activebackground=Design.BTN_BG_HOVER,
                          activeforeground=Design.TEXT_PRIMARY,
@@ -2004,9 +1998,9 @@ class CcBarTray:
                 writer.writerow(header)
                 writer.writerows(rows)
         except OSError as e:
-            messagebox.showerror("导出失败", str(e))
+            messagebox.showerror(L("导出失败"), str(e))
             return None
-        messagebox.showinfo("导出完成", "已导出 %d 行到：\n%s" % (len(rows), path))
+        messagebox.showinfo(L("导出完成"), L("已导出 %d 行到：\n%s") % (len(rows), path))
         return path
 
     # ------------------------------------------------------------ 窗口位置记忆
@@ -2106,7 +2100,7 @@ class CcBarTray:
         import tkinter as tk
 
         root = tk.Toplevel(self._ui_root)
-        root.title("每小时用量详情")
+        root.title(L("每小时用量详情"))
         self._apply_window_geometry(root, "hourly", "520x620")
         root.configure(bg=Design.BACKGROUND)
         root.minsize(460, 400)
@@ -2144,8 +2138,8 @@ class CcBarTray:
             refresh()
 
         def export_csv():
-            self._export_detail_csv("导出每小时用量", "ccbar-每小时.csv",
-                                    ["时间", "请求数", "总Token", "缓存读"],
+            self._export_detail_csv(L("导出每小时用量"), L("ccbar-每小时.csv"),
+                                    [L("时间"), L("请求数"), L("总Token"), L("缓存读")],
                                     state["export_rows"])
 
         self._detail_nav_button(nav, "‹", prev_day).pack(side=tk.LEFT)
@@ -2185,8 +2179,8 @@ class CcBarTray:
         chart_canvas.bind("<Configure>", draw_chart)
 
         # 表头 + 可滚动数据区
-        self._detail_table_header(root, [("时间", 7, 'w'), ("请求数", 9, 'e'),
-                                         ("总token", 11, 'e'), ("缓存读", 11, 'e')])
+        self._detail_table_header(root, [(L("时间"), 7, 'w'), (L("请求数"), 9, 'e'),
+                                         (L("总token"), 11, 'e'), (L("缓存读"), 11, 'e')])
         inner, bind_wheel = self._detail_scroll_area(root)
 
         def refresh():
@@ -2208,7 +2202,7 @@ class CcBarTray:
                 set_stats([])
                 chart_state.clear()
                 chart_canvas.delete("all")
-                tk.Label(inner, text="暂无数据", fg=Design.TEXT_MUTED,
+                tk.Label(inner, text=L("暂无数据"), fg=Design.TEXT_MUTED,
                          bg=Design.BACKGROUND, font=Design.FONT_UI).pack(pady=20)
                 return
 
@@ -2235,14 +2229,14 @@ class CcBarTray:
             draw_chart()
 
             set_stats([
-                ("总 Token", Design.fmt_tokens(total_token), None),
-                ("请求数", "%d" % total_reqs, None),
-                ("峰值时段", ("%d时" % peak_hour) if peak_hour is not None else "-",
+                (L("总 Token"), Design.fmt_tokens(total_token), None),
+                (L("请求数"), "%d" % total_reqs, None),
+                (L("峰值时段"), (L("%d时") % peak_hour) if peak_hour is not None else "-",
                  Design.WARNING),
             ])
 
             # 合计行
-            self._detail_total_row(inner, [("合计", 7, 'w'), ("%d次" % total_reqs, 9, 'e'),
+            self._detail_total_row(inner, [(L("合计"), 7, 'w'), (L("%d次") % total_reqs, 9, 'e'),
                                            (Design.fmt_tokens(total_token), 11, 'e'),
                                            (Design.fmt_tokens(total_cache), 11, 'e')])
             tk.Frame(inner, bg=Design.CARD_BORDER, height=1).pack(fill=tk.X, pady=3)
@@ -2252,10 +2246,10 @@ class CcBarTray:
                                               "cache_read": 0, "cache_create": 0}
                 token = hour_token(hour)
                 cache_read = d.get("cache_read", 0)
-                state["export_rows"].append(["%d时" % hour, d["reqs"], token, cache_read])
+                state["export_rows"].append([L("%d时") % hour, d["reqs"], token, cache_read])
                 self._detail_data_row(inner, [
-                    ("%d时" % hour, 7, 'w', Design.GRADIENT[0]),
-                    ("%d次" % d["reqs"] if d["reqs"] > 0 else "-", 9, 'e',
+                    (L("%d时") % hour, 7, 'w', Design.GRADIENT[0]),
+                    (L("%d次") % d["reqs"] if d["reqs"] > 0 else "-", 9, 'e',
                      Design.TEXT_PRIMARY if d["reqs"] > 0 else Design.TEXT_MUTED),
                     (Design.fmt_tokens(token), 11, 'e',
                      Design.TEXT_PRIMARY if token > 0 else Design.TEXT_MUTED),
@@ -2269,11 +2263,11 @@ class CcBarTray:
 
     def show_weekly_detail(self, icon=None, item=None):
         """显示近7天详情"""
-        self.show_daily_detail(days=7, title="近7天用量")
+        self.show_daily_detail(days=7, title=L("近7天用量"))
 
     def show_monthly_detail(self, icon=None, item=None):
         """显示近30天详情"""
-        self.show_daily_detail(days=30, title="近30天用量")
+        self.show_daily_detail(days=30, title=L("近30天用量"))
 
     @_on_gui
     def show_model_detail(self, icon=None, item=None):
@@ -2285,7 +2279,7 @@ class CcBarTray:
         import tkinter as tk
 
         root = tk.Toplevel(self._ui_root)
-        root.title("模型分布详情")
+        root.title(L("模型分布详情"))
         self._apply_window_geometry(root, "model", "620x620")
         root.configure(bg=Design.BACKGROUND)
         root.minsize(520, 420)
@@ -2316,8 +2310,8 @@ class CcBarTray:
             refresh_model()
 
         def export_csv():
-            self._export_detail_csv("导出模型分布", "ccbar-模型分布.csv",
-                                    ["模型", "请求数", "总Token", "缓存读"],
+            self._export_detail_csv(L("导出模型分布"), L("ccbar-模型分布.csv"),
+                                    [L("模型"), L("请求数"), L("总Token"), L("缓存读")],
                                     state["export_rows"])
 
         self._detail_nav_button(nav, "‹", prev_day).pack(side=tk.LEFT)
@@ -2344,8 +2338,8 @@ class CcBarTray:
         legend_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(12, 0))
 
         # 表头 + 可滚动数据区
-        self._detail_table_header(root, [("模型", 22, 'w'), ("请求数", 9, 'e'),
-                                         ("总token", 11, 'e'), ("缓存读", 11, 'e')])
+        self._detail_table_header(root, [(L("模型"), 22, 'w'), (L("请求数"), 9, 'e'),
+                                         (L("总token"), 11, 'e'), (L("缓存读"), 11, 'e')])
         inner, bind_wheel = self._detail_scroll_area(root)
 
         def refresh_model():
@@ -2368,7 +2362,7 @@ class CcBarTray:
             if not models:
                 set_stats([])
                 donut_canvas.delete("all")
-                tk.Label(inner, text="暂无数据", fg=Design.TEXT_MUTED,
+                tk.Label(inner, text=L("暂无数据"), fg=Design.TEXT_MUTED,
                          bg=Design.BACKGROUND, font=Design.FONT_UI).pack(pady=20)
                 return
 
@@ -2391,9 +2385,9 @@ class CcBarTray:
 
             top_share = (merged_list[0][1] / total_token * 100) if total_token > 0 else 0
             set_stats([
-                ("总 Token", Design.fmt_tokens(total_token), None),
-                ("模型数", "%d" % len(merged_list), None),
-                ("Top1 占比", "%.0f%%" % top_share, Design.WARNING),
+                (L("总 Token"), Design.fmt_tokens(total_token), None),
+                (L("模型数"), "%d" % len(merged_list), None),
+                (L("Top1 占比"), "%.0f%%" % top_share, Design.WARNING),
             ])
 
             # 图例
@@ -2460,7 +2454,7 @@ class CcBarTray:
                     tk.Label(row, text=short_name, width=20, anchor='w',
                              fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
                              font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT)
-                    tk.Label(row, text=f"{m['reqs']}次", width=9, anchor='e',
+                    tk.Label(row, text=L("%d次") % m['reqs'], width=9, anchor='e',
                              fg=Design.TEXT_PRIMARY if m['reqs'] > 0 else Design.TEXT_MUTED,
                              bg=Design.BACKGROUND,
                              font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT)
@@ -2480,7 +2474,7 @@ class CcBarTray:
                                                  m["cache_read"]])
 
             # 合计行（mac 同款收口）
-            self._detail_total_row(inner, [("合计", 20, 'w'), ("%d次" % total_reqs, 9, 'e'),
+            self._detail_total_row(inner, [(L("合计"), 20, 'w'), (L("%d次") % total_reqs, 9, 'e'),
                                            (Design.fmt_tokens(total_token), 11, 'e'),
                                            (Design.fmt_tokens(total_cache), 11, 'e')])
 
@@ -2489,7 +2483,7 @@ class CcBarTray:
         self._bring_to_front(root)
 
     @_on_gui
-    def show_daily_detail(self, days=7, title="近7天用量"):
+    def show_daily_detail(self, days=7, title=None):
         """显示每日详情窗口（近7天 / 近30天）
 
         对齐 mac DetailWindowController / MonthDetailWindowController：统计卡
@@ -2498,6 +2492,7 @@ class CcBarTray:
         """
         import tkinter as tk
 
+        title = L(title) if title else L("近7天用量")
         root = tk.Toplevel(self._ui_root)
         root.title(title)
         geom_key = "week" if days == 7 else "month"
@@ -2541,9 +2536,9 @@ class CcBarTray:
             refresh_daily()
 
         def export_csv():
-            name = "ccbar-近7天.csv" if days == 7 else "ccbar-近30天.csv"
-            self._export_detail_csv("导出" + title, name,
-                                    ["日期", "请求数", "总Token", "缓存读"],
+            name = L("ccbar-近7天.csv") if days == 7 else L("ccbar-近30天.csv")
+            self._export_detail_csv(L("导出%s") % title, name,
+                                    [L("日期"), L("请求数"), L("总Token"), L("缓存读")],
                                     state["export_rows"])
 
         self._detail_nav_button(nav, "‹", prev_period).pack(side=tk.LEFT)
@@ -2582,8 +2577,8 @@ class CcBarTray:
         chart_canvas.bind("<Configure>", draw_chart)
 
         # 表头 + 可滚动数据区
-        self._detail_table_header(root, [("日期", 8, 'w'), ("请求数", 9, 'e'),
-                                         ("总token", 11, 'e'), ("缓存读", 11, 'e')])
+        self._detail_table_header(root, [(L("日期"), 8, 'w'), (L("请求数"), 9, 'e'),
+                                         (L("总token"), 11, 'e'), (L("缓存读"), 11, 'e')])
         inner, bind_wheel = self._detail_scroll_area(root)
 
         def refresh_daily():
@@ -2621,7 +2616,7 @@ class CcBarTray:
                 set_stats([])
                 chart_state.clear()
                 chart_canvas.delete("all")
-                tk.Label(inner, text="暂无数据", fg=Design.TEXT_MUTED,
+                tk.Label(inner, text=L("暂无数据"), fg=Design.TEXT_MUTED,
                          bg=Design.BACKGROUND, font=Design.FONT_UI).pack(pady=20)
                 return
 
@@ -2645,14 +2640,14 @@ class CcBarTray:
             draw_chart()
 
             set_stats([
-                ("总 Token", Design.fmt_tokens(total_token), None),
-                ("日均", Design.fmt_tokens(daily_avg), None),
-                ("请求数", "%d" % total_reqs, None),
-                ("缓存读", Design.fmt_tokens(total_cache), None),
+                (L("总 Token"), Design.fmt_tokens(total_token), None),
+                (L("日均"), Design.fmt_tokens(daily_avg), None),
+                (L("请求数"), "%d" % total_reqs, None),
+                (L("缓存读"), Design.fmt_tokens(total_cache), None),
             ])
 
             # 合计行
-            self._detail_total_row(inner, [("合计", 8, 'w'), ("%d次" % total_reqs, 9, 'e'),
+            self._detail_total_row(inner, [(L("合计"), 8, 'w'), (L("%d次") % total_reqs, 9, 'e'),
                                            (Design.fmt_tokens(total_token), 11, 'e'),
                                            (Design.fmt_tokens(total_cache), 11, 'e')])
             tk.Frame(inner, bg=Design.CARD_BORDER, height=1).pack(fill=tk.X, pady=3)
@@ -2664,7 +2659,7 @@ class CcBarTray:
                 state["export_rows"].append([key, d["reqs"], token, cache_read])
                 self._detail_data_row(inner, [
                     (key[5:].replace("-", "/"), 8, 'w', Design.GRADIENT[0]),
-                    ("%d次" % d["reqs"] if d["reqs"] > 0 else "-", 9, 'e',
+                    (L("%d次") % d["reqs"] if d["reqs"] > 0 else "-", 9, 'e',
                      Design.TEXT_PRIMARY if d["reqs"] > 0 else Design.TEXT_MUTED),
                     (Design.fmt_tokens(token), 11, 'e',
                      Design.TEXT_PRIMARY if token > 0 else Design.TEXT_MUTED),
@@ -2687,7 +2682,7 @@ class CcBarTray:
         import tkinter as tk
 
         root = tk.Toplevel(self._ui_root)
-        root.title("历史总量")
+        root.title(L("历史总量"))
         self._apply_window_geometry(root, "alltime", "560x620")
         root.configure(bg=Design.BACKGROUND)
         root.minsize(480, 420)
@@ -2697,12 +2692,12 @@ class CcBarTray:
 
         nav = tk.Frame(root, bg=Design.BACKGROUND)
         nav.pack(fill=tk.X, padx=16, pady=(12, 4))
-        tk.Label(nav, text="按月汇总", font=Design.FONT_MONO, fg=Design.TEXT_PRIMARY,
+        tk.Label(nav, text=L("按月汇总"), font=Design.FONT_MONO, fg=Design.TEXT_PRIMARY,
                  bg=Design.BACKGROUND).pack(side=tk.LEFT, expand=True)
 
         def export_csv():
-            self._export_detail_csv("导出历史总量", "ccbar-按月汇总.csv",
-                                    ["月份", "请求数", "总Token", "缓存读"],
+            self._export_detail_csv(L("导出历史总量"), L("ccbar-按月汇总.csv"),
+                                    [L("月份"), L("请求数"), L("总Token"), L("缓存读")],
                                     state["export_rows"])
 
         self._detail_export_button(nav, export_csv).pack(side=tk.RIGHT)
@@ -2731,8 +2726,8 @@ class CcBarTray:
 
         chart_canvas.bind("<Configure>", draw_chart)
 
-        self._detail_table_header(root, [("月份", 8, 'w'), ("请求数", 9, 'e'),
-                                         ("总token", 11, 'e'), ("缓存读", 11, 'e')])
+        self._detail_table_header(root, [(L("月份"), 8, 'w'), (L("请求数"), 9, 'e'),
+                                         (L("总token"), 11, 'e'), (L("缓存读"), 11, 'e')])
         inner, bind_wheel = self._detail_scroll_area(root)
 
         def refresh_all():
@@ -2758,7 +2753,7 @@ class CcBarTray:
                 set_stats([])
                 chart_state.clear()
                 chart_canvas.delete("all")
-                tk.Label(inner, text="暂无数据", fg=Design.TEXT_MUTED,
+                tk.Label(inner, text=L("暂无数据"), fg=Design.TEXT_MUTED,
                          bg=Design.BACKGROUND, font=Design.FONT_UI).pack(pady=20)
                 return
 
@@ -2769,10 +2764,10 @@ class CcBarTray:
             best_month = max(rows, key=lambda r: r[2])[0]
 
             set_stats([
-                ("历史总量", Design.fmt_tokens(total_token), None),
-                ("月均", Design.fmt_tokens(total_token // max(len(rows), 1)), None),
-                ("最佳月", best_month, Design.WARNING),
-                ("请求数", "%d" % total_reqs, None),
+                (L("历史总量"), Design.fmt_tokens(total_token), None),
+                (L("月均"), Design.fmt_tokens(total_token // max(len(rows), 1)), None),
+                (L("最佳月"), best_month, Design.WARNING),
+                (L("请求数"), "%d" % total_reqs, None),
             ])
 
             # 图表：最近月份在最前，倒过来让时间从左到右
@@ -2785,7 +2780,7 @@ class CcBarTray:
             draw_chart()
 
             # 合计行
-            self._detail_total_row(inner, [("合计", 8, 'w'), ("%d次" % total_reqs, 9, 'e'),
+            self._detail_total_row(inner, [(L("合计"), 8, 'w'), (L("%d次") % total_reqs, 9, 'e'),
                                            (Design.fmt_tokens(total_token), 11, 'e'),
                                            (Design.fmt_tokens(total_cache), 11, 'e')])
             tk.Frame(inner, bg=Design.CARD_BORDER, height=1).pack(fill=tk.X, pady=3)
@@ -2794,7 +2789,7 @@ class CcBarTray:
                 state["export_rows"].append([r[0], r[1], r[2], r[3]])
                 self._detail_data_row(inner, [
                     (r[0], 8, 'w', Design.GRADIENT[0]),
-                    ("%d次" % r[1] if r[1] > 0 else "-", 9, 'e',
+                    (L("%d次") % r[1] if r[1] > 0 else "-", 9, 'e',
                      Design.TEXT_PRIMARY if r[1] > 0 else Design.TEXT_MUTED),
                     (Design.fmt_tokens(r[2]), 11, 'e',
                      Design.TEXT_PRIMARY if r[2] > 0 else Design.TEXT_MUTED),
@@ -2813,29 +2808,29 @@ class CcBarTray:
         today = self.query_day_stats(0)
         models = self.query_model_breakdown()
 
-        text = "ccBar 今日用量统计\n"
+        text = L("ccBar 今日用量统计\n")
         text += "==================\n"
 
         if today:
-            text += f"Token 总量: {self.fmt_tokens(today['total'])}\n"
-            text += f"请求数量: {today['reqs']}\n"
-            text += f"输入 Token: {self.fmt_tokens(today['input'])}\n"
-            text += f"输出 Token: {self.fmt_tokens(today['output'])}\n"
+            text += L("Token 总量: %s\n") % self.fmt_tokens(today['total'])
+            text += L("请求数量: %d\n") % today['reqs']
+            text += L("输入 Token: %s\n") % self.fmt_tokens(today['input'])
+            text += L("输出 Token: %s\n") % self.fmt_tokens(today['output'])
 
         sources = self.query_source_breakdown()
         if len(sources) > 1:
-            text += "\n数据源分布:\n"
+            text += L("\n数据源分布:\n")
             for src in sources:
                 text += f"  {self.store.source_display_name(src['source'])}: {self.fmt_tokens(src['total'])}\n"
 
         if models:
-            text += "\n模型分布:\n"
+            text += L("\n模型分布:\n")
             for m in models:
                 text += f"  {m['model']}: {self.fmt_tokens(m['total'])}\n"
 
         try:
             pyperclip.copy(text)
-            self._toast("已复制", "统计数据已复制到剪贴板", duration=3)
+            self._toast(L("已复制"), L("统计数据已复制到剪贴板"), duration=3)
         except:
             pass
 
@@ -2872,7 +2867,7 @@ class CcBarTray:
         img = Image.new("RGB", (width, height), "#1E1E1E")
         d = ImageDraw.Draw(img)
         if not series:
-            d.text((width // 2, height // 2), "暂无数据", fill="#6B6B6B",
+            d.text((width // 2, height // 2), L("暂无数据"), fill="#6B6B6B",
                    anchor="mm", font=CcBarTray._pil_font(13))
             return img
         top, bottom = 12, height - 22
@@ -2900,7 +2895,7 @@ class CcBarTray:
             while x < width:
                 d.line([(x, y), (min(x + 4, width), y)], fill=Design.WARNING)
                 x += 7
-            label = "日预算 " + (value_fmt(budget_line) if value_fmt else "%.2f" % budget_line)
+            label = L("日预算 ") + (value_fmt(budget_line) if value_fmt else "%.2f" % budget_line)
             d.text((width - 4, y - 13 if y - 13 > 0 else y + 3), label,
                    fill=Design.WARNING, anchor="ra", font=CcBarTray._pil_font(10))
         d.text((4, 2), (value_fmt(maxv) if value_fmt else CcBarTray.fmt_tokens_static(maxv)),
@@ -2919,7 +2914,7 @@ class CcBarTray:
         img = Image.new("RGB", (width, height), "#1E1E1E")
         d = ImageDraw.Draw(img)
         if len(points) < 2:
-            d.text((width // 2, height // 2), "暂无数据", fill="#6B6B6B",
+            d.text((width // 2, height // 2), L("暂无数据"), fill="#6B6B6B",
                    anchor="mm", font=CcBarTray._pil_font(13))
             return img
         top, bottom = 12, height - 20
@@ -2933,12 +2928,8 @@ class CcBarTray:
 
     @staticmethod
     def fmt_tokens_static(tokens):
-        """静态格式化（洞察图表用）：中文单位"""
-        if tokens >= 100_000_000:
-            return f"{tokens / 100_000_000:.2f}亿"
-        if tokens >= 10_000:
-            return f"{tokens // 10_000}万"
-        return f"{tokens}"
+        """静态格式化（洞察图表用）：中英双语，同 l10n.format_tokens"""
+        return l10n.format_tokens(tokens)
 
     @staticmethod
     def _fmt_credits(v):
@@ -3000,7 +2991,8 @@ class CcBarTray:
         labels = weekly_report.trend_labels(now)
         trend = [(labels[i] if i < len(labels) else d, t) for i, (d, t) in enumerate(daily)]
         return share_card.weekly_card_image(
-            weekly_report.date_range_text(now), int(stats.get("total", 0) or 0),
+            weekly_report.date_range_text(now, l10n.is_english()),
+            int(stats.get("total", 0) or 0),
             int(stats.get("reqs", 0) or 0), peak, trend, theme=self.theme)
 
     @staticmethod
@@ -3080,7 +3072,7 @@ class CcBarTray:
         top_channels = sorted(channel_totals.items(), key=lambda kv: kv[1], reverse=True)
 
         root = tk.Toplevel(self._ui_root)
-        root.title("洞察中心")
+        root.title(L("洞察中心"))
         root.geometry("760x600")
         root.minsize(700, 480)
         root.configure(bg=Design.BACKGROUND)
@@ -3159,14 +3151,14 @@ class CcBarTray:
         money = lambda v: f"${v:.2f}"
 
         # ============ 费用 ============
-        f_cost = tab("费用")
+        f_cost = tab(L("费用"))
         cost_page, cost_wheel = scroll_page(f_cost)
 
         card_row = tk.Frame(cost_page, bg=Design.BACKGROUND)
         card_row.pack(fill=tk.X, padx=10, pady=(8, 0))
         for i, (title, value, estimate) in enumerate(
-                [("今日费用", cost_today, est[0]), ("近 7 天", cost7, est[7]),
-                 ("近 30 天", cost30, est[30])]):
+                [(L("今日费用"), cost_today, est[0]), (L("近 7 天"), cost7, est[7]),
+                 (L("近 30 天"), cost30, est[30])]):
             card = tk.Frame(card_row, bg=Design.CARD_FILL, highlightbackground=Design.CARD_BORDER,
                             highlightthickness=1, padx=16, pady=12)
             card.grid(row=0, column=i, sticky="nsew", padx=6, pady=4)
@@ -3177,7 +3169,7 @@ class CcBarTray:
                      font=("Microsoft YaHei UI", 19, "bold"), anchor='w').pack(fill=tk.X)
             if estimate > 0:
                 # mac 版卡片小字：实测 $a · 估算 $b
-                tk.Label(card, text="实测 %s · 估算 %s" % (money(value), money(estimate)),
+                tk.Label(card, text=L("实测 %s · 估算 %s") % (money(value), money(estimate)),
                          fg=Design.TEXT_MUTED, bg=Design.CARD_FILL, font=Design.FONT_MONO_TINY,
                          anchor='w').pack(fill=tk.X)
 
@@ -3189,7 +3181,7 @@ class CcBarTray:
             bcard = tk.Frame(cost_page, bg=Design.CARD_FILL, highlightbackground=Design.CARD_BORDER,
                              highlightthickness=1, padx=16, pady=12)
             bcard.pack(fill=tk.X, padx=16, pady=(10, 0))
-            tk.Label(bcard, text="本月预算 $%.2f" % budget, fg=Design.TEXT_PRIMARY,
+            tk.Label(bcard, text=L("本月预算 $%.2f") % budget, fg=Design.TEXT_PRIMARY,
                      bg=Design.CARD_FILL, font=("Microsoft YaHei UI", 11, "bold"),
                      anchor='w').pack(fill=tk.X)
             bar = tk.Frame(bcard, bg=Design.BTN_BG, height=6)
@@ -3199,27 +3191,27 @@ class CcBarTray:
             tk.Frame(bar, bg=usage_color(fill_ratio)).place(relwidth=fill_ratio, relheight=1.0)
             brow = tk.Frame(bcard, bg=Design.CARD_FILL)
             brow.pack(fill=tk.X)
-            tk.Label(brow, text="本月已花 " + money(cost_mtd), fg=Design.TEXT_PRIMARY,
+            tk.Label(brow, text=L("本月已花 ") + money(cost_mtd), fg=Design.TEXT_PRIMARY,
                      bg=Design.CARD_FILL, font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT)
             tk.Label(brow,
-                     text=("已超预算 " + money(cost_mtd - budget)) if over
-                     else ("剩余 " + money(budget - cost_mtd)),
+                     text=(L("已超预算 ") + money(cost_mtd - budget)) if over
+                     else (L("剩余 ") + money(budget - cost_mtd)),
                      fg=Design.ERROR if over else Design.SUCCESS, bg=Design.CARD_FILL,
                      font=Design.FONT_MONO_SMALL).pack(side=tk.RIGHT)
             tk.Label(bcard,
-                     text="按当前速率预计 %s · 已用预算 %.0f%%" % (money(projected_cost), ratio * 100),
+                     text=L("按当前速率预计 %s · 已用预算 %.0f%%") % (money(projected_cost), ratio * 100),
                      fg=Design.TEXT_MUTED, bg=Design.CARD_FILL, font=Design.FONT_UI_SMALL,
                      anchor='w').pack(fill=tk.X, pady=(4, 0))
 
-        section(cost_page, "近 30 天费用走势")
-        cost_series = [(d[5:], {"费用": c}) for d, c in cost_daily]
+        section(cost_page, L("近 30 天费用走势"))
+        cost_series = [(d[5:], {L("费用"): c}) for d, c in cost_daily]
         png_label(cost_page, self._bar_chart_png(
-            cost_series, {"费用": Design.BRAND},
+            cost_series, {L("费用"): Design.BRAND},
             budget_line=daily_budget if budget > 0 else None, value_fmt=money))
 
-        section(cost_page, "模型费用排行（近 30 天）")
+        section(cost_page, L("模型费用排行（近 30 天）"))
         if not cost_models:
-            muted(cost_page, "暂无数据")
+            muted(cost_page, L("暂无数据"))
         for m, c, tok in cost_models:
             row = tk.Frame(cost_page, bg=Design.BACKGROUND)
             row.pack(fill=tk.X, padx=20)
@@ -3230,11 +3222,11 @@ class CcBarTray:
                      font=Design.FONT_MONO_SMALL).pack(side=tk.RIGHT)
 
         # 性价比榜：token / $（cost > 0.005 才参与，避免除零噪声）
-        section(cost_page, "性价比榜（近 30 天）")
+        section(cost_page, L("性价比榜（近 30 天）"))
         ranked = sorted(((m, tok / c) for m, c, tok in cost_models if c > 0.005),
                         key=lambda kv: kv[1], reverse=True)
         if not ranked:
-            muted(cost_page, "暂无数据")
+            muted(cost_page, L("暂无数据"))
         for i, (m, per_dollar) in enumerate(ranked):
             row = tk.Frame(cost_page, bg=Design.BACKGROUND)
             row.pack(fill=tk.X, padx=20)
@@ -3243,38 +3235,38 @@ class CcBarTray:
             tk.Label(row, text=self.fmt_tokens(int(per_dollar)) + " / $1", fg=Design.DATA,
                      bg=Design.BACKGROUND, font=Design.FONT_MONO_SMALL).pack(side=tk.RIGHT)
 
-        foot = "费用按 cc-switch 记录的单价折算；未计费渠道可在设置里配默认单价估算"
+        foot = L("费用按 cc-switch 记录的单价折算；未计费渠道可在设置里配默认单价估算")
         if price > 0:
-            foot += "（当前按 $%g/M tokens 估算）" % price
+            foot += L("（当前按 $%g/M tokens 估算）") % price
         tk.Label(cost_page, text=foot, fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
                  font=Design.FONT_UI_SMALL, anchor='w', justify=tk.LEFT,
                  wraplength=690).pack(fill=tk.X, padx=16, pady=(14, 8))
         cost_wheel(cost_page)
 
         # ============ 洞察 ============
-        f_ins = tab("洞察")
+        f_ins = tab(L("洞察"))
         ins_page, ins_wheel = scroll_page(f_ins)
 
         def export_long_image():
             """导出长图：把各页要点汇总成一张 PNG（mac「导出长图」）"""
             from tkinter import filedialog, messagebox
             blocks = [
-                ("费用", [("今日费用", money(cost_today + est[0])),
-                          ("近 7 天", money(cost7 + est[7])),
-                          ("近 30 天", money(cost30 + est[30])),
-                          ("本月已花", money(cost_mtd))]),
-                ("用量", [("连续使用", "%d 天" % streak),
-                          ("今日会话", "%d 个 · 平均 %d 分钟 · 最长 %d 分钟"
+                (L("费用"), [(L("今日费用"), money(cost_today + est[0])),
+                          (L("近 7 天"), money(cost7 + est[7])),
+                          (L("近 30 天"), money(cost30 + est[30])),
+                          (L("本月已花"), money(cost_mtd))]),
+                (L("用量"), [(L("连续使用"), L("%d 天") % streak),
+                          (L("今日会话"), L("%d 个 · 平均 %d 分钟 · 最长 %d 分钟")
                            % (session_count, session_avg, session_longest)),
-                          ("本周用量", self.fmt_tokens(this_week)),
-                          ("历史总量", self.fmt_tokens(total_all)),
-                          ("单日峰值（近 30 天）", self.fmt_tokens(peak[1]) if peak else "-"),
-                          ("预计本月消耗", self.fmt_tokens(projected))]),
-                ("渠道（近 30 天）", [(store.source_display_name(s), self.fmt_tokens(t))
-                                      for s, t in top_channels] or [("暂无数据", "-")]),
+                          (L("本周用量"), self.fmt_tokens(this_week)),
+                          (L("历史总量"), self.fmt_tokens(total_all)),
+                          (L("单日峰值（近 30 天）"), self.fmt_tokens(peak[1]) if peak else "-"),
+                          (L("预计本月消耗"), self.fmt_tokens(projected))]),
+                (L("渠道（近 30 天）"), [(store.source_display_name(s), self.fmt_tokens(t))
+                                      for s, t in top_channels] or [(L("暂无数据"), "-")]),
             ]
             path = filedialog.asksaveasfilename(
-                title="导出洞察长图", defaultextension=".png",
+                title=L("导出洞察长图"), defaultextension=".png",
                 initialfile="ccbar-insights-%s.png" % datetime.now().strftime("%Y%m%d"),
                 filetypes=[("PNG", "*.png")])
             if not path:
@@ -3282,13 +3274,13 @@ class CcBarTray:
             try:
                 share_card.insight_long_image(blocks, width=720, theme=self.theme).save(path)
             except Exception as e:
-                messagebox.showerror("导出失败", str(e))
+                messagebox.showerror(L("导出失败"), str(e))
                 return
-            messagebox.showinfo("导出完成", "已保存到：\n%s" % path)
+            messagebox.showinfo(L("导出完成"), L("已保存到：\n%s") % path)
 
         tools = tk.Frame(ins_page, bg=Design.BACKGROUND)
         tools.pack(fill=tk.X, padx=16, pady=(8, 0))
-        btn(tools, "导出长图", export_long_image).pack(side=tk.RIGHT)
+        btn(tools, L("导出长图"), export_long_image).pack(side=tk.RIGHT)
 
         grid = tk.Frame(ins_page, bg=Design.BACKGROUND)
         grid.pack(fill=tk.X, padx=10, pady=(6, 0))
@@ -3306,28 +3298,28 @@ class CcBarTray:
              store.local_midnight(30), store.local_midnight(-1)))
         peak_hour_txt = f"{hour_rows[0]:02d}:00 – {(hour_rows[0] + 1) % 24:02d}:00" if hour_rows else "-"
         cards = [
-            ("🔥 连续使用", f"{streak} 天", ""),
-            ("今日会话", f"{session_count} 个",
-             "平均 %d 分钟 · 最长 %d 分钟" % (session_avg, session_longest)),
-            ("本周用量", self.fmt_tokens(this_week), delta_txt),
-            ("日均用量（近 30 天）",
+            (L("🔥 连续使用"), L("%d 天") % streak, ""),
+            (L("今日会话"), L("%d 个") % session_count,
+             L("平均 %d 分钟 · 最长 %d 分钟") % (session_avg, session_longest)),
+            (L("本周用量"), self.fmt_tokens(this_week), delta_txt),
+            (L("日均用量（近 30 天）"),
              self.fmt_tokens((self.query_day_stats(30) or {"total": 0})["total"] // 30), ""),
-            ("历史总量", self.fmt_tokens(total_all), ""),
-            ("单日峰值（近 30 天）", peak_v, peak_h),
-            ("最活跃时段（近 30 天）", peak_hour_txt, ""),
-            ("使用量最大的模型（近 30 天）", self.fmt_tokens(top[1]) if top else "-",
+            (L("历史总量"), self.fmt_tokens(total_all), ""),
+            (L("单日峰值（近 30 天）"), peak_v, peak_h),
+            (L("最活跃时段（近 30 天）"), peak_hour_txt, ""),
+            (L("使用量最大的模型（近 30 天）"), self.fmt_tokens(top[1]) if top else "-",
              top[0] if top else ""),
-            ("预计本月消耗", self.fmt_tokens(projected),
-             f"按当前速率 · 本月已用 {self.fmt_tokens(mtd)}"),
+            (L("预计本月消耗"), self.fmt_tokens(projected),
+             L("按当前速率 · 本月已用 ") + self.fmt_tokens(mtd)),
         ]
         for i, (t, v, sub) in enumerate(cards):
             self._insight_card(grid, i // 2, i % 2, t, v, sub)
 
         # 星期分布（近 90 天）
-        section(ins_page, "星期分布（近 90 天）")
-        weekday_labels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+        section(ins_page, L("星期分布（近 90 天）"))
+        weekday_labels = [L("周一"), L("周二"), L("周三"), L("周四"), L("周五"), L("周六"), L("周日")]
         if not any(weekday_totals):
-            muted(ins_page, "暂无数据")
+            muted(ins_page, L("暂无数据"))
         else:
             wd_series = [(weekday_labels[i], {weekday_labels[i]: weekday_totals[i]})
                          for i in range(7)]
@@ -3336,7 +3328,7 @@ class CcBarTray:
             png_label(ins_page, self._bar_chart_png(wd_series, wd_colors))
 
         # 近 90 天用量热力图（7 行 × 周数，首列按起始日 weekday 补位）
-        section(ins_page, "近 90 天用量热力图")
+        section(ins_page, L("近 90 天用量热力图"))
         start_day = (datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
                      - timedelta(days=90))
         pad = start_day.weekday()
@@ -3385,7 +3377,7 @@ class CcBarTray:
                 heat.tag_bind(tag, "<Leave>", on_leave)
 
         # 模型编年史（默认前 10 行，可展开/收起；模型治理菜单）
-        section(ins_page, "模型编年史")
+        section(ins_page, L("模型编年史"))
         chron_wrap = tk.Frame(ins_page, bg=Design.BACKGROUND)
         chron_wrap.pack(fill=tk.X, padx=16, pady=(4, 4))
         chron_state = {"expanded": False}
@@ -3395,33 +3387,33 @@ class CcBarTray:
             groups, changed = store.auto_merge_models()
             render_chronicle()
             if groups == 0:
-                messagebox.showinfo("没有需要合并的模型", "大小写、厂商前缀不同的同名模型都已一致")
+                messagebox.showinfo(L("没有需要合并的模型"), L("大小写、厂商前缀不同的同名模型都已一致"))
             else:
-                messagebox.showinfo("合并完成", "已合并 %d 组 · 改写 %d 行明细" % (groups, changed))
+                messagebox.showinfo(L("合并完成"), L("已合并 %d 组 · 改写 %d 行明细") % (groups, changed))
 
         def manual_merge_models():
             from tkinter import messagebox
             names = [m for m, _f, _l, _t in (store.query_model_history() or [])]
             if len(names) < 2:
-                messagebox.showinfo("手动合并模型", "模型不足两个，无需合并")
+                messagebox.showinfo(L("手动合并模型"), L("模型不足两个，无需合并"))
                 return
             dlg = tk.Toplevel(root)
-            dlg.title("手动合并模型")
+            dlg.title(L("手动合并模型"))
             dlg.configure(bg=Design.BACKGROUND)
             dlg.geometry("470x230")
             dlg.transient(root)
-            tk.Label(dlg, text="手动合并模型", fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+            tk.Label(dlg, text=L("手动合并模型"), fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
                      font=("Microsoft YaHei UI", 11, "bold")).pack(anchor='w', padx=18, pady=(16, 8))
             from_var = tk.StringVar(value=names[0])
             to_var = tk.StringVar(value=names[0])
-            for label, var in (("从", from_var), ("合并到", to_var)):
+            for label, var in ((L("从"), from_var), (L("合并到"), to_var)):
                 row = tk.Frame(dlg, bg=Design.BACKGROUND)
                 row.pack(fill=tk.X, padx=18, pady=3)
                 tk.Label(row, text=label, fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
                          width=6, anchor='w', font=Design.FONT_UI).pack(side=tk.LEFT)
                 ttk.Combobox(row, textvariable=var, values=names, state="readonly",
                              width=32, style="Insights.TCombobox").pack(side=tk.LEFT)
-            tk.Label(dlg, text="「从」模型的所有明细行会并入「到」模型，操作不可撤销",
+            tk.Label(dlg, text=L("「从」模型的所有明细行会并入「到」模型，操作不可撤销"),
                      fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
                      font=Design.FONT_UI_SMALL).pack(anchor='w', padx=18, pady=(8, 0))
             btns = tk.Frame(dlg, bg=Design.BACKGROUND)
@@ -3434,17 +3426,17 @@ class CcBarTray:
                 changed = store.merge_model(frm, to)
                 dlg.destroy()
                 render_chronicle()
-                messagebox.showinfo("合并完成", "已改写 %d 行明细" % changed)
+                messagebox.showinfo(L("合并完成"), L("已改写 %d 行明细") % changed)
 
-            btn(btns, "取消", dlg.destroy).pack(side=tk.RIGHT)
-            btn(btns, "合并", do_merge, primary=True).pack(side=tk.RIGHT, padx=(0, 8))
+            btn(btns, L("取消"), dlg.destroy).pack(side=tk.RIGHT)
+            btn(btns, L("合并"), do_merge, primary=True).pack(side=tk.RIGHT, padx=(0, 8))
 
         def render_chronicle():
             for w in chron_wrap.winfo_children():
                 w.destroy()
             history = store.query_model_history() or []
             if not history:
-                muted(chron_wrap, "暂无数据")
+                muted(chron_wrap, L("暂无数据"))
                 return
             shown = history if chron_state["expanded"] else history[:10]
             for model, first_epoch, last_epoch, token in shown:
@@ -3465,23 +3457,23 @@ class CcBarTray:
 
             if len(history) > 10:
                 tk.Button(chron_wrap,
-                          text=("收起" if chron_state["expanded"]
-                                else "展开全部 %d 个模型" % len(history)),
+                          text=(L("收起") if chron_state["expanded"]
+                                else L("展开全部 %d 个模型") % len(history)),
                           command=toggle, bg=Design.BACKGROUND, fg=Design.BRAND,
                           activebackground=Design.BACKGROUND, activeforeground=Design.BRAND,
                           relief="flat", bd=0, cursor="hand2",
                           font=Design.FONT_UI_SMALL).pack(anchor='w', pady=(4, 0))
             menu_row = tk.Frame(chron_wrap, bg=Design.BACKGROUND)
             menu_row.pack(fill=tk.X, pady=(6, 0))
-            mb = tk.Menubutton(menu_row, text="整理模型 ▾", bg=Design.CARD_FILL,
+            mb = tk.Menubutton(menu_row, text=L("整理模型 ▾"), bg=Design.CARD_FILL,
                                fg=Design.TEXT_PRIMARY, activebackground=Design.BTN_BG_HOVER,
                                activeforeground=Design.TEXT_PRIMARY, relief="flat", bd=0,
                                cursor="hand2", font=Design.FONT_UI_SMALL, padx=10, pady=3)
             menu = tk.Menu(mb, tearoff=0, bg=Design.CARD_FILL, fg=Design.TEXT_PRIMARY,
                            activebackground=Design.BRAND, activeforeground=Design.TEXT_PRIMARY,
                            font=Design.FONT_UI_SMALL)
-            menu.add_command(label="自动合并同名模型", command=auto_merge_models)
-            menu.add_command(label="手动合并…", command=manual_merge_models)
+            menu.add_command(label=L("自动合并同名模型"), command=auto_merge_models)
+            menu.add_command(label=L("手动合并…"), command=manual_merge_models)
             mb.configure(menu=menu)
             mb.pack(side=tk.RIGHT)
             ins_wheel(chron_wrap)
@@ -3490,13 +3482,13 @@ class CcBarTray:
         ins_wheel(ins_page)
 
         # ============ 分享 ============
-        f_share = tab("分享")
+        f_share = tab(L("分享"))
         share_page, share_wheel = scroll_page(f_share)
 
         def save_card_image(factory, prefix):
             from tkinter import filedialog, messagebox
             path = filedialog.asksaveasfilename(
-                title="保存为图片", defaultextension=".png",
+                title=L("保存为图片"), defaultextension=".png",
                 initialfile="%s-%s.png" % (prefix, datetime.now().strftime("%Y%m%d")),
                 filetypes=[("PNG", "*.png")])
             if not path:
@@ -3504,9 +3496,9 @@ class CcBarTray:
             try:
                 factory().save(path)
             except Exception as e:
-                messagebox.showerror("保存失败", str(e))
+                messagebox.showerror(L("保存失败"), str(e))
                 return
-            messagebox.showinfo("保存完成", "已保存到：\n%s" % path)
+            messagebox.showinfo(L("保存完成"), L("已保存到：\n%s") % path)
 
         def copy_card_image(factory, prefix):
             """复制到剪贴板：Windows 走 PowerShell Set-Clipboard，失败退回临时文件"""
@@ -3520,34 +3512,34 @@ class CcBarTray:
             try:
                 factory().save(path)
             except Exception as e:
-                messagebox.showerror("复制失败", str(e))
+                messagebox.showerror(L("复制失败"), str(e))
                 return
             if os.name == "nt":
                 try:
                     subprocess.run(["powershell", "-c", "Set-Clipboard -Path '%s'" % path],
                                    check=True, capture_output=True, timeout=15)
-                    messagebox.showinfo("已复制", "已复制到剪贴板")
+                    messagebox.showinfo(L("已复制"), L("已复制到剪贴板"))
                     return
                 except Exception:
                     pass
-            messagebox.showinfo("已复制", "剪贴板不可用，已保存到临时文件：\n%s" % path)
+            messagebox.showinfo(L("已复制"), L("剪贴板不可用，已保存到临时文件：\n%s") % path)
 
         # 战报卡（今日 / 近 7 天 / 近 30 天 / 累计 + 近 7 天趋势）
         png_label(share_page, self._share_card_png())
         share_btns = tk.Frame(share_page, bg=Design.BACKGROUND)
         share_btns.pack(fill=tk.X, padx=16, pady=(2, 8))
-        btn(share_btns, "保存为图片",
+        btn(share_btns, L("保存为图片"),
             lambda: save_card_image(self._share_card_png, "ccbar-share"),
             primary=True).pack(side=tk.LEFT)
-        btn(share_btns, "复制到剪贴板",
+        btn(share_btns, L("复制到剪贴板"),
             lambda: copy_card_image(self._share_card_png, "ccbar-share")).pack(side=tk.LEFT, padx=(8, 0))
-        tk.Label(share_btns, text="晒用量就是最好的宣传 ✨", fg=Design.TEXT_MUTED,
+        tk.Label(share_btns, text=L("晒用量就是最好的宣传 ✨"), fg=Design.TEXT_MUTED,
                  bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL).pack(side=tk.LEFT, padx=(10, 0))
 
         tk.Frame(share_page, bg=Design.SEPARATOR, height=1).pack(fill=tk.X, padx=16, pady=6)
         wk_head = tk.Frame(share_page, bg=Design.BACKGROUND)
         wk_head.pack(fill=tk.X, padx=16, pady=(2, 0))
-        tk.Label(wk_head, text="AI 用量周报（上周）", fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+        tk.Label(wk_head, text=L("AI 用量周报（上周）"), fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
                  font=("Microsoft YaHei UI", 10, "bold")).pack(side=tk.LEFT)
 
         def open_weekly_dir():
@@ -3563,23 +3555,23 @@ class CcBarTray:
             except AttributeError:
                 webbrowser.open("file://" + path.replace("\\", "/"))
 
-        btn(wk_head, "打开周报目录", open_weekly_dir).pack(side=tk.RIGHT)
+        btn(wk_head, L("打开周报目录"), open_weekly_dir).pack(side=tk.RIGHT)
         png_label(share_page, self._weekly_card_png())
         wk_btns = tk.Frame(share_page, bg=Design.BACKGROUND)
         wk_btns.pack(fill=tk.X, padx=16, pady=(2, 10))
-        btn(wk_btns, "保存为图片",
+        btn(wk_btns, L("保存为图片"),
             lambda: save_card_image(self._weekly_card_png, "ccbar-weekly"),
             primary=True).pack(side=tk.LEFT)
-        btn(wk_btns, "复制到剪贴板",
+        btn(wk_btns, L("复制到剪贴板"),
             lambda: copy_card_image(self._weekly_card_png, "ccbar-weekly")).pack(side=tk.LEFT, padx=(8, 0))
-        tk.Label(wk_btns, text="每周一自动生成到周报目录 🗓", fg=Design.TEXT_MUTED,
+        tk.Label(wk_btns, text=L("每周一自动生成到周报目录 🗓"), fg=Design.TEXT_MUTED,
                  bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL).pack(side=tk.LEFT, padx=(10, 0))
         share_wheel(share_page)
 
         # ============ 渠道 ============
-        f_ch = tab("渠道")
+        f_ch = tab(L("渠道"))
         ch_page, ch_wheel = scroll_page(f_ch)
-        section(ch_page, "近 30 天渠道用量（堆叠）")
+        section(ch_page, L("近 30 天渠道用量（堆叠）"))
         src_names = sorted({r[1] for r in channels})
         src_colors = {"cc-switch": "#4A90E2", "zcode": "#34C759", "trae": "#AF52DE"}
         palette = {n: src_colors.get(n, f"#{hash(n) % 0xFFFFFF:06X}") for n in src_names}
@@ -3590,10 +3582,10 @@ class CcBarTray:
         ch_series = [(d[5:], by_date[d]) for d in sorted(by_date)]
         png_label(ch_page, self._bar_chart_png(ch_series, palette))
 
-        section(ch_page, "今日各渠道")
+        section(ch_page, L("今日各渠道"))
         today_src = [r for r in channels if r[0] == datetime.now().strftime("%Y-%m-%d")]
         if not today_src:
-            muted(ch_page, "暂无数据")
+            muted(ch_page, L("暂无数据"))
         for src, _d, tok in [(r[1], r[0], r[2]) for r in today_src]:
             row = tk.Frame(ch_page, bg=Design.BACKGROUND)
             row.pack(fill=tk.X, padx=20)
@@ -3602,10 +3594,10 @@ class CcBarTray:
             tk.Label(row, text=self.fmt_tokens(tok), fg=Design.DATA, bg=Design.BACKGROUND,
                      font=Design.FONT_MONO_SMALL).pack(side=tk.RIGHT)
 
-        section(ch_page, "近 30 天应用分布（堆叠）")
+        section(ch_page, L("近 30 天应用分布（堆叠）"))
         app_names = ["Claude Code", "Codex", "OpenCode", "ZCode"]
         app_map = {"claude": "Claude Code", "claude-desktop": "Claude Desktop", "codex": "Codex",
-                   "opencode": "OpenCode", "zcode": "ZCode", "unknown": "未知"}
+                   "opencode": "OpenCode", "zcode": "ZCode", "unknown": L("未知")}
 
         def app_name(raw):
             return app_map.get(raw, raw)
@@ -3623,25 +3615,25 @@ class CcBarTray:
         app_series = [(d[5:], app_by_date[d]) for d in sorted(app_by_date)]
         png_label(ch_page, self._bar_chart_png(app_series, app_palette))
 
-        section(ch_page, "近 30 天 Token 构成")
-        comp_palette = {"输入": "#4A90E2", "输出": "#34C759", "缓存读": "#FF9500", "缓存创建": "#AF52DE"}
-        comp_series = [(d, {"输入": i, "输出": o, "缓存读": cr, "缓存创建": cc})
+        section(ch_page, L("近 30 天 Token 构成"))
+        comp_palette = {L("输入"): "#4A90E2", L("输出"): "#34C759", L("缓存读"): "#FF9500", L("缓存创建"): "#AF52DE"}
+        comp_series = [(d, {L("输入"): i, L("输出"): o, L("缓存读"): cr, L("缓存创建"): cc})
                        for d, i, o, cr, cc in comp]
         png_label(ch_page, self._bar_chart_png(comp_series, comp_palette))
 
-        section(ch_page, "缓存命中率（近 30 天）")
+        section(ch_page, L("缓存命中率（近 30 天）"))
         hit_pts = [(d, cr / max(i + o + cr + cc, 1) * 100) for d, i, o, cr, cc in comp]
         png_label(ch_page, self._line_chart_png(hit_pts, Design.BRAND, suffix="%"))
         ch_wheel(ch_page)
 
         # ============ 流水 ============
-        f_tl = tab("流水")
-        cols = ("时间", "渠道", "模型", "Token", "费用")
+        f_tl = tab(L("流水"))
+        cols = (L("时间"), L("渠道"), L("模型"), "Token", L("费用"))
         tree = ttk.Treeview(f_tl, columns=cols, show="headings", height=19, style="Insights.Treeview")
         widths = (90, 90, 220, 110, 90)
         for c, w in zip(cols, widths):
             tree.heading(c, text=c)
-            tree.column(c, width=w, anchor='w' if c in ("渠道", "模型") else 'e')
+            tree.column(c, width=w, anchor='w' if c in (L("渠道"), L("模型")) else 'e')
         vsb = ttk.Scrollbar(f_tl, orient=tk.VERTICAL, command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
         vsb.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 8), pady=10)
@@ -3649,7 +3641,7 @@ class CcBarTray:
 
         filter_bar = tk.Frame(f_tl, bg=Design.BACKGROUND)
         filter_bar.pack(fill=tk.X, padx=12, pady=(10, 0))
-        tk.Label(filter_bar, text="筛选", fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
+        tk.Label(filter_bar, text=L("筛选"), fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
                  font=Design.FONT_UI_SMALL).pack(side=tk.LEFT)
 
         tl_state = {"day": datetime.now().date(), "rows": []}
@@ -3660,20 +3652,20 @@ class CcBarTray:
         def day_label(day):
             today = datetime.now().date()
             if day == today:
-                return "今天"
+                return L("今天")
             if day == today - timedelta(days=1):
-                return "昨天"
-            return "%d月%d日" % (day.month, day.day)
+                return L("昨天")
+            return L("%d月%d日") % (day.month, day.day)
 
-        export_btn = btn(filter_bar, "导出 CSV", lambda: export_timeline_csv())
+        export_btn = btn(filter_bar, L("导出 CSV"), lambda: export_timeline_csv())
         export_btn.pack(side=tk.RIGHT)
-        model_box = ttk.Combobox(filter_bar, values=["全部模型"], state="readonly",
+        model_box = ttk.Combobox(filter_bar, values=[L("全部模型")], state="readonly",
                                  width=18, style="Insights.TCombobox")
-        model_box.set("全部模型")
+        model_box.set(L("全部模型"))
         model_box.pack(side=tk.RIGHT, padx=(0, 8))
-        src_box = ttk.Combobox(filter_bar, values=["全部渠道"], state="readonly",
+        src_box = ttk.Combobox(filter_bar, values=[L("全部渠道")], state="readonly",
                                width=12, style="Insights.TCombobox")
-        src_box.set("全部渠道")
+        src_box.set(L("全部渠道"))
         src_box.pack(side=tk.RIGHT, padx=(0, 8))
 
         def step_day(n):
@@ -3686,36 +3678,36 @@ class CcBarTray:
             """点日期按钮：弹一个简单的日期输入框（YYYY-MM-DD）"""
             from tkinter import messagebox, simpledialog
             text = simpledialog.askstring(
-                "选择日期", "输入日期（YYYY-MM-DD）：",
+                L("选择日期"), L("输入日期（YYYY-MM-DD）："),
                 initialvalue=tl_state["day"].strftime("%Y-%m-%d"), parent=root)
             if not text:
                 return
             try:
                 day = datetime.strptime(text.strip(), "%Y-%m-%d").date()
             except ValueError:
-                messagebox.showerror("日期格式不对", "请按 YYYY-MM-DD 输入，例如 2026-08-01")
+                messagebox.showerror(L("日期格式不对"), L("请按 YYYY-MM-DD 输入，例如 2026-08-01"))
                 return
             set_day(min(day, datetime.now().date()))
 
-        prev_btn = btn(filter_bar, "‹ 前一天", lambda: step_day(-1))
+        prev_btn = btn(filter_bar, L("‹ 前一天"), lambda: step_day(-1))
         prev_btn.configure(padx=8)
         prev_btn.pack(side=tk.LEFT)
         day_btn = btn(filter_bar, day_label(tl_state["day"]), choose_day)
         day_btn.configure(padx=10)
         day_btn.pack(side=tk.LEFT, padx=(4, 0))
-        next_btn = btn(filter_bar, "后一天 ›", lambda: step_day(1))
+        next_btn = btn(filter_bar, L("后一天 ›"), lambda: step_day(1))
         next_btn.configure(padx=8)
         next_btn.pack(side=tk.LEFT, padx=(4, 0))
-        today_chip = btn(filter_bar, "今天", lambda: set_day(datetime.now().date()))
+        today_chip = btn(filter_bar, L("今天"), lambda: set_day(datetime.now().date()))
         today_chip.configure(fg=Design.BRAND)
 
         def filtered_rows():
             src_sel, model_sel = src_box.get(), model_box.get()
             out = []
             for r in tl_state["rows"]:
-                if src_sel != "全部渠道" and store.source_display_name(r[2]) != src_sel:
+                if src_sel != L("全部渠道") and store.source_display_name(r[2]) != src_sel:
                     continue
-                if model_sel != "全部模型" and r[1] != model_sel:
+                if model_sel != L("全部模型") and r[1] != model_sel:
                     continue
                 out.append(r)
             return out
@@ -3725,7 +3717,7 @@ class CcBarTray:
             for ts, model, source, token, cost, credits in filtered_rows():
                 t = datetime.fromtimestamp(ts)
                 if credits > 0:
-                    amount = "%s 积分" % self._fmt_credits(credits)
+                    amount = L("%s 积分") % self._fmt_credits(credits)
                 elif cost > 0:
                     amount = "$%.2f" % cost
                 else:
@@ -3745,11 +3737,11 @@ class CcBarTray:
             else:
                 today_chip.pack(side=tk.LEFT, padx=(6, 0))
                 next_btn.configure(state=tk.NORMAL)
-            src_box.configure(values=["全部渠道"] + sorted(
+            src_box.configure(values=[L("全部渠道")] + sorted(
                 {store.source_display_name(r[2]) for r in tl_state["rows"]}))
-            model_box.configure(values=["全部模型"] + sorted({r[1] for r in tl_state["rows"]}))
-            src_box.set("全部渠道")
-            model_box.set("全部模型")
+            model_box.configure(values=[L("全部模型")] + sorted({r[1] for r in tl_state["rows"]}))
+            src_box.set(L("全部渠道"))
+            model_box.set(L("全部模型"))
             refill()
 
         def set_day(day):
@@ -3762,7 +3754,7 @@ class CcBarTray:
             import csv
             rows = filtered_rows()
             path = filedialog.asksaveasfilename(
-                title="导出流水", defaultextension=".csv",
+                title=L("导出流水"), defaultextension=".csv",
                 initialfile="ccbar-timeline-%s.csv" % tl_state["day"].strftime("%Y%m%d"),
                 filetypes=[("CSV", "*.csv")])
             if not path:
@@ -3770,20 +3762,20 @@ class CcBarTray:
             try:
                 with open(path, "w", encoding="utf-8-sig", newline="") as f:
                     writer = csv.writer(f)
-                    writer.writerow(["时间", "模型", "渠道", "总 Token", "费用/积分"])
+                    writer.writerow([L("时间"), L("模型"), L("渠道"), L("总 Token"), L("费用/积分")])
                     for ts, model, source, token, cost, credits in rows:
                         # 与流水页一致：Trae 行导积分，其他源导美元费用
                         if source == "trae":
-                            amount = "%s 积分" % self._fmt_credits(credits)
+                            amount = L("%s 积分") % self._fmt_credits(credits)
                         else:
                             amount = "%.4f" % cost
                         writer.writerow([
                             datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S"),
                             model, source, token, amount])
             except OSError as e:
-                messagebox.showerror("导出失败", str(e))
+                messagebox.showerror(L("导出失败"), str(e))
                 return
-            messagebox.showinfo("导出完成", "已导出 %d 行到：\n%s" % (len(rows), path))
+            messagebox.showinfo(L("导出完成"), L("已导出 %d 行到：\n%s") % (len(rows), path))
 
         src_box.bind("<<ComboboxSelected>>", refill)
         model_box.bind("<<ComboboxSelected>>", refill)
@@ -3791,14 +3783,14 @@ class CcBarTray:
 
         # ============ 积分 ============
         # 顺序与 mac InsightsPage 枚举一致：费用 / 洞察 / 分享 / 渠道 / 流水 / 积分
-        f_cred = tab("积分")
+        f_cred = tab(L("积分"))
         cred_page, cred_wheel = scroll_page(f_cred)
 
         cred_row = tk.Frame(cred_page, bg=Design.BACKGROUND)
         cred_row.pack(fill=tk.X, padx=10, pady=(8, 0))
-        for i, (title, value) in enumerate([("今日积分", credits_today),
-                                            ("近 7 天", credits7),
-                                            ("近 30 天", credits30)]):
+        for i, (title, value) in enumerate([(L("今日积分"), credits_today),
+                                            (L("近 7 天"), credits7),
+                                            (L("近 30 天"), credits30)]):
             card = tk.Frame(cred_row, bg=Design.CARD_FILL,
                             highlightbackground=Design.CARD_BORDER,
                             highlightthickness=1, padx=16, pady=12)
@@ -3816,7 +3808,7 @@ class CcBarTray:
                              highlightbackground=Design.CARD_BORDER,
                              highlightthickness=1, padx=16, pady=12)
             ecard.pack(fill=tk.X, padx=16, pady=(10, 0))
-            tk.Label(ecard, text="积分余额（官方账单）", fg=Design.TEXT_SECONDARY,
+            tk.Label(ecard, text=L("积分余额（官方账单）"), fg=Design.TEXT_SECONDARY,
                      bg=Design.CARD_FILL, font=("Microsoft YaHei UI", 10),
                      anchor='w').pack(fill=tk.X)
             erow = tk.Frame(ecard, bg=Design.CARD_FILL)
@@ -3824,7 +3816,7 @@ class CcBarTray:
             tk.Label(erow, text=format_credits(consumed), fg=Design.DATA,
                      bg=Design.CARD_FILL, font=("Microsoft YaHei UI", 19, "bold"),
                      anchor='w').pack(side=tk.LEFT)
-            tk.Label(erow, text="已用 / 共 %s" % format_credits(ent_total),
+            tk.Label(erow, text=L("已用 / 共 %s") % format_credits(ent_total),
                      fg=Design.TEXT_SECONDARY, bg=Design.CARD_FILL,
                      font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT, padx=(10, 0))
             ent_ratio = (consumed / ent_total) if ent_total > 0 else 0.0
@@ -3839,11 +3831,11 @@ class CcBarTray:
                 tk.Frame(bar, bg=blend(Design.BRAND, Design.CARD_FILL, 0.75)).place(
                     relwidth=fill_ratio, relheight=1.0)
 
-        section(cred_page, "近 30 天积分走势")
+        section(cred_page, L("近 30 天积分走势"))
         if credits30 <= 0:
-            muted(cred_page, "接入 Trae 并产生用量后展示积分消耗")
+            muted(cred_page, L("接入 Trae 并产生用量后展示积分消耗"))
         elif not credits_daily:
-            muted(cred_page, "暂无数据")
+            muted(cred_page, L("暂无数据"))
         else:
             # 逐柱取主题模型色板（与 mac CreditsPage / 模型分布卡同一机制）
             palette = model_colors(max(len(credits_daily), 1))
@@ -3854,7 +3846,7 @@ class CcBarTray:
                                                      value_fmt=format_credits))
 
         tk.Label(cred_page,
-                 text="积分为 Trae 官方计费口径；历史数据自接入起最多回溯 90 天",
+                 text=L("积分为 Trae 官方计费口径；历史数据自接入起最多回溯 90 天"),
                  fg=Design.TEXT_MUTED, bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL,
                  anchor='w', justify=tk.LEFT,
                  wraplength=690).pack(fill=tk.X, padx=16, pady=(14, 8))
@@ -3862,9 +3854,9 @@ class CcBarTray:
 
         # ============ 页签记忆 ============
         titles = [nb.tab(t, "text") for t in nb.tabs()]
-        last_page = self.settings.get("insights_last_page") or "费用"
+        last_page = self.settings.get("insights_last_page") or L("费用")
         if last_page not in titles:
-            last_page = "费用"
+            last_page = L("费用")
         try:
             nb.select(titles.index(last_page))
         except Exception:
@@ -3890,12 +3882,12 @@ class CcBarTray:
         from tkinter import filedialog, messagebox, simpledialog
 
         root = tk.Toplevel(self._ui_root)
-        root.title("ccBar 设置")
+        root.title(L("ccBar 设置"))
         root.geometry("560x640")
         root.minsize(520, 420)
         root.configure(bg=Design.BACKGROUND)
 
-        tk.Label(root, text="⚙️ 设置", font=Design.FONT_TITLE, fg=Design.TEXT_PRIMARY,
+        tk.Label(root, text=L("⚙️ 设置"), font=Design.FONT_TITLE, fg=Design.TEXT_PRIMARY,
                  bg=Design.BACKGROUND).pack(anchor='w', padx=24, pady=(18, 10))
         tk.Frame(root, bg=Design.SEPARATOR, height=1).pack(fill=tk.X, padx=24)
 
@@ -3924,7 +3916,8 @@ class CcBarTray:
                   lambda e: canvas.unbind_all("<MouseWheel>") if e.widget is root else None)
 
         OK_COLOR, WARN_COLOR = "#34C759", "#FF9500"
-        LANG_LABELS = {"system": "跟随系统", "zh": "中文", "en": "English"}
+        # 显示名统一由 l10n.language_display_name 给（"中文" 一项刻意保持中文）
+        LANG_LABELS = {p: l10n.language_display_name(p) for p in l10n.LANGUAGES}
         LANG_BY_LABEL = {v: k for k, v in LANG_LABELS.items()}
 
         def section(title):
@@ -3967,20 +3960,23 @@ class CcBarTray:
         custom = [dict(t) for t in (self.settings.get("custom_themes") or [])]
 
         # ------------------------------------------------------------ 主题
-        section("外观")
+        section(L("外观"))
         theme_row = tk.Frame(inner, bg=Design.BACKGROUND)
         theme_row.pack(fill=tk.X, padx=24, pady=(10, 0))
-        tk.Label(theme_row, text="主题风格", fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+        tk.Label(theme_row, text=L("主题风格"), fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
                  font=Design.FONT_UI, width=18, anchor='w').pack(side=tk.LEFT)
 
         current_theme = self.theme or themes.default_theme()
-        theme_var = tk.StringVar(value=current_theme.get("name", "默认主题"))
+        theme_var = tk.StringVar(value=L(current_theme.get("name")
+                                         or themes.default_theme()["name"]))
 
         def theme_names():
+            """主题显示名（英文界面下过 L；主题包本身的名字/ID 不动）"""
             names = []
             for t in themes.all_themes(custom):
-                if t["name"] not in names:
-                    names.append(t["name"])
+                label = L(t["name"])
+                if label not in names:
+                    names.append(label)
             return names
 
         theme_menu = tk.OptionMenu(theme_row, theme_var, *theme_names())
@@ -3995,7 +3991,7 @@ class CcBarTray:
         def selected_theme():
             name = theme_var.get()
             for t in themes.all_themes(custom):
-                if t["name"] == name:
+                if L(t["name"]) == name:
                     return t
             return themes.default_theme()
 
@@ -4006,72 +4002,73 @@ class CcBarTray:
                 menu.add_command(label=name, command=lambda n=name: theme_var.set(n))
 
         def import_theme():
-            path = filedialog.askopenfilename(title="导入主题包",
-                                              filetypes=[("ccBar 主题包", "*.json"), ("All", "*.*")])
+            path = filedialog.askopenfilename(title=L("导入主题包"),
+                                              filetypes=[(L("ccBar 主题包"), "*.json"), ("All", "*.*")])
             if not path:
                 return
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     theme = themes.theme_from_json(f.read())
             except Exception as e:
-                messagebox.showerror("导入失败", "主题包读取失败：%s" % e)
+                messagebox.showerror(L("导入失败"), L("主题包读取失败：%s") % e)
                 return
             custom[:] = themes.upsert_custom(custom, theme)
-            theme_var.set(theme["name"])
+            theme_var.set(L(theme["name"]))
             refresh_theme_menu()
-            messagebox.showinfo("导入成功", "主题「%s」已加入可选列表（保存后生效）" % theme["name"])
+            messagebox.showinfo(L("导入成功"), L("主题「%s」已加入可选列表（保存后生效）") % theme["name"])
 
         def export_theme():
             name = theme_var.get()
             path = filedialog.asksaveasfilename(
-                title="导出主题包", defaultextension=".json",
+                title=L("导出主题包"), defaultextension=".json",
                 initialfile="ccbar-theme-%s.json" % name,
-                filetypes=[("ccBar 主题包", "*.json")])
+                filetypes=[(L("ccBar 主题包"), "*.json")])
             if not path:
                 return
             try:
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(themes.theme_to_json(selected_theme()))
-                messagebox.showinfo("导出成功", "已导出到：\n%s" % path)
+                messagebox.showinfo(L("导出成功"), L("已导出到：\n%s") % path)
             except Exception as e:
-                messagebox.showerror("导出失败", str(e))
+                messagebox.showerror(L("导出失败"), str(e))
 
         def rename_theme():
             name = theme_var.get()
             theme = selected_theme()
             if not themes.is_custom(theme.get("id"), custom):
-                messagebox.showinfo("提示", "内置主题不能重命名")
+                messagebox.showinfo(L("提示"), L("内置主题不能重命名"))
                 return
-            new_name = simpledialog.askstring("重命名主题", "新名称：", initialvalue=name,
+            new_name = simpledialog.askstring(L("重命名主题"), L("新名称："), initialvalue=name,
                                              parent=root)
             if not new_name or new_name == name:
                 return
             custom[:] = themes.rename_custom(custom, theme["id"], new_name)
-            theme_var.set(new_name)
+            theme_var.set(L(new_name))
             refresh_theme_menu()
 
         def delete_theme():
             theme = selected_theme()
             if not themes.is_custom(theme.get("id"), custom):
-                messagebox.showinfo("提示", "内置主题不能删除")
+                messagebox.showinfo(L("提示"), L("内置主题不能删除"))
                 return
             custom[:] = themes.delete_custom(custom, theme["id"])
-            theme_var.set("默认主题")
+            theme_var.set(L(themes.default_theme()["name"]))
             refresh_theme_menu()
 
-        small_btn(theme_row, "导入", import_theme).pack(side=tk.LEFT)
-        small_btn(theme_row, "导出", export_theme).pack(side=tk.LEFT, padx=(6, 0))
-        small_btn(theme_row, "重命名", rename_theme).pack(side=tk.LEFT, padx=(6, 0))
-        small_btn(theme_row, "删除", delete_theme).pack(side=tk.LEFT, padx=(6, 0))
+        small_btn(theme_row, L("导入"), import_theme).pack(side=tk.LEFT)
+        small_btn(theme_row, L("导出"), export_theme).pack(side=tk.LEFT, padx=(6, 0))
+        small_btn(theme_row, L("重命名"), rename_theme).pack(side=tk.LEFT, padx=(6, 0))
+        small_btn(theme_row, L("删除"), delete_theme).pack(side=tk.LEFT, padx=(6, 0))
 
         # 界面语言
         lang_row = tk.Frame(inner, bg=Design.BACKGROUND)
         lang_row.pack(fill=tk.X, padx=24, pady=(10, 0))
-        tk.Label(lang_row, text="界面语言", fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+        tk.Label(lang_row, text=L("界面语言"), fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
                  font=Design.FONT_UI, width=18, anchor='w').pack(side=tk.LEFT)
-        lang_var = tk.StringVar(
-            value=LANG_LABELS.get(self.settings.get("app_language") or "system", "跟随系统"))
-        lang_menu = tk.OptionMenu(lang_row, lang_var, *["跟随系统", "中文", "English"])
+        lang_var = tk.StringVar(value=LANG_LABELS.get(
+            self.settings.get("app_language") or "system",
+            l10n.language_display_name("system")))
+        lang_menu = tk.OptionMenu(lang_row, lang_var, *LANG_LABELS.values())
         lang_menu.configure(bg=Design.CARD_FILL, fg=Design.TEXT_PRIMARY, relief="flat", bd=0,
                             activebackground=Design.BTN_BG_HOVER,
                             activeforeground=Design.TEXT_PRIMARY, highlightthickness=0,
@@ -4079,14 +4076,14 @@ class CcBarTray:
         lang_menu["menu"].configure(bg=Design.CARD_FILL, fg=Design.TEXT_PRIMARY,
                                     activebackground=Design.BRAND, font=Design.FONT_UI_SMALL)
         lang_menu.pack(side=tk.LEFT)
-        tk.Label(lang_row, text="重启后生效", fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
+        tk.Label(lang_row, text=L("重开窗口后生效"), fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
                  font=Design.FONT_UI_SMALL).pack(side=tk.LEFT, padx=(10, 0))
 
-        interval_entry = field_row("刷新间隔 (秒):", "范围 5 - 3000")
+        interval_entry = field_row(L("刷新间隔 (秒):"), L("范围 5 - 3000"))
         interval_entry.insert(0, str(self.settings["refresh_interval"]))
 
         # ------------------------------------------------------------ 数据源
-        section("数据源")
+        section(L("数据源"))
 
         source_vars, source_entries, source_status = {}, {}, {}
         source_keys = {"ccswitch": ("ccswitch_enabled", "db_path"),
@@ -4102,9 +4099,10 @@ class CcBarTray:
                 return
             error = validate_db(path, adapter.required_tables)
             if error is None:
-                status.config(text="表结构正确（保存后生效）", fg=OK_COLOR)
+                status.config(text=L("表结构正确（保存后生效）"), fg=OK_COLOR)
             else:
-                status.config(text=error, fg=WARN_COLOR)
+                # validate_db 返回的是数据层的中文原文，显示时才过 L（同 macOS）
+                status.config(text=L(error), fg=WARN_COLOR)
 
         attached_ids = [a.id for a in self.store.attached]
         for adapter in SOURCE_REGISTRY:
@@ -4138,7 +4136,7 @@ class CcBarTray:
             def make_browse(entry_box, adapter_id):
                 def browse():
                     filename = filedialog.askopenfilename(
-                        title="选择数据库文件",
+                        title=L("选择数据库文件"),
                         filetypes=[("SQLite", "*.db *.sqlite"), ("All", "*.*")])
                     if filename:
                         entry_box.delete(0, tk.END)
@@ -4146,18 +4144,18 @@ class CcBarTray:
                         validate_source(adapter_id)
                 return browse
 
-            small_btn(row, "浏览", make_browse(entry, adapter.id)).pack(side=tk.LEFT, padx=(8, 0))
+            small_btn(row, L("浏览"), make_browse(entry, adapter.id)).pack(side=tk.LEFT, padx=(8, 0))
 
             status = tk.Label(src, text="", fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
                               font=Design.FONT_UI_SMALL, anchor='w')
             status.pack(fill=tk.X, pady=(2, 0))
             source_status[adapter.id] = status
             if adapter.id in attached_ids:
-                status.config(text="已连接", fg=OK_COLOR)
+                status.config(text=L("已连接"), fg=OK_COLOR)
             elif not var.get():
-                status.config(text="未启用", fg=Design.TEXT_MUTED)
+                status.config(text=L("未启用"), fg=Design.TEXT_MUTED)
             else:
-                status.config(text="未连接", fg=WARN_COLOR)
+                status.config(text=L("未连接"), fg=WARN_COLOR)
             entry.bind("<FocusOut>", lambda e, aid=adapter.id: validate_source(aid))
 
         # Trae 是 HTTP 源（不在 SOURCE_REGISTRY 里），用登录凭据代替库路径
@@ -4182,51 +4180,53 @@ class CcBarTray:
                               highlightcolor=Design.BRAND)
         trae_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=4)
         trae_entry.insert(0, self.settings.get("trae_sessionid") or "")
-        tk.Label(trae_row, text="粘贴 trae.cn 登录后的 sessionid cookie 值",
+        tk.Label(trae_row, text=L("粘贴 trae.cn 登录后的 sessionid cookie 值"),
                  fg=Design.TEXT_MUTED, bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL,
                  anchor='w').pack(fill=tk.X, pady=(2, 0))
 
         # 状态行：HTTP 源没有库路径可校验，直接透出统计库的诊断信息
         try:
-            trae_status_text = self.store.source_status.get("trae", "") or ""
+            # source_status 是数据层的中文原文（未启用/已连接/同步失败…），显示时才过 L
+            trae_status_text = L(self.store.source_status.get("trae", "") or "")
             ent = self.store.trae_ent_summary()
         except Exception:
             trae_status_text, ent = "", None
         if ent:
-            trae_status_text += " · 积分 %s/%s" % (self._fmt_credits(ent[0]),
-                                                   self._fmt_credits(ent[1]))
+            trae_status_text += L(" · 积分 %s/%s") % (self._fmt_credits(ent[0]),
+                                                     self._fmt_credits(ent[1]))
         tk.Label(trae_row, text=trae_status_text, fg=Design.TEXT_MUTED,
                  bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL,
                  anchor='w').pack(fill=tk.X, pady=(2, 0))
 
         # ------------------------------------------------------------ 提醒与费用
-        section("提醒")
-        warning_entry = field_row("预警阈值 (万):", "超过此值将弹出通知提醒")
+        section(L("提醒"))
+        warning_entry = field_row(L("预警阈值 (万):"), L("超过此值将弹出通知提醒"))
         warning_entry.insert(0, str(self.settings["warning_threshold"]))
-        notify_entry = field_row("通知间隔 (万):", "每累计N万通知一次，0=关闭")
+        notify_entry = field_row(L("通知间隔 (万):"), L("每累计N万通知一次，0=关闭"))
         notify_entry.insert(0, str(self.settings.get("notify_interval", 1000)))
-        led_entry = field_row("红色门槛 (万):", "单次刷新增量达到即变红，0=不变红")
+        led_entry = field_row(L("红色门槛 (万):"), L("单次刷新增量达到即变红，0=不变红"))
         led_entry.insert(0, str(self.settings.get("led_red_threshold", 100)))
 
-        section("费用估算")
-        budget_entry = field_row("月度预算 ($):", "0=关闭预算显示")
+        section(L("费用估算"))
+        budget_entry = field_row(L("月度预算 ($):"), L("0=关闭预算显示"))
         budget_value = self.settings.get("monthly_budget_usd") or 0
         budget_entry.insert(0, ("%g" % budget_value) if budget_value else "0")
-        price_entry = field_row("默认单价 ($/M):", "未计费渠道按此估算，0=关闭")
+        price_entry = field_row(L("默认单价 ($/M):"), L("未计费渠道按此估算，0=关闭"))
         price_value = self.settings.get("default_token_price") or 0
         price_entry.insert(0, ("%g" % price_value) if price_value else "0")
 
         # ------------------------------------------------------------ 开关
-        section("行为")
-        warning_var = check_row("启用用量预警", self.settings["warning_enabled"])
-        login_var = check_row("开机自动启动", self.settings.get("launch_at_login"))
-        report_var = check_row("每周一自动生成用量周报",
+        section(L("行为"))
+        warning_var = check_row(L("启用用量预警"), self.settings["warning_enabled"])
+        login_var = check_row(L("开机自动启动"), self.settings.get("launch_at_login"))
+        report_var = check_row(L("每周一自动生成用量周报"),
                                self.settings.get("auto_weekly_report", True))
+        wide_var = check_row(L("宽版弹窗（380pt）"), self.settings.get("popover_wide"))
 
         backup_row = tk.Frame(inner, bg=Design.BACKGROUND)
         backup_row.pack(fill=tk.X, padx=24, pady=(10, 0))
         tk.Label(backup_row,
-                 text="上次自动备份：%s" % (self.settings.get("last_auto_backup_date") or "从未"),
+                 text=L("上次自动备份：%s") % (self.settings.get("last_auto_backup_date") or L("从未")),
                  fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
                  font=Design.FONT_UI_SMALL).pack(side=tk.LEFT)
 
@@ -4239,21 +4239,21 @@ class CcBarTray:
                 import webbrowser
                 webbrowser.open("file://" + path.replace("\\", "/"))
 
-        small_btn(backup_row, "打开备份目录", open_backup_dir).pack(side=tk.RIGHT)
+        small_btn(backup_row, L("打开备份目录"), open_backup_dir).pack(side=tk.RIGHT)
 
         # ------------------------------------------------------------ 数据
-        section("数据")
+        section(L("数据"))
 
         mig = tk.Frame(inner, bg=Design.BACKGROUND)
         mig.pack(fill=tk.X, padx=24, pady=(10, 0))
-        tk.Label(mig, text="明细 CSV 迁移（导入幂等：主键去重）", fg=Design.TEXT_MUTED,
+        tk.Label(mig, text=L("明细 CSV 迁移（导入幂等：主键去重）"), fg=Design.TEXT_MUTED,
                  bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL).pack(side=tk.LEFT)
-        tk.Button(mig, text="导入 CSV", command=lambda: self.import_data(root),
+        tk.Button(mig, text=L("导入 CSV"), command=lambda: self.import_data(root),
                   bg=Design.CARD_FILL, fg=Design.TEXT_PRIMARY,
                   activebackground=Design.BTN_BG_HOVER, activeforeground=Design.TEXT_PRIMARY,
                   relief="flat", bd=0, padx=12, cursor="hand2",
                   font=Design.FONT_UI_SMALL).pack(side=tk.RIGHT)
-        tk.Button(mig, text="导出 CSV", command=self.export_data,
+        tk.Button(mig, text=L("导出 CSV"), command=self.export_data,
                   bg=Design.CARD_FILL, fg=Design.TEXT_PRIMARY,
                   activebackground=Design.BTN_BG_HOVER, activeforeground=Design.TEXT_PRIMARY,
                   relief="flat", bd=0, padx=12, cursor="hand2",
@@ -4262,26 +4262,26 @@ class CcBarTray:
         def merge_database():
             """多机合并：把另一台机器的统计库明细按主键并进来（不重不漏）"""
             path = filedialog.askopenfilename(
-                title="选择另一台机器的 ccbar.db",
+                title=L("选择另一台机器的 ccbar.db"),
                 filetypes=[("SQLite", "*.db"), ("All", "*.*")])
             if not path:
                 return
             merge = getattr(self.store, "merge_from_db", None)
             if merge is None:
-                messagebox.showerror("合并失败", "当前版本不支持多机合并")
+                messagebox.showerror(L("合并失败"), L("当前版本不支持多机合并"))
                 return
             read, inserted = merge(path)
             if read == 0 and inserted == 0:
-                messagebox.showerror("合并失败", "不是有效的 ccBar 统计库（缺 usage_log 表或打不开）")
+                messagebox.showerror(L("合并失败"), L("不是有效的 ccBar 统计库（缺 usage_log 表或打不开）"))
                 return
-            messagebox.showinfo("合并完成",
-                                "共读取 %d 行 · 新增 %d 行（主键去重）" % (read, inserted))
+            messagebox.showinfo(L("合并完成"),
+                                L("共读取 %d 行 · 新增 %d 行（主键去重）") % (read, inserted))
 
         merge_row = tk.Frame(inner, bg=Design.BACKGROUND)
         merge_row.pack(fill=tk.X, padx=24, pady=(10, 4))
-        tk.Label(merge_row, text="多机合并（另一台机器的统计库）", fg=Design.TEXT_MUTED,
+        tk.Label(merge_row, text=L("多机合并（另一台机器的统计库）"), fg=Design.TEXT_MUTED,
                  bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL).pack(side=tk.LEFT)
-        tk.Button(merge_row, text="合并数据库…", command=merge_database,
+        tk.Button(merge_row, text=L("合并数据库…"), command=merge_database,
                   bg=Design.CARD_FILL, fg=Design.TEXT_PRIMARY,
                   activebackground=Design.BTN_BG_HOVER, activeforeground=Design.TEXT_PRIMARY,
                   relief="flat", bd=0, padx=12, cursor="hand2",
@@ -4311,9 +4311,10 @@ class CcBarTray:
             warning_var.set(True)
             login_var.set(False)
             report_var.set(True)
-            lang_var.set("跟随系统")
+            wide_var.set(False)
+            lang_var.set(LANG_LABELS["system"])
             custom[:] = []
-            theme_var.set("默认主题")
+            theme_var.set(L(themes.default_theme()["name"]))
             refresh_theme_menu()
             trae_var.set(False)
             trae_entry.delete(0, tk.END)
@@ -4329,8 +4330,9 @@ class CcBarTray:
                 "warning_enabled": warning_var.get(),
                 "launch_at_login": login_var.get(),
                 "auto_weekly_report": report_var.get(),
+                "popover_wide": wide_var.get(),
                 "app_language": LANG_BY_LABEL.get(lang_var.get(), "system"),
-                "theme": selected_theme().get("id", "默认主题"),
+                "theme": selected_theme().get("id") or themes.default_theme()["id"],
                 "custom_themes": custom,
             }
             for adapter in SOURCE_REGISTRY:
@@ -4348,25 +4350,27 @@ class CcBarTray:
             updates = collect()
             errors = self.settings.validate(updates)
             if errors:
-                messagebox.showerror("设置未保存", "请检查：\n· " + "\n· ".join(errors))
+                messagebox.showerror(L("设置未保存"),
+                                     L("请检查：\n· ")
+                                     + "\n· ".join(L(e) for e in errors))
                 return
             self.settings.apply(updates)
             # 开关类设置需要同步系统状态
             try:
                 autostart.apply(self.settings.get("launch_at_login"))
             except Exception as e:
-                print("开机自启设置失败:", e)
+                print(L("开机自启设置失败:"), e)
             self.apply_language()
             self.apply_theme()
             # 立即按新设置重连统计库（启用新源会触发首次全量回填）
             self.connect_store()
-            messagebox.showinfo("成功", "设置已保存，将在下次刷新时生效")
+            messagebox.showinfo(L("成功"), L("设置已保存，将在下次刷新时生效"))
             root.destroy()
 
-        small_btn(btn_bar, "重置", reset).pack(side=tk.RIGHT)
-        small_btn(btn_bar, "检查更新", self.check_for_updates).pack(side=tk.RIGHT, padx=(0, 8))
-        small_btn(btn_bar, "备份数据", self.backup_data).pack(side=tk.RIGHT, padx=(0, 8))
-        small_btn(btn_bar, "保存", save, primary=True).pack(side=tk.RIGHT, padx=(0, 8))
+        small_btn(btn_bar, L("重置"), reset).pack(side=tk.RIGHT)
+        small_btn(btn_bar, L("检查更新"), self.check_for_updates).pack(side=tk.RIGHT, padx=(0, 8))
+        small_btn(btn_bar, L("备份数据"), self.backup_data).pack(side=tk.RIGHT, padx=(0, 8))
+        small_btn(btn_bar, L("保存"), save, primary=True).pack(side=tk.RIGHT, padx=(0, 8))
 
         self._bring_to_front(root)
 
@@ -4377,7 +4381,7 @@ class CcBarTray:
 
         stamp = datetime.now().strftime("%Y%m%d")
         path = filedialog.asksaveasfilename(
-            title="备份统计库",
+            title=L("备份统计库"),
             defaultextension=".db",
             initialfile=f"ccbar-backup-{stamp}.db",
             filetypes=[("SQLite", "*.db"), ("All", "*.*")])
@@ -4385,11 +4389,11 @@ class CcBarTray:
             return
         if self.store.backup(path):
             messagebox.showinfo(
-                "备份完成",
-                f"统计库已备份到：\n{path}\n\n"
-                "恢复方式：退出 ccBar 后用备份文件替换\n~/.ccbar/ccbar.db")
+                L("备份完成"),
+                L("统计库已备份到：\n%s\n\n恢复方式：退出 ccBar 后用备份文件替换\n"
+                  "~/.ccbar/ccbar.db") % path)
         else:
-            messagebox.showerror("备份失败", "统计库未打开或目标位置不可写")
+            messagebox.showerror(L("备份失败"), L("统计库未打开或目标位置不可写"))
 
     def check_for_updates(self, icon=None, item=None):
         """检查更新：后台请求 GitHub（网络不能堵 GUI 线程），完成后回 GUI 弹窗"""
@@ -4406,43 +4410,46 @@ class CcBarTray:
 
         if latest and is_newer_version(latest, APP_VERSION):
             if messagebox.askyesno(
-                    "发现新版本",
-                    f"最新版本 v{latest}，当前 v{APP_VERSION}\n是否前往下载？"):
+                    L("发现新版本"),
+                    L("最新版本 v%s，当前 v%s\n是否前往下载？") % (latest, APP_VERSION)):
                 webbrowser.open(RELEASES_URL)
             return
         messagebox.showinfo(
-            "检查更新",
-            f"已经是最新版本（v{APP_VERSION}）" if latest
-            else "检查失败，稍后再试，或直接到 GitHub Releases 页面查看")
+            L("检查更新"),
+            L("已经是最新版本（v%s）") % APP_VERSION if latest
+            else L("检查失败，稍后再试，或直接到 GitHub Releases 页面查看"))
 
     def export_data(self):
         """导出明细 CSV（换机迁移 / Excel 查看）"""
         from tkinter import filedialog, messagebox
         stamp = datetime.now().strftime("%Y%m%d")
         path = filedialog.asksaveasfilename(
-            title="导出明细", defaultextension=".csv",
+            title=L("导出明细"), defaultextension=".csv",
             initialfile=f"ccbar-export-{stamp}.csv", filetypes=[("CSV", "*.csv")])
         if not path:
             return
         n = self.store.export_csv(path)
         if n >= 0:
-            messagebox.showinfo("导出完成", f"已导出 {n} 行明细到：\n{path}")
+            messagebox.showinfo(L("导出完成"),
+                                L("已导出 %d 行明细到：\n%s") % (n, path))
         else:
-            messagebox.showerror("导出失败", "统计库未打开或目标位置不可写")
+            messagebox.showerror(L("导出失败"), L("统计库未打开或目标位置不可写"))
 
     def import_data(self, root):
         """幂等导入明细 CSV：主键去重，同一文件重复导零新增"""
         from tkinter import filedialog, messagebox
-        path = filedialog.askopenfilename(title="导入明细",
+        path = filedialog.askopenfilename(title=L("导入明细"),
                                           filetypes=[("CSV", "*.csv"), ("All", "*.*")])
         if not path:
             return
         read, inserted, skipped = self.store.import_csv(path)
         if skipped == -1:
-            messagebox.showerror("导入失败", "不是 ccBar 导出的明细 CSV（表头不符）")
+            messagebox.showerror(L("导入失败"), L("不是 ccBar 导出的明细 CSV（表头不符）"))
             return
-        messagebox.showinfo("导入完成",
-                            f"共读取 {read} 行 · 新增 {inserted} 行 · 跳过 {skipped} 行（重复或非法）")
+        messagebox.showinfo(
+            L("导入完成"),
+            L("共读取 %d 行 · 新增 %d 行 · 跳过 %d 行（重复或非法）")
+            % (read, inserted, skipped))
 
     def quit_app(self, icon, item):
         """退出应用"""
@@ -4486,7 +4493,7 @@ class CcBarTray:
             try:
                 sync(interactive=interactive)
             except Exception as e:
-                print("Trae 同步失败:", e)
+                print(L("Trae 同步失败:"), e)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -4511,12 +4518,16 @@ class CcBarTray:
         threading.Thread(target=worker, daemon=True).start()
 
     def get_tooltip_text(self):
-        """获取托盘标题文本（悬停时显示）"""
+        """托盘悬停提示（对齐 macOS 版：今日 / 昨日 / 请求数 三行）"""
         today = self.query_day_stats(0)
         if not today:
-            return "ccBar - 未找到数据"
-        total_str = self.fmt_tokens(today["total"])
-        return total_str
+            return L("ccBar - 未找到数据")
+        lines = [L("今日：%s") % self.fmt_tokens(today["total"])]
+        yesterday = self.query_day_stats(1)
+        if yesterday:
+            lines.append(L("昨日：%s") % self.fmt_tokens(yesterday["total"]))
+        lines.append(L("请求数：%d") % int(today.get("reqs", 0)))
+        return "\n".join(lines)
 
     def run(self):
         """运行应用"""

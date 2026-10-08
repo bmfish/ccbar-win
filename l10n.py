@@ -529,3 +529,83 @@ L10N_EN.update({
     "日均 %.0f 分钟 · 最长 %.0f 分钟": "avg %.0f min · longest %.0f min",
     "重开窗口后生效": "Applies to newly opened windows",
 })
+
+# MARK: - 批次 4（i18n 全覆盖）补充：把 main.py 里新包裹的字面量补齐英文
+
+# 问候语原文表（原文即词条 key）。main.py 的 CcBarTray.GREETINGS 直接引用它，
+# 在显示时才过 L()，避免模块导入期就把语言定死成中文。
+GREETINGS = (
+    "今天也要加油写 Bug 哦 ✨",
+    "代码如诗，Bug 如风 🌸",
+    "写代码不如谈恋爱 💕",
+    "需求又改了，习惯就好 🫠",
+    "今天不出 Bug，明天出什么 🎯",
+    "写代码使我快乐（并不）🎭",
+    "技术债也是债 💸",
+    "今天的需求明天再做 🌙",
+    "码农的一天从咖啡开始 ☕",
+    "Git commit -m '又一个 Bug' 🔧",
+    "产品经理说很简单 🤡",
+    "这个需求一天就能做完 📝",
+    "代码能跑就行 🏃",
+    "今天也是充满 Bug 的一天 🐛",
+    "先实现，再优化（永远不优化）⏳",
+    "这个接口我三分钟就写完 ⚡",
+    "测试？什么测试？ 🎲",
+    "线上出 Bug 了？不可能 🚫",
+    "重构？先加个 if 吧 🤔",
+    "这个功能很简单的 🎪",
+)
+
+L10N_EN.update({
+    "  ⏱️ 时长: %sh": "  ⏱️ Time: %sh",
+    "  💾 缓存命中: %.1f%%": "  💾 Cache hit: %.1f%%",
+    "  🔢 请求: %d次": "  🔢 Requests: %d",
+    " · 积分 %s/%s": " · credits %s/%s",
+    "%d 个": "%d sessions",
+    "%d次": "%d reqs",
+    "+%s tokens！今日已达 %s（每%d万通知一次）":
+        "+%s tokens! %s today (every %d×10K)",
+    "Token 总量: %s\n": "Total Tokens: %s\n",
+    "ccbar-模型分布.csv": "ccbar-model-breakdown.csv",
+    "ccbar-每小时.csv": "ccbar-hourly.csv",
+    "今日 Token 用量已达 %s，超过预警阈值 %d万":
+        "Today's tokens reached %s (warning line: %d×10K)",
+    "今日会话  %d 个 · 平均 %d 分钟 · 最长 %d 分钟":
+        "Sessions today  %d · avg %d min · longest %d min",
+    "剪贴板不可用，已保存到临时文件：\n%s":
+        "Clipboard unavailable; saved to a temp file:\n%s",
+    "导出%s": "Export %s",
+    "导出历史总量": "Export All Time",
+    "导出模型分布": "Export Model Breakdown",
+    "导出每小时用量": "Export Hourly Usage",
+    "峰值时段": "Peak Hour",
+    "已保存到：\n%s": "Saved to:\n%s",
+    "已导出 %d 行到：\n%s": "Exported %d rows to:\n%s",
+    "已导出 %d 行明细到：\n%s": "Exported %d rows to:\n%s",
+    "已导出到：\n%s": "Exported to:\n%s",
+    "已用 / 共 %s": "used of %s",
+    "已经是最新版本（v%s）": "Up to date (v%s)",
+    "总Token": "Tokens",
+    "最新版本 v%s，当前 v%s\n是否前往下载？":
+        "Latest v%s, current v%s\nDownload now?",
+    "统计库已备份到：\n%s\n\n恢复方式：退出 ccBar 后用备份文件替换\n~/.ccbar/ccbar.db":
+        "Database backed up to:\n%s\n\nTo restore: quit ccBar and replace\n"
+        "~/.ccbar/ccbar.db with the backup",
+    "请检查：\n· ": "Check:\n· ",
+    "输入 Token: %s\n": "Input: %s\n",
+    "输出 Token: %s\n": "Output: %s\n",
+    "📅 昨日: %s": "📅 Yesterday: %s",
+    "📅 近7天: %s": "📅 7 days: %s",
+    "📆 近30天: %s": "📆 30 days: %s",
+    "📈 历史总量: %s": "📈 All time: %s",
+    "📊 今日: %s": "📊 Today: %s",
+})
+
+L10N_EN.update({
+    "今日：%s": "Today: %s",
+    "昨日：%s": "Yesterday: %s",
+    "请求数：%d": "Requests: %d",
+    "宽版弹窗（380pt）": "Wide popover (380pt)",
+    "ccBar - 未找到数据": "ccBar - no data",
+})
