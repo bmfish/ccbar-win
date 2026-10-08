@@ -1,5 +1,12 @@
 import sys
-import os
+
+# Windows 控制台默认 cp1252，中文 print 会抛 UnicodeEncodeError（CI 实锤），统一 UTF-8
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+import  os
 import sqlite3
 import threading
 import time
@@ -1502,11 +1509,11 @@ class CcBarTray:
 
         menu_items.append(pystray.Menu.SEPARATOR)
 
-        # 复制统计
-        menu_items.append(pystray.MenuItem("📋 复制今日统计", self.copy_stats))
-
         # 刷新
         menu_items.append(pystray.MenuItem("🔄 刷新", self.refresh_data))
+
+        # 洞察中心
+        menu_items.append(pystray.MenuItem("📈 洞察中心", self.show_insights))
 
         # 备份数据
         menu_items.append(pystray.MenuItem("💾 备份数据", self.backup_data))
@@ -2195,6 +2202,397 @@ class CcBarTray:
             self.icon.menu = menu
 
     @_on_gui
+    # ------------------------------------------------------------ 洞察中心
+
+    @staticmethod
+    def _pil_font(size, bold=False):
+        """PIL 中文字体：微软雅黑优先，逐级回落"""
+        from PIL import ImageFont
+        for path in (["C:/Windows/Fonts/msyhbd.ttc"] if bold else []) + [
+                "C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/arial.ttf"]:
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:
+                continue
+        return ImageFont.load_default()
+
+    @staticmethod
+    def _bar_chart_png(series, colors, width=680, height=150):
+        """深底堆叠柱状图。series: [(label, {名称: 值})]，colors: {名称: "#hex"}"""
+        from PIL import Image, ImageDraw
+
+        img = Image.new("RGB", (width, height), "#1E1E1E")
+        d = ImageDraw.Draw(img)
+        if not series:
+            d.text((width // 2, height // 2), "暂无数据", fill="#6B6B6B",
+                   anchor="mm", font=CcBarTray._pil_font(13))
+            return img
+        top, bottom = 12, height - 22
+        names = list(colors.keys())
+        totals = [sum(vals.get(n, 0) for n in names) for _, vals in series]
+        maxv = max(totals) or 1
+        slot = width / len(series)
+        bw = max(slot * 0.62, 2)
+        for i, (label, vals) in enumerate(series):
+            y = bottom
+            for n in names:
+                v = vals.get(n, 0)
+                if v <= 0:
+                    continue
+                h = v / maxv * (bottom - top)
+                d.rectangle([i * slot + (slot - bw) / 2, y - h, i * slot + (slot + bw) / 2, y],
+                            fill=colors[n])
+                y -= h
+        d.line([(0, bottom), (width, bottom)], fill="#3D3D3D")
+        d.text((4, 2), CcBarTray.fmt_tokens_static(maxv), fill="#6B6B6B",
+               font=CcBarTray._pil_font(11))
+        if series:
+            d.text((4, height - 16), series[0][0], fill="#6B6B6B", font=CcBarTray._pil_font(10))
+            d.text((width - 4, height - 16), series[-1][0], fill="#6B6B6B",
+                   anchor="ra", font=CcBarTray._pil_font(10))
+        return img
+
+    @staticmethod
+    def _line_chart_png(points, color, width=680, height=120, suffix=""):
+        """深底折线图。points: [(label, value)]"""
+        from PIL import Image, ImageDraw
+
+        img = Image.new("RGB", (width, height), "#1E1E1E")
+        d = ImageDraw.Draw(img)
+        if len(points) < 2:
+            d.text((width // 2, height // 2), "暂无数据", fill="#6B6B6B",
+                   anchor="mm", font=CcBarTray._pil_font(13))
+            return img
+        top, bottom = 12, height - 20
+        maxv = max(v for _, v in points) or 1
+        step = (width - 16) / (len(points) - 1)
+        pts = [(8 + i * step, bottom - (v / maxv) * (bottom - top)) for i, (_, v) in enumerate(points)]
+        d.line(pts, fill=color, width=2)
+        d.text((width - 4, 2), f"{maxv:.0f}{suffix}", fill="#6B6B6B", anchor="ra",
+               font=CcBarTray._pil_font(11))
+        return img
+
+    @staticmethod
+    def fmt_tokens_static(tokens):
+        """静态格式化（洞察图表用）：中文单位"""
+        if tokens >= 100_000_000:
+            return f"{tokens / 100_000_000:.2f}亿"
+        if tokens >= 10_000:
+            return f"{tokens // 10_000}万"
+        return f"{tokens}"
+
+    def _share_card_png(self):
+        """用量战报分享卡（深色圆角卡片）"""
+        from PIL import Image, ImageDraw
+
+        W, H = 640, 420
+        img = Image.new("RGB", (W, H), "#121214")
+        d = ImageDraw.Draw(img)
+        d.rounded_rectangle([8, 8, W - 8, H - 8], radius=16, outline="#3D3D3D", width=1)
+
+        today = self.query_day_stats(0)
+        week = self.query_day_stats(7)
+        month = self.query_day_stats(30)
+        total = self.query_total_stats()
+
+        f_brand = self._pil_font(22, bold=True)
+        f_mid = self._pil_font(15)
+        f_big = self._pil_font(52, bold=True)
+        f_small = self._pil_font(12)
+
+        d.text((36, 32), "CCBar", font=f_brand, fill=Design.BRAND)
+        d.text((W - 36, 38), "AI 用量战报", font=f_mid, fill="#8C8C8C", anchor="ra")
+        d.text((36, 78), datetime.now().strftime("%Y-%m-%d"), font=f_small, fill="#8C8C8C")
+
+        d.text((36, 116), "今日消耗", font=f_mid, fill="#8C8C8C")
+        d.text((36, 142), self.fmt_tokens(today["total"] if today else 0), font=f_big, fill=Design.BRAND)
+
+        # 近 7 天趋势折线
+        tokens = self.store.query_daily_tokens(7)
+        if len(tokens) >= 2:
+            top, bottom = 240, 300
+            maxv = max(t for _, t in tokens) or 1
+            step = (W - 72) / (len(tokens) - 1)
+            pts = [(36 + i * step, bottom - (t / maxv) * (bottom - top)) for i, (_, t) in enumerate(tokens)]
+            d.line(pts, fill=Design.BRAND, width=3, joint="curve")
+
+        cols = [(36, "近 7 天", week["total"] if week else 0),
+                (250, "近 30 天", month["total"] if month else 0),
+                (460, "累计", total["total"] if total else 0)]
+        for x, label, value in cols:
+            d.text((x, 330), label, font=f_small, fill="#8C8C8C")
+            d.text((x, 348), self.fmt_tokens(value), font=self._pil_font(18, bold=True), fill="#FFFFFF")
+
+        d.line([(36, H - 52), (W - 36, H - 52)], fill="#2A2A2A")
+        d.text((36, H - 42), "CCBar · github.com/bmfish/ccbar-win", font=f_small, fill="#555555")
+        return img
+
+    @staticmethod
+    def _insight_card(parent, row, col, title, value, sub=""):
+        """洞察页统计卡（两列网格中的一项）"""
+        import tkinter as tk
+
+        card = tk.Frame(parent, bg=Design.CARD_FILL, highlightbackground=Design.CARD_BORDER,
+                        highlightthickness=1, padx=14, pady=10)
+        card.grid(row=row, column=col, sticky="nsew", padx=6, pady=6)
+        tk.Label(card, text=title, fg=Design.TEXT_SECONDARY, bg=Design.CARD_FILL,
+                 font=("Microsoft YaHei UI", 10), anchor='w').pack(fill=tk.X)
+        tk.Label(card, text=value, fg=Design.BRAND, bg=Design.CARD_FILL,
+                 font=("Microsoft YaHei UI", 17, "bold"), anchor='w').pack(fill=tk.X)
+        if sub:
+            tk.Label(card, text=sub, fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                     font=Design.FONT_UI_SMALL, anchor='w').pack(fill=tk.X)
+
+    @_on_gui
+    def show_insights(self, icon=None, item=None):
+        """洞察中心：费用 / 洞察 / 分享 / 渠道 / 流水 五页"""
+        import tkinter as tk
+        from tkinter import ttk
+        from PIL import ImageTk
+
+        store = self.store
+
+        # 数据一次全查（全部走索引区间，毫秒级）
+        cost_today, cost7, cost30 = store.query_cost(0), store.query_cost(7), store.query_cost(30)
+        cost_daily = store.query_cost_daily(30)
+        cost_models = store.query_cost_by_model(30)
+        streak = store.query_streak()
+        this_week, last_week = store.query_weekly_delta()
+        peak = store.query_peak_day(30)
+        top = store.query_top_model(30)
+        mtd, elapsed, dim = store.query_month_progress()
+        projected = mtd // elapsed * dim if elapsed else 0
+        channels = store.query_channel_daily(30)
+        apps = store.query_app_daily(30)
+        comp = store.query_composition_daily(30)
+        timeline = store.query_today_timeline(500)
+
+        root = tk.Toplevel(self._ui_root)
+        root.title("洞察中心")
+        root.geometry("760x600")
+        root.configure(bg=Design.BACKGROUND)
+
+        style = ttk.Style(root)
+        style.theme_use("default")
+        style.configure("TNotebook", background=Design.BACKGROUND, borderwidth=0)
+        style.configure("TNotebook.Tab", background=Design.CARD_FILL, foreground=Design.TEXT_PRIMARY,
+                        padding=(18, 7), font=("Microsoft YaHei UI", 10))
+        style.map("TNotebook.Tab", background=[("selected", Design.BRAND)])
+        style.configure("Insights.Treeview", background=Design.CARD_FILL, fieldbackground=Design.CARD_FILL,
+                        foreground=Design.TEXT_PRIMARY, rowheight=24, borderwidth=0)
+        style.configure("Insights.Treeview.Heading", background=Design.BACKGROUND,
+                        foreground=Design.TEXT_MUTED, borderwidth=0)
+        style.map("Insights.Treeview", background=[("selected", Design.CARD_BORDER)])
+
+        nb = ttk.Notebook(root)
+        nb.pack(fill=tk.BOTH, expand=True, padx=12, pady=(12, 12))
+
+        def tab():
+            f = tk.Frame(nb, bg=Design.BACKGROUND)
+            f.pack(fill=tk.BOTH, expand=True)
+            return f
+
+        def png_label(frame, img):
+            lbl = tk.Label(frame, bg=Design.CARD_FILL, highlightbackground=Design.CARD_BORDER,
+                           highlightthickness=1)
+            lbl.configure(image=ImageTk.PhotoImage(img))
+            lbl.image = ImageTk.PhotoImage(img)
+            lbl.pack(fill=tk.X, padx=16, pady=(10, 4))
+            return lbl
+
+        # ============ 费用 ============
+        f_cost = tab()
+        money = lambda v: f"${v:.2f}"
+        cards = [("今日费用", cost_today), ("近 7 天", cost7), ("近 30 天", cost30)]
+        for i, (t, v) in enumerate(cards):
+            card = tk.Frame(f_cost, bg=Design.CARD_FILL, highlightbackground=Design.CARD_BORDER,
+                            highlightthickness=1, padx=16, pady=12)
+            card.grid(row=0, column=i, sticky="nsew", padx=8, pady=(16, 4))
+            f_cost.grid_columnconfigure(i, weight=1)
+            tk.Label(card, text=t, fg=Design.TEXT_SECONDARY, bg=Design.CARD_FILL,
+                     font=("Microsoft YaHei UI", 10)).pack(anchor='w')
+            tk.Label(card, text=money(v), fg=Design.BRAND, bg=Design.CARD_FILL,
+                     font=("Microsoft YaHei UI", 19, "bold")).pack(anchor='w')
+        tk.Label(f_cost, text="近 30 天费用走势", fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+                 font=("Microsoft YaHei UI", 10, "bold")).pack(anchor='w', padx=16, pady=(14, 2))
+        png_label(f_cost, self._bar_chart_png([(d, c) for d, c in cost_daily], Design.BRAND))
+        tk.Label(f_cost, text="模型费用排行（近 30 天）", fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+                 font=("Microsoft YaHei UI", 10, "bold")).pack(anchor='w', padx=16, pady=(12, 2))
+        for m, c, tok in cost_models:
+            row = tk.Frame(f_cost, bg=Design.BACKGROUND)
+            row.pack(fill=tk.X, padx=20)
+            tk.Label(row, text=m, fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+                     font=("Microsoft YaHei UI", 10)).pack(side=tk.LEFT)
+            tk.Label(row, text=f"{money(c)} · {self.fmt_tokens(tok)}",
+                     fg=Design.TEXT_SECONDARY, bg=Design.BACKGROUND,
+                     font=Design.FONT_MONO_SMALL).pack(side=tk.RIGHT)
+        tk.Label(f_cost, text="费用按 cc-switch 记录的单价折算；ZCode 渠道官方未计费，不计入",
+                 fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
+                 font=Design.FONT_UI_SMALL).pack(anchor='w', padx=16, pady=(14, 8))
+
+        # ============ 洞察 ============
+        f_ins = tab()
+        grid = tk.Frame(f_ins, bg=Design.BACKGROUND)
+        grid.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        for c in range(2):
+            grid.grid_columnconfigure(c, weight=1)
+        delta_txt = ""
+        if last_week > 0:
+            delta_txt = f"{(this_week - last_week) / last_week * 100:+.0f}%"
+        peak_h = peak[0] if peak else "-"
+        peak_v = self.fmt_tokens(peak[1]) if peak else "-"
+        hour_rows = store.query_one("""
+            SELECT ((created_at + ?) % 86400) / 3600 AS h, SUM(input_tokens+output_tokens+cache_read_tokens+cache_creation_tokens)
+            FROM usage_all WHERE created_at >= ? AND created_at < ? GROUP BY h ORDER BY 2 DESC LIMIT 1""",
+            (int(datetime.now().utcoffset().total_seconds()) if datetime.now().utcoffset() else 28800,
+             store.local_midnight(30), store.local_midnight(-1)))
+        peak_hour_txt = f"{hour_rows[0]:02d}:00 – {(hour_rows[0] + 1) % 24:02d}:00" if hour_rows else "-"
+        cards = [
+            ("🔥 连续使用", f"{streak} 天", ""),
+            ("本周用量", self.fmt_tokens(this_week), delta_txt),
+            ("日均用量（近 30 天）", self.fmt_tokens((self.query_day_stats(30) or {"total": 0})["total"] // 30), ""),
+            ("历史总量", self.fmt_tokens((self.query_total_stats() or {"total": 0})["total"]), ""),
+            ("单日峰值（近 30 天）", peak_v, peak_h),
+            ("最活跃时段（近 30 天）", peak_hour_txt, ""),
+            ("使用量最大的模型（近 30 天）", self.fmt_tokens(top[1]) if top else "-", top[0] if top else ""),
+            ("预计本月消耗", self.fmt_tokens(projected), f"按当前速率 · 本月已用 {self.fmt_tokens(mtd)}"),
+        ]
+        for i, (t, v, sub) in enumerate(cards):
+            self._insight_card(grid, i // 2, i % 2, t, v, sub)
+
+        # ============ 分享 ============
+        f_share = tab()
+        card_lbl = tk.Label(f_share, bg=Design.BACKGROUND)
+        card_lbl.pack(pady=(18, 10))
+        card_img = ImageTk.PhotoImage(self._share_card_png())
+        card_lbl.configure(image=card_img)
+        card_lbl.image = card_img
+
+        def save_card():
+            from tkinter import filedialog, messagebox
+            path = filedialog.asksaveasfilename(
+                defaultextension=".png", initialfile="ccbar-share.png",
+                filetypes=[("PNG", "*.png")])
+            if path:
+                self._share_card_png().save(path)
+                messagebox.showinfo("保存完成", f"已保存到：\n{path}")
+
+        tk.Button(f_share, text="保存为图片", command=save_card, bg=Design.BRAND,
+                  fg=Design.TEXT_PRIMARY, activebackground=Design.CARD_BORDER,
+                  activeforeground=Design.TEXT_PRIMARY, relief="flat", bd=0, padx=22, pady=6,
+                  cursor="hand2", font=("Microsoft YaHei UI", 10, "bold")).pack(pady=6)
+        tk.Label(f_share, text="晒用量就是最好的宣传 ✨", fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
+                 font=Design.FONT_UI_SMALL).pack()
+
+        # ============ 渠道 ============
+        f_ch = tab()
+        tk.Label(f_ch, text="近 30 天渠道用量（堆叠）", fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+                 font=("Microsoft YaHei UI", 10, "bold")).pack(anchor='w', padx=16, pady=(14, 2))
+        src_names = sorted({r[1] for r in channels})
+        src_colors = {"cc-switch": "#4A90E2", "zcode": "#34C759"}
+        palette = {n: src_colors.get(n, f"#{hash(n) % 0xFFFFFF:06X}") for n in src_names}
+        by_date = {}
+        for d, src, tok in channels:
+            by_date.setdefault(d, {}).setdefault(src, 0)
+            by_date[d][src] += tok
+        ch_series = [(d[5:], by_date[d]) for d in sorted(by_date)]
+        png_label(f_ch, self._bar_chart_png(ch_series, palette))
+
+        tk.Label(f_ch, text="今日各渠道", fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+                 font=("Microsoft YaHei UI", 10, "bold")).pack(anchor='w', padx=16, pady=(12, 2))
+        for src, _d, tok in [(r[1], r[0], r[2]) for r in channels if r[0] == datetime.now().strftime("%Y-%m-%d")]:
+            row = tk.Frame(f_ch, bg=Design.BACKGROUND)
+            row.pack(fill=tk.X, padx=20)
+            tk.Label(row, text=f"● {store.source_display_name(src)}", fg=Design.BRAND,
+                     bg=Design.BACKGROUND, font=("Microsoft YaHei UI", 10, "bold")).pack(side=tk.LEFT)
+            tk.Label(row, text=self.fmt_tokens(tok), fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+                     font=Design.FONT_MONO_SMALL).pack(side=tk.RIGHT)
+
+        tk.Label(f_ch, text="近 30 天应用分布（堆叠）", fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+                 font=("Microsoft YaHei UI", 10, "bold")).pack(anchor='w', padx=16, pady=(12, 2))
+        app_names = ["Claude Code", "Codex", "OpenCode", "ZCode"]
+        app_map = {"claude": "Claude Code", "claude-desktop": "Claude Desktop", "codex": "Codex",
+                   "opencode": "OpenCode", "zcode": "ZCode", "unknown": "未知"}
+
+        def app_name(raw):
+            return app_map.get(raw, raw)
+
+        app_palette = {"Claude Code": "#4A90E2", "OpenCode": "#34C759", "ZCode": "#FF9500"}
+        app_by_date = {}
+        for d, raw, tok in apps:
+            name = app_name(raw)
+            app_by_date.setdefault(d, {}).setdefault(name, 0)
+            app_by_date[d][name] += tok
+        used_names = [n for n in app_names if any(n in v for v in app_by_date.values())]
+        app_palette = {n: c for n, c in app_palette.items() if n in used_names}
+        for n in used_names:
+            app_palette.setdefault(n, f"#{(hash(n) * 7919) % 0xFFFFFF:06X}")
+        app_series = [(d[5:], app_by_date[d]) for d in sorted(app_by_date)]
+        png_label(f_ch, self._bar_chart_png(app_series, app_palette))
+
+        tk.Label(f_ch, text="近 30 天 Token 构成", fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+                 font=("Microsoft YaHei UI", 10, "bold")).pack(anchor='w', padx=16, pady=(12, 2))
+        comp_palette = {"输入": "#4A90E2", "输出": "#34C759", "缓存读": "#FF9500", "缓存创建": "#AF52DE"}
+        comp_series = [(d, {"输入": i, "输出": o, "缓存读": cr, "缓存创建": cc})
+                       for d, i, o, cr, cc in comp]
+        png_label(f_ch, self._bar_chart_png(comp_series, comp_palette))
+
+        tk.Label(f_ch, text="缓存命中率（近 30 天）", fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+                 font=("Microsoft YaHei UI", 10, "bold")).pack(anchor='w', padx=16, pady=(12, 2))
+        hit_pts = [(d, cr / max(i + o + cr + cc, 1) * 100) for d, i, o, cr, cc in comp]
+        png_label(f_ch, self._line_chart_png(hit_pts, Design.BRAND, suffix="%"))
+
+        # ============ 流水 ============
+        f_tl = tab()
+        cols = ("时间", "渠道", "模型", "Token", "费用")
+        tree = ttk.Treeview(f_tl, columns=cols, show="headings", height=19, style="Insights.Treeview")
+        widths = (90, 90, 220, 110, 80)
+        for c, w in zip(cols, widths):
+            tree.heading(c, text=c)
+            tree.column(c, width=w, anchor='w' if c in ("渠道", "模型") else 'e')
+        vsb = ttk.Scrollbar(f_tl, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 8), pady=10)
+        tree.pack(fill=tk.BOTH, expand=True, padx=(12, 0), pady=10)
+
+        # 渠道/模型过滤
+        all_sources = sorted({store.source_display_name(r[2]) for r in timeline})
+        all_models = sorted({r[1] for r in timeline})
+        filter_bar = tk.Frame(f_tl, bg=Design.BACKGROUND)
+        filter_bar.pack(fill=tk.X, padx=12, pady=(10, 0))
+        tk.Label(filter_bar, text="筛选", fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
+                 font=Design.FONT_UI_SMALL).pack(side=tk.LEFT)
+        style.configure("Insights.TCombobox", fieldbackground=Design.CARD_FILL,
+                        background=Design.CARD_FILL, foreground=Design.TEXT_PRIMARY)
+        src_box = ttk.Combobox(filter_bar, values=["全部渠道"] + all_sources, state="readonly",
+                               width=14, style="Insights.TCombobox")
+        src_box.set("全部渠道")
+        src_box.pack(side=tk.RIGHT)
+        model_box = ttk.Combobox(filter_bar, values=["全部模型"] + all_models, state="readonly",
+                                 width=22, style="Insights.TCombobox")
+        model_box.set("全部模型")
+        model_box.pack(side=tk.RIGHT, padx=(0, 8))
+
+        def refill(*_):
+            tree.delete(*tree.get_children())
+            src_sel, model_sel = src_box.get(), model_box.get()
+            for ts, model, source, token, cost in timeline[:500]:
+                src_name = store.source_display_name(source)
+                if src_sel != "全部渠道" and src_name != src_sel:
+                    continue
+                if model_sel != "全部模型" and model != model_sel:
+                    continue
+                t = datetime.fromtimestamp(ts)
+                tree.insert("", tk.END, values=(
+                    t.strftime("%H:%M:%S"), src_name, model,
+                    self.fmt_tokens(token), f"${cost:.2f}" if cost > 0 else "-"))
+
+        src_box.bind("<<ComboboxSelected>>", refill)
+        model_box.bind("<<ComboboxSelected>>", refill)
+        refill()
+
+        self._bring_to_front(root)
+
     def show_settings(self, icon=None, item=None):
         """显示设置窗口（统一深色风格）"""
         import tkinter as tk
@@ -2345,6 +2743,22 @@ class CcBarTray:
                        selectcolor=Design.CARD_FILL, bd=0, highlightthickness=0,
                        font=("Microsoft YaHei UI", 10), cursor="hand2").pack(anchor='w', padx=24, pady=3)
 
+        # 数据迁移（明细 CSV，导入幂等：主键去重，重复导零新增）
+        mig = tk.Frame(root, bg=Design.BACKGROUND)
+        mig.pack(fill=tk.X, padx=24, pady=(14, 0))
+        tk.Label(mig, text="数据迁移（明细 CSV）", fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
+                 font=Design.FONT_UI_SMALL).pack(side=tk.LEFT)
+        tk.Button(mig, text="导入 CSV", command=lambda: self.import_data(root),
+                  bg=Design.CARD_FILL, fg=Design.TEXT_PRIMARY,
+                  activebackground=Design.CARD_BORDER, activeforeground=Design.TEXT_PRIMARY,
+                  relief="flat", bd=0, padx=12, cursor="hand2",
+                  font=Design.FONT_UI_SMALL).pack(side=tk.RIGHT)
+        tk.Button(mig, text="导出 CSV", command=self.export_data,
+                  bg=Design.CARD_FILL, fg=Design.TEXT_PRIMARY,
+                  activebackground=Design.CARD_BORDER, activeforeground=Design.TEXT_PRIMARY,
+                  relief="flat", bd=0, padx=12, cursor="hand2",
+                  font=Design.FONT_UI_SMALL).pack(side=tk.RIGHT, padx=(0, 8))
+
         # 按钮栏
         btn_bar = tk.Frame(root, bg=Design.BACKGROUND)
         btn_bar.pack(fill=tk.X, padx=24, pady=(20, 0))
@@ -2450,6 +2864,35 @@ class CcBarTray:
             "检查更新",
             f"已经是最新版本（v{APP_VERSION}）" if latest
             else "检查失败，稍后再试，或直接到 GitHub Releases 页面查看")
+
+    def export_data(self):
+        """导出明细 CSV（换机迁移 / Excel 查看）"""
+        from tkinter import filedialog, messagebox
+        stamp = datetime.now().strftime("%Y%m%d")
+        path = filedialog.asksaveasfilename(
+            title="导出明细", defaultextension=".csv",
+            initialfile=f"ccbar-export-{stamp}.csv", filetypes=[("CSV", "*.csv")])
+        if not path:
+            return
+        n = self.store.export_csv(path)
+        if n >= 0:
+            messagebox.showinfo("导出完成", f"已导出 {n} 行明细到：\n{path}")
+        else:
+            messagebox.showerror("导出失败", "统计库未打开或目标位置不可写")
+
+    def import_data(self, root):
+        """幂等导入明细 CSV：主键去重，同一文件重复导零新增"""
+        from tkinter import filedialog, messagebox
+        path = filedialog.askopenfilename(title="导入明细",
+                                          filetypes=[("CSV", "*.csv"), ("All", "*.*")])
+        if not path:
+            return
+        read, inserted, skipped = self.store.import_csv(path)
+        if skipped == -1:
+            messagebox.showerror("导入失败", "不是 ccBar 导出的明细 CSV（表头不符）")
+            return
+        messagebox.showinfo("导入完成",
+                            f"共读取 {read} 行 · 新增 {inserted} 行 · 跳过 {skipped} 行（重复或非法）")
 
     def quit_app(self, icon, item):
         """退出应用"""
