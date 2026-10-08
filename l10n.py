@@ -383,8 +383,8 @@ L10N_EN = {
 
 # MARK: - Windows 端补充词条（macOS 的 L10n.swift 里没有这些文案）
 #
-# 设置页新项、周报目录、多机合并、主题包管理、托盘菜单等 Windows 独有界面。
-# 同样遵循"缺词条回落中文"，允许后续继续补。
+# 设置页新项、周报目录、多机合并、主题包管理、托盘菜单、详情窗口等 Windows 独有界面，
+# 以及为模板化 f-string 预备的整串词条。同样遵循"缺词条回落中文"，允许后续继续补。
 L10N_EN.update({
     "外观": "Appearance",
     "提醒": "Alerts",
@@ -410,13 +410,13 @@ L10N_EN.update({
     "明细 CSV 迁移（导入幂等：主键去重）": "Detail CSV migration (idempotent by primary key)",
     "主题包读取失败：%s": "Failed to read theme pack: %s",
     "新名称：": "New name:",
-    "主题「%s」已加入可选列表（保存后生效）": "Theme \"%s\" added (takes effect after saving)",
+    "主题「%s」已加入可选列表（保存后生效）": "Theme \\\"%s\\\" added (takes effect after saving)",
     "内置主题不能重命名": "Built-in themes cannot be renamed",
     "内置主题不能删除": "Built-in themes cannot be deleted",
     "当前版本不支持多机合并": "This version cannot merge databases",
     "模型不足两个，无需合并": "Fewer than two models, nothing to merge",
     "设置未保存": "Settings not saved",
-    "请检查：\n· ": "Please check:\n· ",
+    "请检查：\\n· ": "Please check:\\n· ",
     "设置已保存，将在下次刷新时生效": "Settings saved; they take effect on the next refresh",
     "保存失败": "Save failed",
     "保存完成": "Saved",
@@ -424,10 +424,10 @@ L10N_EN.update({
     "选择另一台机器的 ccbar.db": "Choose another machine's ccbar.db",
     "不是有效的 ccBar 统计库（缺 usage_log 表或打不开）": "Not a valid ccBar stats DB (usage_log missing or unreadable)",
     "共读取 %d 行 · 新增 %d 行（主键去重）": "Read %d rows · added %d (deduplicated by primary key)",
-    "统计库已备份到：\n": "Stats DB backed up to:\n",
-    "\n\n恢复方式：退出 ccBar 后用备份文件替换\n~/.ccbar/ccbar.db": "\n\nTo restore: quit ccBar and replace\n~/.ccbar/ccbar.db with the backup",
+    "统计库已备份到：\\n": "Stats DB backed up to:\\n",
+    "\\n\\n恢复方式：退出 ccBar 后用备份文件替换\\n~/.ccbar/ccbar.db": "\\n\\nTo restore: quit ccBar and replace\\n~/.ccbar/ccbar.db with the backup",
     "备份统计库": "Back up stats DB",
-    "已导出 %d 行到：\n%s": "Exported %d rows to:\n%s",
+    "已导出 %d 行到：\\n%s": "Exported %d rows to:\\n%s",
     "导出明细": "Export details",
     "导入明细": "Import details",
     "导出流水": "Export timeline",
@@ -435,8 +435,8 @@ L10N_EN.update({
     "导出主题包": "Export theme pack",
     "导入主题包": "Import theme pack",
     "导出成功": "Exported",
-    "已导出到：\n%s": "Exported to:\n%s",
-    "已保存到：\n%s": "Saved to:\n%s",
+    "已导出到：\\n%s": "Exported to:\\n%s",
+    "已保存到：\\n%s": "Saved to:\\n%s",
     "ccBar 主题包": "ccBar theme pack",
     "选择日期": "Choose date",
     "输入日期（YYYY-MM-DD）：": "Enter date (YYYY-MM-DD):",
@@ -476,7 +476,7 @@ L10N_EN.update({
     "统计数据已复制到剪贴板": "Stats copied to clipboard",
     "已复制": "Copied",
     "复制失败": "Copy failed",
-    "剪贴板不可用，已保存到临时文件：\n%s": "Clipboard unavailable; saved to a temp file:\n%s",
+    "剪贴板不可用，已保存到临时文件：\\n%s": "Clipboard unavailable; saved to a temp file:\\n%s",
     "🫧 里程碑": "🫧 Milestone",
     " tokens！今日已达 ": " tokens! Today reached ",
     "万通知一次）": "0k per notification)",
@@ -485,7 +485,7 @@ L10N_EN.update({
     "发现新版本": "Update available",
     "最新版本 v": "Latest v",
     "，当前 v": ", current v",
-    "\n是否前往下载？": "\nOpen the download page?",
+    "\\n是否前往下载？": "\\nOpen the download page?",
     "已经是最新版本（v": "Already up to date (v",
     "每小时用量详情": "Hourly usage",
     "渠道（近 30 天）": "Channels (30 days)",
@@ -513,9 +513,6 @@ L10N_EN.update({
     "周六": "Sat",
     "周日": "Sun",
     "%d月%d日": "%d/%d",
-})
-
-L10N_EN.update({
     "合并失败": "Merge failed",
     "默认主题": "Default",
     "卡哇伊 01": "Kawaii 01",
@@ -523,13 +520,12 @@ L10N_EN.update({
     "翠绿": "Forest",
     "星空紫": "Purple",
     "CRT 终端": "CRT Terminal",
-    "共读取 %d 行 · 新增 %d 行 · 跳过 %d 行（重复或非法）": "Read %d rows · added %d · skipped %d (duplicate or invalid)",
-    "已导出 %d 行明细到：\n%s": "Exported %d rows to:\n%s",
+    "已导出 %d 行明细到：\\n%s": "Exported %d rows to:\\n%s",
     "%d时": "%02d:00",
     "按当前速率到 24:00 约 %s": "At this rate, ~%s by 24:00",
-    "本月预算 $%.2f": "Monthly budget $%.2f",
     "已超预算 $%s": "Over budget by $%s",
     "剩余 $%s": "Remaining $%s",
     "已用预算 %.0f%%": "%.0f%% of budget used",
     "日均 %.0f 分钟 · 最长 %.0f 分钟": "avg %.0f min · longest %.0f min",
+    "重开窗口后生效": "Applies to newly opened windows",
 })

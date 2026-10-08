@@ -30,7 +30,7 @@ import themes
 import weekly_report
 
 # 当前版本（发布时随 tag 更新）
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.7.0"   # Windows 仓库自己的版本线（功能对齐 macOS v1.8.2）
 
 # 数据库路径（cc-switch 默认值，可在设置中修改）
 DB_PATH = os.path.expanduser("~/.cc-switch/cc-switch.db")
@@ -285,8 +285,12 @@ class ChartCanvas:
 
     @staticmethod
     def draw_bar_chart(canvas, values, width, height, labels=None,
-                       use_gradient=True, hue_offset=0.0, padding=6, label_height=16):
-        """绘制渐变柱状图"""
+                       use_gradient=True, hue_offset=0.0, padding=6, label_height=16,
+                       highlight_index=None):
+        """绘制渐变柱状图
+
+        highlight_index 指定的那根柱子用警示色（峰值高亮，对齐 mac 详情窗口）。
+        """
         canvas.delete("all")
         if not values:
             return
@@ -307,6 +311,8 @@ class ChartCanvas:
 
             color = (gradient_color(Design.GRADIENT, i / max(n - 1, 1), hue_offset)
                      if use_gradient else Design.BRAND)
+            if highlight_index is not None and i == highlight_index:
+                color = Design.WARNING      # 峰值柱高亮
 
             # 圆角矩形（用两个矩形模拟上圆角）
             r = min(3, bar_w / 2, bar_h / 2)
@@ -323,8 +329,11 @@ class ChartCanvas:
 
     @staticmethod
     def draw_sparkline(canvas, values, width, height, use_gradient=True,
-                       hue_offset=0.0, padding=6):
-        """绘制渐变折线图（带渐变填充）"""
+                       hue_offset=0.0, padding=6, highlight_index=None):
+        """绘制渐变折线图（带渐变填充）
+
+        highlight_index 指定的数据点加一圈警示色标记（峰值点，mac LineTrendChart 同款）。
+        """
         canvas.delete("all")
         if len(values) < 2:
             return
@@ -365,6 +374,12 @@ class ChartCanvas:
                                points[i + 1][0], points[i + 1][1],
                                fill=c, width=2, capstyle="round")
 
+        # 峰值点常驻标记（画在终点圆点之前，避免被盖住）
+        if highlight_index is not None and 0 <= highlight_index < n:
+            px, py = points[highlight_index]
+            canvas.create_oval(px - 4, py - 4, px + 4, py + 4,
+                               outline=Design.WARNING, width=2)
+
         # 终点圆点
         end_color = (gradient_color(Design.GRADIENT, 1.0, hue_offset)
                      if use_gradient else Design.BRAND)
@@ -398,6 +413,117 @@ class ChartCanvas:
         center = size / 2
         canvas.create_text(center, center, text=Design.fmt_tokens(total),
                            fill=Design.TEXT_PRIMARY, font=Design.FONT_MONO_SMALL)
+
+
+class ChartReadout:
+    """图表拖选读数（对齐 mac 的 BarReadoutChart / LineTrendChart）
+
+    在图表 Canvas 上按下/拖动时，按 x 取最近的柱子或数据点，画一条竖直参考线
+    并在指针附近显示「标签  数值」；松开即收起。读数会钳制在画布内。
+
+    state 是绘图函数共用的那个 dict（含 labels/values），刷新图表时内容自动跟着变。
+    kind="bars" 按柱槽取整（含间隙），kind="line" 按数据点间距取整。
+    """
+
+    TAG = "readout"
+    PADDING = 6
+
+    def __init__(self, canvas, state, kind="bars", fmt=None):
+        self.canvas = canvas
+        self.state = state
+        self.kind = kind
+        self.fmt = fmt or (lambda v: Design.fmt_tokens(int(v)))
+        canvas.bind("<ButtonPress-1>", self._on_press, add="+")
+        canvas.bind("<B1-Motion>", self._on_motion, add="+")
+        canvas.bind("<ButtonRelease-1>", self._on_release, add="+")
+
+    # ------------------------------------------------ 事件
+
+    def _on_press(self, event):
+        self.show_at(event.x)
+
+    def _on_motion(self, event):
+        self.show_at(event.x)
+
+    def _on_release(self, _event=None):
+        self.clear()
+
+    # ------------------------------------------------ 绘制
+
+    def clear(self):
+        try:
+            self.canvas.delete(self.TAG)
+        except Exception:
+            pass
+
+    def index_at(self, x):
+        """x 像素 → 最近的数据下标；画布还没布局（宽=1）或没数据时返回 None"""
+        labels = self.state.get("labels") or []
+        n = len(labels)
+        if n <= 0:
+            return None
+        try:
+            width = self.canvas.winfo_width()
+        except Exception:
+            return None
+        if width <= 1:
+            return None
+        usable = max(width - self.PADDING * 2, 1)
+        if self.kind == "line":
+            step = usable / max(n - 1, 1)
+            idx = int(round((x - self.PADDING) / step)) if step > 0 else 0
+        else:
+            slot = usable / n
+            idx = int((x - self.PADDING) / slot) if slot > 0 else 0
+        return min(max(idx, 0), n - 1)
+
+    def show_at(self, pointer_x):
+        """在 pointer_x 处显示读数（参考线落在数据点/柱槽中心）"""
+        labels = self.state.get("labels") or []
+        values = self.state.get("values") or []
+        idx = self.index_at(pointer_x)
+        self.clear()
+        if idx is None or idx >= len(values):
+            return
+        try:
+            width = self.canvas.winfo_width()
+            height = self.canvas.winfo_height()
+        except Exception:
+            return
+        if width <= 1:
+            return
+
+        n = len(labels)
+        if self.kind == "line":
+            step = max(width - self.PADDING * 2, 1) / max(n - 1, 1)
+            cx = self.PADDING + idx * step
+        else:
+            slot = max(width - self.PADDING * 2, 1) / n
+            cx = self.PADDING + (idx + 0.5) * slot
+        self.canvas.create_line(cx, 2, cx, max(height - 2, 3),
+                                fill=blend("#FFFFFF", Design.BACKGROUND, 0.25),
+                                tags=self.TAG)
+
+        item = self.canvas.create_text(
+            pointer_x, 2, text="%s  %s" % (labels[idx], self.fmt(values[idx])),
+            anchor="nw", fill=Design.TEXT_PRIMARY, font=Design.FONT_MONO_TINY,
+            tags=self.TAG)
+        x1, _y1, x2, _y2 = self.canvas.bbox(item)
+        dx = 0
+        if x1 < 2:
+            dx = 2 - x1
+        elif x2 > width - 2:
+            dx = width - 2 - x2
+        if dx:
+            self.canvas.move(item, dx, 0)
+
+
+def format_credits(value):
+    """积分显示：整数不带小数点，小数保留两位（与 mac fmtCredits 同口径）"""
+    v = float(value or 0)
+    if v == round(v) and abs(v) < 100_000:
+        return str(int(v))
+    return "%.2f" % v
 
 
 def _on_gui(method):
@@ -459,6 +585,13 @@ class PopoverWindow:
 
         if self.win is not None:
             self.close()
+
+        # 打开面板时拉一次 Trae（交互档 1 分钟节流）：拿不到新数据也不影响建面板，
+        # 同步在线程里跑，下一次刷新会把结果带进来
+        try:
+            self.app.sync_trae(interactive=True)
+        except Exception:
+            pass
 
         win = tk.Toplevel(self.app._ui_root)
         win.overrideredirect(True)
@@ -616,11 +749,33 @@ class PopoverWindow:
         if today:
             self._section_header(parent, "📊 今日用量",
                                  self._open(app.show_hourly_detail_today))
-            tk.Label(parent, text=Design.fmt_tokens(today["total"]),
+            # 大数字 + 今日积分（mac TodayCard：大数字后透出当日积分）
+            big_row = tk.Frame(parent, bg=Design.BACKGROUND)
+            big_row.pack(fill=tk.X, pady=(2, 6))
+            tk.Label(big_row, text=Design.fmt_tokens(today["total"]),
                      fg=today_usage_color(today["total"]), bg=Design.BACKGROUND,
-                     font=Design.FONT_BIG,
-                     anchor='w').pack(fill=tk.X, pady=(2, 6))
+                     font=Design.FONT_BIG, anchor='w').pack(side=tk.LEFT)
+            credits = self._today_credits()
+            if credits > 0:
+                tk.Label(big_row, text="%s 积分" % format_credits(credits),
+                         fg=Design.TEXT_SECONDARY, bg=Design.BACKGROUND,
+                         font=Design.FONT_UI_SMALL, anchor='w').pack(
+                             side=tk.LEFT, padx=(8, 2), pady=(0, 2))
             self._stat_columns(parent, today, work_hours)
+
+            # 今日会话（口径同 mac sessionStats）
+            sessions = self._session_text()
+            if sessions:
+                tk.Label(parent, text=sessions, fg=Design.TEXT_MUTED,
+                         bg=Design.BACKGROUND, font=Design.FONT_UI_TINY,
+                         anchor='w').pack(fill=tk.X, pady=(2, 0))
+
+            # 速率预测（mac predictionText：工时 > 0.2h 才给）
+            prediction = self._prediction_text(today, work_hours)
+            if prediction:
+                tk.Label(parent, text=prediction, fg=Design.TEXT_MUTED,
+                         bg=Design.BACKGROUND, font=Design.FONT_UI_TINY,
+                         anchor='w').pack(fill=tk.X, pady=(2, 0))
         else:
             if app.store.attached:
                 tk.Label(parent, text="📊 今日暂无数据", fg=Design.TEXT_MUTED,
@@ -657,13 +812,16 @@ class PopoverWindow:
                            self._open(app.show_monthly_detail))
         if total:
             self._stat_row(parent, "📈", "历史总量", Design.fmt_tokens(total["total"]),
-                           self._open(app.show_monthly_detail))
+                           self._open(app.show_all_time_detail))
+        # 今日每小时 sparkline（垫在趋势行下面）
+        self._hourly_sparkline(parent)
         self._separator(parent)
 
-        # 按钮栏
+        # 按钮栏（复制 / 刷新 / 洞察 / 设置 / 退出：5 格等宽，300px 面板放得下）
         self._button_bar(parent, [
             ("📋", "复制", self._on_copy),
             ("🔄", "刷新", self._on_refresh),
+            ("📈", "洞察", self._on_insights),
             ("⚙️", "设置", self._on_settings),
             ("❌", "退出", self._on_quit),
         ])
@@ -687,6 +845,82 @@ class PopoverWindow:
         tk.Label(row, text="›", fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
                  font=Design.FONT_CHEVRON).pack(side=tk.RIGHT)
         self._bind_row(row, command)
+
+    # ---------------- 今日卡补充（mac TodayCard / hourPoints / predictionText） ----------------
+
+    def _today_credits(self):
+        """今日积分消耗（Trae 口径；取不到按 0 处理）"""
+        try:
+            return float(self.app.store.query_today_credits() or 0)
+        except Exception:
+            return 0.0
+
+    def _session_text(self):
+        """今日会话汇总文案：N 个 · 平均 N 分钟 · 最长 N 分钟（口径同 mac sessionStats）"""
+        try:
+            rows = self.app.store.query_timeline() or []
+        except Exception:
+            return ""
+        count, avg, longest = CcBarTray._session_stats(rows)
+        if count <= 0:
+            return ""
+        return "今日会话  %d 个 · 平均 %d 分钟 · 最长 %d 分钟" % (count, avg, longest)
+
+    @staticmethod
+    def _prediction_text(today, work_hours):
+        """按当前速率折算到 24:00 的预计用量（工时 ≤ 0.2h 不外推，避免清早爆表）"""
+        if not today or not work_hours:
+            return None
+        try:
+            hours = float(work_hours)
+        except (TypeError, ValueError):
+            return None
+        if hours <= 0.2:
+            return None
+        predicted = today["total"] / hours * 24
+        return "按当前速率到 24:00 约 %s" % Design.fmt_tokens(int(predicted))
+
+    @staticmethod
+    def _hour_values(hourly):
+        """今日逐时 token 序列（mac hourPoints 口径）
+
+        起点 = min(首个有数据的小时, 9)（9 点是稳定的工作日锚点），
+        终点 = 最后一个有数据的小时；展开后不足两个点就不画（1 个点连不成线）。
+        """
+        def token_of(hour):
+            d = (hourly or {}).get(hour) or {}
+            return (d.get("output", 0) + d.get("input", 0)
+                    + d.get("cache_read", 0) + d.get("cache_create", 0))
+
+        hours = sorted(h for h in (hourly or {}) if token_of(h) > 0)
+        if not hours:
+            return []
+        values = [token_of(h) for h in range(min(hours[0], 9), hours[-1] + 1)]
+        return values if len(values) >= 2 else []
+
+    def _hourly_sparkline(self, parent):
+        """今日每小时折线（画不出来时返回 None，绝不抛）"""
+        import tkinter as tk
+
+        try:
+            hourly = self.app.query_hourly_stats(0) or {}
+        except Exception:
+            return None
+
+        values = self._hour_values(hourly)
+        if not values:
+            return None
+
+        canvas = tk.Canvas(parent, height=42, bg=Design.BACKGROUND, highlightthickness=0)
+        canvas.pack(fill=tk.X, pady=(4, 0))
+
+        def draw(_event=None):
+            width = canvas.winfo_width()
+            if width > 1:
+                ChartCanvas.draw_sparkline(canvas, values, width, 42, use_gradient=False)
+
+        canvas.bind("<Configure>", draw)
+        return canvas
 
     def _stat_columns(self, parent, today, work_hours):
         """三列指标：请求数 / 缓存命中 / 时长"""
@@ -763,6 +997,7 @@ class PopoverWindow:
         """四宫格按钮：等宽圆角 + hover 高亮"""
         import tkinter as tk
 
+        self._buttons = list(buttons)
         bar = tk.Canvas(parent, width=1, height=self.BTN_HEIGHT,
                         bg=Design.BACKGROUND, highlightthickness=0)
         bar.pack(fill=tk.X)
@@ -821,14 +1056,17 @@ class PopoverWindow:
     # ---------------- 行交互 ----------------
 
     def _open(self, command):
-        """点开别的窗口前先收起面板"""
+        """点开别的窗口前先收起面板（目标命令挂在闭包上，便于自测断言用对了窗口）"""
         def run():
             self.close()
             command()
+        run._target = command
         return run
 
     def _bind_row(self, row, command):
-        """整行可点：绑到行和它所有子控件，带 hover 高亮"""
+        """整行可点：绑到行和它所有子控件，带 hover 高亮（命令留在行上便于自测）"""
+        row._row_command = command
+
         def enter(_event):
             self._set_bg(row, Design.ROW_HOVER)
 
@@ -880,6 +1118,10 @@ class PopoverWindow:
     def _on_refresh(self):
         self.app.refresh_data(self.app.icon, None)
         self.show()          # 重建内容，刷新数据
+
+    def _on_insights(self):
+        """从面板打开洞察中心：刻意不收面板（mac v1.8.2 起就是侧对照看的用法）"""
+        self.app.show_insights()
 
     def _on_settings(self):
         self.close()
@@ -1048,8 +1290,49 @@ class CcBarTray:
             if adapter is None:
                 continue
             configs.append((adapter, enabled, path or adapter.default_path))
-        self.store.rebuild(configs)
+        # Trae 走 HTTP 同步，单独把开关与登录态交给统计库
+        self.store.rebuild(configs,
+                           trae_enabled=bool(self.settings.get("trae_enabled")),
+                           trae_sessionid=self.settings.get("trae_sessionid") or "")
         self.store.sync_if_needed()
+
+    def maybe_generate_weekly_report(self):
+        """周一自动生成上周用量周报；错过周一自动补生成（幂等：文件存在即跳过）"""
+        generate = getattr(weekly_report, "generate_if_needed", None)
+        if generate is None:
+            return None
+        try:
+            return generate(
+                self.store,
+                self._weekly_card_png_bytes,
+                output_dir=weekly_report.directory(),
+                notify=self._notify_weekly_report,
+                auto=bool(self.settings.get("auto_weekly_report", True)),
+                english=l10n.is_english())
+        except Exception as e:
+            print("周报生成失败:", e)
+            return None
+
+    def _weekly_card_png_bytes(self, date_text, total, reqs, peak, trend):
+        """周报渲染回调：与分享页预览用同一套卡片渲染"""
+        return share_card.weekly_card_png(date_text, total, reqs, peak, trend,
+                                         theme=self.theme)
+
+    def _notify_weekly_report(self, title, body):
+        """周报落盘后的系统通知"""
+        self._toast(title, body)
+
+    def _toast(self, title, body, duration=5):
+        """Windows 原生 Toast。
+
+        通知失败（没装通知组件 / 被组策略禁用 / win10toast 在部分系统上抛异常）
+        绝不能让统计主流程挂掉，所以统一在这里兜住；threaded 避免阻塞托盘菜单刷新。
+        """
+        try:
+            win10toast.ToastNotifier().show_toast(
+                title, body, duration=duration, threaded=True)
+        except Exception as e:
+            print("通知发送失败:", e)
 
     def create_icon(self, color=None):
         """生成闪电图标
@@ -1073,12 +1356,25 @@ class CcBarTray:
         return img.resize((size, size), Image.LANCZOS)
 
     def update_icon_color(self):
-        """根据今日用量更新托盘图标颜色"""
+        """根据今日用量更新托盘图标颜色
+
+        默认按绝对用量走色阶（绿 → 黄 → 橙，超 8000 万才红）；「红色门槛」
+        （万 tokens，0=关闭）另有增量语义（mac ledRedThreshold）：本次刷新的
+        今日增量 ≥ 门槛时当次强制标红。首次没有基准不触发，跨天回退也不触发。
+        """
         today = self.query_day_stats(0)
         if not today:
             return
 
-        color = today_usage_color(today["total"])
+        total = today["total"]
+        color = today_usage_color(total)
+
+        threshold = int(self.settings.get("led_red_threshold") or 0) * 10_000
+        last = getattr(self, "_led_last_total", None)
+        if threshold > 0 and last is not None and total >= last and total - last >= threshold:
+            color = usage_color(1.0)        # 强制红
+        self._led_last_total = total
+
         if color == getattr(self, "_last_icon_color", None):
             return  # 颜色没变就不重绘
 
@@ -1111,16 +1407,9 @@ class CcBarTray:
         delta = total - (tier - 1) * interval if total % interval else interval
 
         # Toast 通知（Windows 原生）
-        try:
-            toaster = win10toast.ToastNotifier()
-            toaster.show_toast(
-                "🫧 里程碑",
-                f"+{self.fmt_tokens(delta)} tokens！今日已达 {self.fmt_tokens(total)}（每{interval_wan}万通知一次）",
-                duration=5,
-                threaded=True
-            )
-        except Exception:
-            pass
+        self._toast(
+            "🫧 里程碑",
+            f"+{self.fmt_tokens(delta)} tokens！今日已达 {self.fmt_tokens(total)}（每{interval_wan}万通知一次）")
 
         # 托盘标题闪烁（加 ✨ 前缀，0.6秒后恢复）
         if self.icon:
@@ -1245,14 +1534,18 @@ class CcBarTray:
         }
 
     def query_hourly_stats(self, days_ago=0):
-        """查询每小时统计（epoch 区间条件，走索引）"""
+        """查询每小时统计（epoch 区间条件，走索引）
+
+        与 mac 每小时详情同口径：token 总量含缓存创建，别漏了它。
+        """
         rows = self.store.query_all("""
             SELECT
                 strftime('%H', created_at, 'unixepoch', 'localtime') as hour,
                 COALESCE(SUM(request_count), 0) as reqs,
                 COALESCE(SUM(output_tokens), 0) as output,
                 COALESCE(SUM(input_tokens), 0) as input,
-                COALESCE(SUM(cache_read_tokens), 0) as cache_read
+                COALESCE(SUM(cache_read_tokens), 0) as cache_read,
+                COALESCE(SUM(cache_creation_tokens), 0) as cache_create
             FROM usage_all
             WHERE created_at >= ? AND created_at < ?
             GROUP BY hour
@@ -1268,7 +1561,8 @@ class CcBarTray:
                 "reqs": row[1],
                 "output": row[2],
                 "input": row[3],
-                "cache_read": row[4]
+                "cache_read": row[4],
+                "cache_create": row[5],
             }
         return hourly_data
 
@@ -1429,15 +1723,11 @@ class CcBarTray:
 
         threshold_tokens = self.settings["warning_threshold"] * 10000
         if stats["total"] >= threshold_tokens:
-            try:
-                toaster = win10toast.ToastNotifier()
-                toaster.show_toast(
-                    "用量预警",
-                    f"今日 Token 用量已达 {self.fmt_tokens(stats['total'])}，超过预警阈值 {self.settings['warning_threshold']}万",
-                    duration=10
-                )
-            except:
-                pass
+            self._toast(
+                "用量预警",
+                f"今日 Token 用量已达 {self.fmt_tokens(stats['total'])}，"
+                f"超过预警阈值 {self.settings['warning_threshold']}万",
+                duration=10)
 
             with open(notified_file, "a") as f:
                 f.write(f"{today_key}\n")
@@ -1466,6 +1756,7 @@ class CcBarTray:
         yesterday = self.query_day_stats(1)
         week = self.query_day_stats(7)
         month = self.query_day_stats(30)
+        total = self.query_total_stats()
         models = self.query_model_breakdown()
         work_hours = self.query_work_hours()
 
@@ -1522,6 +1813,11 @@ class CcBarTray:
         if month:
             menu_items.append(pystray.MenuItem(f"📆 近30天: {self.fmt_tokens(month['total'])}", self.show_monthly_detail))
 
+        # 历史总量（按月汇总窗口，不是近30天）
+        if total:
+            menu_items.append(pystray.MenuItem(f"📈 历史总量: {self.fmt_tokens(total['total'])}",
+                                               self.show_all_time_detail))
+
         menu_items.append(pystray.Menu.SEPARATOR)
 
         # 刷新
@@ -1544,6 +1840,254 @@ class CcBarTray:
 
         return menu_items
 
+    # ------------------------------------------------------------ 详情窗口公共件
+    # 五个详情窗口（每小时/模型/近7天/近30天/历史总量）共用：统计卡行、
+    # 导航件、表头/数据行、CSV 导出与窗口位置记忆，口径对齐 mac DetailWindows.swift。
+
+    @staticmethod
+    def _detail_nav_button(parent, text, command):
+        """详情窗口导航按钮（‹ / ›）"""
+        import tkinter as tk
+        return tk.Button(parent, text=text, command=command,
+                         bg=Design.CARD_FILL, fg=Design.TEXT_PRIMARY,
+                         activebackground=Design.CARD_BORDER,
+                         activeforeground=Design.TEXT_PRIMARY,
+                         disabledforeground=Design.TEXT_MUTED,
+                         relief="flat", bd=0, width=3,
+                         font=Design.FONT_UI_SMALL, cursor="hand2")
+
+    @staticmethod
+    def _detail_today_chip(parent, command):
+        """「回到今天」胶囊（只在非当前周期显示，对齐 mac DetailRootView.onToday）"""
+        import tkinter as tk
+        return tk.Button(parent, text="回到今天", command=command,
+                         bg=Design.CARD_FILL, fg=Design.BRAND,
+                         activebackground=Design.CARD_BORDER,
+                         activeforeground=Design.BRAND,
+                         relief="flat", bd=0, padx=8, pady=1,
+                         font=Design.FONT_UI_SMALL, cursor="hand2")
+
+    @staticmethod
+    def _detail_export_button(parent, command):
+        """详情窗口的 CSV 导出按钮（mac 导航栏上的导出图标）"""
+        import tkinter as tk
+        return tk.Button(parent, text="导出 CSV", command=command,
+                         bg=Design.CARD_FILL, fg=Design.TEXT_PRIMARY,
+                         activebackground=Design.BTN_BG_HOVER,
+                         activeforeground=Design.TEXT_PRIMARY,
+                         relief="flat", bd=0, padx=10, pady=1,
+                         font=Design.FONT_UI_SMALL, cursor="hand2")
+
+    def _detail_stats_holder(self, root):
+        """统计卡容器 → (holder, set_stats)；换页时 set_stats 重建卡片"""
+        import tkinter as tk
+
+        holder = tk.Frame(root, bg=Design.BACKGROUND)
+        holder.pack(fill=tk.X, padx=12, pady=(6, 2))
+
+        def set_stats(stats):
+            for w in holder.winfo_children():
+                w.destroy()
+            if stats:
+                self._detail_stat_cards(holder, stats)
+
+        return holder, set_stats
+
+    @staticmethod
+    def _detail_stat_cards(parent, stats):
+        """详情窗口统计卡行（mac DetailStat：小标签 + 大数字，可指定强调色）
+
+        stats: [(标签, 值, 强调色或 None), ...]
+        """
+        import tkinter as tk
+
+        row = tk.Frame(parent, bg=Design.BACKGROUND)
+        row.pack(fill=tk.X)
+        for i, (label, value, accent) in enumerate(stats):
+            row.grid_columnconfigure(i, weight=1, uniform="detailstat")
+            card = tk.Frame(row, bg=Design.CARD_FILL,
+                            highlightbackground=Design.CARD_BORDER,
+                            highlightthickness=1, padx=10, pady=8)
+            card.grid(row=0, column=i, sticky="nsew", padx=4, pady=2)
+            tk.Label(card, text=label, fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                     font=Design.FONT_UI_SMALL, anchor='w').pack(fill=tk.X)
+            tk.Label(card, text=value, fg=accent or Design.DATA, bg=Design.CARD_FILL,
+                     font=("Microsoft YaHei UI", 13, "bold"), anchor='w').pack(fill=tk.X)
+        return row
+
+    @staticmethod
+    def _detail_table_header(root, cols, padx=16):
+        """详情窗口表头 + 分隔线；cols: [(文案, 宽度, 对齐), ...]"""
+        import tkinter as tk
+
+        header = tk.Frame(root, bg=Design.BACKGROUND)
+        header.pack(fill=tk.X, padx=padx)
+        for text, width, anchor in cols:
+            tk.Label(header, text=text, width=width, anchor=anchor,
+                     fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
+                     font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT)
+        tk.Frame(root, bg=Design.CARD_BORDER, height=1).pack(fill=tk.X, padx=padx, pady=4)
+
+    @staticmethod
+    def _detail_total_row(parent, cells):
+        """详情窗口合计行（加粗整行）"""
+        import tkinter as tk
+
+        row = tk.Frame(parent, bg=Design.BACKGROUND)
+        row.pack(fill=tk.X)
+        for text, width, anchor in cells:
+            tk.Label(row, text=text, width=width, anchor=anchor,
+                     fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+                     font=("Consolas", 10, "bold")).pack(side=tk.LEFT)
+        return row
+
+    @staticmethod
+    def _detail_data_row(parent, vals, highlight=False):
+        """详情窗口数据行；highlight=峰值行（主题色淡底，mac dataRow.highlight）"""
+        import tkinter as tk
+
+        bg = blend(Design.BRAND, Design.BACKGROUND, 0.10) if highlight else Design.BACKGROUND
+        row = tk.Frame(parent, bg=bg)
+        row.pack(fill=tk.X, pady=1)
+        for text, width, anchor, fg in vals:
+            tk.Label(row, text=text, width=width, anchor=anchor, fg=fg, bg=bg,
+                     font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT)
+        return row
+
+    @staticmethod
+    def _detail_scroll_area(root, padx=16):
+        """详情窗口可滚动数据区 → (inner, bind_wheel)"""
+        import tkinter as tk
+
+        container = tk.Frame(root, bg=Design.BACKGROUND)
+        container.pack(fill=tk.BOTH, expand=True, padx=padx, pady=(0, 12))
+        scrollbar = tk.Scrollbar(container, orient="vertical")
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        data_frame = tk.Frame(container, bg=Design.BACKGROUND)
+        data_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        canvas_scroll = tk.Canvas(data_frame, bg=Design.BACKGROUND, highlightthickness=0,
+                                  yscrollcommand=scrollbar.set)
+        canvas_scroll.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=canvas_scroll.yview)
+        inner = tk.Frame(canvas_scroll, bg=Design.BACKGROUND)
+        canvas_scroll.create_window((0, 0), window=inner, anchor="nw", tags="inner")
+
+        def on_configure(_event=None):
+            canvas_scroll.configure(scrollregion=canvas_scroll.bbox("all"))
+            canvas_scroll.itemconfigure("inner", width=canvas_scroll.winfo_width())
+
+        inner.bind("<Configure>", on_configure)
+        canvas_scroll.bind("<Configure>", on_configure)
+
+        def bind_wheel():
+            def on_mousewheel(event):
+                canvas_scroll.yview_scroll(int(-event.delta / 120), "units")
+            canvas_scroll.bind("<MouseWheel>", on_mousewheel)
+            inner.bind("<MouseWheel>", on_mousewheel)
+
+        return inner, bind_wheel
+
+    @staticmethod
+    def _export_detail_csv(title, default_name, header, rows):
+        """详情窗口导出 CSV（UTF-8 BOM + 表头，Excel 直开；返回落盘路径或 None）"""
+        from tkinter import filedialog, messagebox
+        import csv
+
+        path = filedialog.asksaveasfilename(
+            title=title, defaultextension=".csv", initialfile=default_name,
+            filetypes=[("CSV", "*.csv")])
+        if not path:
+            return None
+        try:
+            with open(path, "w", encoding="utf-8-sig", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(header)
+                writer.writerows(rows)
+        except OSError as e:
+            messagebox.showerror("导出失败", str(e))
+            return None
+        messagebox.showinfo("导出完成", "已导出 %d 行到：\n%s" % (len(rows), path))
+        return path
+
+    # ------------------------------------------------------------ 窗口位置记忆
+    # mac 用 setFrameAutosaveName；这里把 winfo_geometry() 存进设置，打开时还原。
+
+    @staticmethod
+    def _parse_geometry(text):
+        """解析 Tk 几何串 'WxH+X+Y' / 'WxH-X-Y' → (w, h, x, y)；非法/缺位置返回 None"""
+        import re
+        if not isinstance(text, str):
+            return None
+        m = re.match(r"^\s*(\d+)x(\d+)([+-]\d+)?([+-]\d+)?\s*$", text)
+        if not m:
+            return None
+        w, h = int(m.group(1)), int(m.group(2))
+        if w <= 0 or h <= 0:
+            return None
+        x = int(m.group(3)) if m.group(3) else 0
+        y = int(m.group(4)) if m.group(4) else 0
+        return (w, h, x, y)
+
+    @staticmethod
+    def _geometry_on_screen(root, x, y, w, h):
+        """保存的位置是否还落在屏幕里（拔掉外接显示器后要回落默认位置）
+
+        尺寸小于 200x150 的几何串一律判废：Tk 在窗口还没映射时会把尺寸报成 1x1，
+        这种值存下来下次打开会得到一个小得看不见的窗口。
+        """
+        if w < 200 or h < 150:
+            return False
+        try:
+            sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+        except Exception:
+            return False
+        # 至少露出一角，否则用户再也拖不回来
+        return (x + w > 40 and y + h > 40 and x < sw - 40 and y < sh - 40)
+
+    def _apply_window_geometry(self, root, name, default):
+        """还原窗口几何：缺省/非法/已移出屏幕都回落默认值"""
+        parsed = self._parse_geometry(self.settings.get("window_geometry_%s" % name))
+        if parsed and self._geometry_on_screen(root, parsed[2], parsed[3],
+                                               parsed[0], parsed[1]):
+            root.geometry("%dx%d+%d+%d" % parsed)
+            return True
+        root.geometry(default)
+        return False
+
+    def _remember_window_geometry(self, root, name):
+        """窗口关闭时把几何信息写进设置；返回可直接调用的保存函数（便于测试）"""
+        key = "window_geometry_%s" % name
+        state = {"geom": ""}
+        try:
+            state["geom"] = root.geometry()
+        except Exception:
+            pass
+
+        def remember(_event=None):
+            try:
+                state["geom"] = root.geometry()
+            except Exception:
+                pass
+
+        def save(event=None):
+            if event is not None and getattr(event, "widget", None) is not root:
+                return
+            parsed = self._parse_geometry(state["geom"])
+            if not parsed or parsed[0] < 200 or parsed[1] < 150:
+                return      # 非法或还没映射（1x1）的几何串不存
+            self.settings.set(key, "%dx%d+%d+%d" % parsed)
+            self.settings.save()
+
+        root.bind("<Configure>", remember, add="+")
+        root.bind("<Destroy>", save, add="+")
+        return save
+
+    @staticmethod
+    def _add_months(day, delta):
+        """按月加减（先归到 1 号，避免 3/31 减一个月撞上不存在的 2/31）"""
+        total = day.year * 12 + (day.month - 1) + delta
+        return day.replace(year=total // 12, month=total % 12 + 1, day=1)
+
     def show_hourly_detail_today(self, icon=None, item=None):
         """显示今日每小时详情"""
         self.show_hourly_detail(days_ago=0)
@@ -1554,67 +2098,77 @@ class CcBarTray:
 
     @_on_gui
     def show_hourly_detail(self, days_ago=0, date_str=None):
-        """显示每小时详情窗口"""
+        """显示每小时详情窗口
+
+        对齐 mac HourlyDetailWindowController：统计卡（总 Token / 请求数 / 峰值时段）、
+        峰值高亮柱状图（带拖选读数）、‹ / 日期 / › / 回到今天 导航、CSV 导出与位置记忆。
+        """
         import tkinter as tk
 
         root = tk.Toplevel(self._ui_root)
         root.title("每小时用量详情")
-        root.geometry("520x620")
+        self._apply_window_geometry(root, "hourly", "520x620")
         root.configure(bg=Design.BACKGROUND)
         root.minsize(460, 400)
+        self._remember_window_geometry(root, "hourly")
 
-        # 计算日期
         if date_str:
-            target_date = datetime.strptime(date_str, "%Y-%m-%d")
+            try:
+                target_date = datetime.strptime(date_str, "%Y-%m-%d")
+            except ValueError:
+                target_date = datetime.now()
         else:
             target_date = datetime.now() - timedelta(days=days_ago)
+        state = {"date": target_date.replace(hour=0, minute=0, second=0, microsecond=0),
+                 "days_ago": days_ago, "export_rows": []}
 
-        # 顶部导航栏
+        # 顶部导航：‹ / 日期文本 / › / 回到今天（仅在非今天显示，› 在今天禁用）
         nav = tk.Frame(root, bg=Design.BACKGROUND)
         nav.pack(fill=tk.X, padx=16, pady=(12, 4))
 
-        def nav_btn(parent, text, cmd):
-            return tk.Button(parent, text=text, command=cmd,
-                             bg=Design.CARD_FILL, fg=Design.TEXT_PRIMARY,
-                             activebackground=Design.CARD_BORDER,
-                             activeforeground=Design.TEXT_PRIMARY,
-                             relief="flat", bd=0, width=3,
-                             font=Design.FONT_UI_SMALL, cursor="hand2")
-
-        def prev_day():
-            nonlocal target_date, days_ago
-            target_date -= timedelta(days=1)
-            days_ago = (datetime.now() - target_date).days
+        def shift(delta):
+            state["date"] += timedelta(days=delta)
+            state["days_ago"] = (datetime.now().date() - state["date"].date()).days
             refresh()
 
+        def prev_day():
+            shift(-1)
+
         def next_day():
-            nonlocal target_date, days_ago
-            next_date = target_date + timedelta(days=1)
-            if next_date <= datetime.now():
-                target_date = next_date
-                days_ago = (datetime.now() - target_date).days
-                refresh()
+            if state["days_ago"] > 0:
+                shift(1)
 
-        nav_btn(nav, "◀", prev_day).pack(side=tk.LEFT)
+        def go_today():
+            state["date"] = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            state["days_ago"] = 0
+            refresh()
 
-        date_label = tk.Label(nav, text=target_date.strftime("%y-%m-%d"),
-                              font=Design.FONT_MONO, fg=Design.TEXT_PRIMARY,
+        def export_csv():
+            self._export_detail_csv("导出每小时用量", "ccbar-每小时.csv",
+                                    ["时间", "请求数", "总Token", "缓存读"],
+                                    state["export_rows"])
+
+        self._detail_nav_button(nav, "‹", prev_day).pack(side=tk.LEFT)
+        date_label = tk.Label(nav, text="", font=Design.FONT_MONO, fg=Design.TEXT_PRIMARY,
                               bg=Design.BACKGROUND)
         date_label.pack(side=tk.LEFT, expand=True)
+        self._detail_export_button(nav, export_csv).pack(side=tk.RIGHT)
+        today_chip = self._detail_today_chip(nav, go_today)
+        today_chip.pack(side=tk.RIGHT, padx=(0, 6))
+        next_btn = self._detail_nav_button(nav, "›", next_day)
+        next_btn.pack(side=tk.RIGHT)
 
-        nav_btn(nav, "▶", next_day).pack(side=tk.RIGHT)
+        # 统计卡行
+        _holder, set_stats = self._detail_stats_holder(root)
 
-        # 图表区域（柱状图）
+        # 柱状图（canvas 要等布局完成才有真实宽度，一建好就画会全挤在左边）
         chart_frame = tk.Frame(root, bg=Design.BACKGROUND)
         chart_frame.pack(fill=tk.X, padx=16, pady=(8, 4))
-
         chart_canvas = tk.Canvas(chart_frame, height=110, bg=Design.BACKGROUND,
                                  highlightthickness=0)
         chart_canvas.pack(fill=tk.X)
-
-        # 柱状图状态：canvas 要等窗口布局完成才有真实宽度，
-        # 一建好就画的话 winfo_width() 只有 1，柱子会全挤在左边
         chart_state = {}
+        ChartReadout(chart_canvas, chart_state, kind="bars")
 
         def draw_chart(_event=None):
             if not chart_state:
@@ -1624,126 +2178,93 @@ class CcBarTray:
             if width <= 1:
                 return
             ChartCanvas.draw_bar_chart(chart_canvas, chart_state["values"], width, 110,
-                                       labels=chart_state["labels"],
-                                       use_gradient=True,
-                                       hue_offset=chart_state["hue_offset"])
+                                       labels=chart_state["labels"], use_gradient=True,
+                                       hue_offset=chart_state["hue_offset"],
+                                       highlight_index=chart_state.get("peak"))
 
         chart_canvas.bind("<Configure>", draw_chart)
 
-        # 表头
-        header = tk.Frame(root, bg=Design.BACKGROUND)
-        header.pack(fill=tk.X, padx=16)
-
-        cols = [("时间", 7, 'w'), ("请求数", 9, 'e'), ("总token", 11, 'e'), ("缓存读", 11, 'e')]
-        for text, width, anchor in cols:
-            tk.Label(header, text=text, width=width, anchor=anchor,
-                     fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
-                     font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT)
-
-        tk.Frame(root, bg=Design.CARD_BORDER, height=1).pack(fill=tk.X, padx=16, pady=4)
-
-        # 可滚动的数据区
-        list_container = tk.Frame(root, bg=Design.BACKGROUND)
-        list_container.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 12))
-
-        scrollbar = tk.Scrollbar(list_container, orient="vertical")
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-        data_frame = tk.Frame(list_container, bg=Design.BACKGROUND)
-        data_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        canvas_scroll = tk.Canvas(data_frame, bg=Design.BACKGROUND, highlightthickness=0)
-        canvas_scroll.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        inner = tk.Frame(canvas_scroll, bg=Design.BACKGROUND)
-        canvas_scroll.create_window((0, 0), window=inner, anchor="nw", tags="inner")
-
-        def on_configure(event):
-            canvas_scroll.configure(scrollregion=canvas_scroll.bbox("all"))
-            canvas_scroll.itemconfigure("inner", width=canvas_scroll.winfo_width())
-
-        inner.bind("<Configure>", on_configure)
-        canvas_scroll.bind("<Configure>", on_configure)
-
-        def on_mousewheel(event):
-            canvas_scroll.yview_scroll(int(-event.delta / 120), "units")
-
-        canvas_scroll.bind("<MouseWheel>", on_mousewheel)
-        inner.bind("<MouseWheel>", on_mousewheel)
+        # 表头 + 可滚动数据区
+        self._detail_table_header(root, [("时间", 7, 'w'), ("请求数", 9, 'e'),
+                                         ("总token", 11, 'e'), ("缓存读", 11, 'e')])
+        inner, bind_wheel = self._detail_scroll_area(root)
 
         def refresh():
-            date_label.config(text=target_date.strftime("%y-%m-%d"))
-            for w in inner.winfo_children():
-                w.destroy()
+            date_label.config(text=state["date"].strftime("%y-%m-%d"))
+            if state["days_ago"] == 0:
+                today_chip.pack_forget()
+                next_btn.configure(state=tk.DISABLED)
+            else:
+                today_chip.pack(side=tk.RIGHT, before=next_btn, padx=(0, 6))
+                next_btn.configure(state=tk.NORMAL)
 
-            hourly_data = self.query_hourly_stats(days_ago)
-            if not hourly_data:
-                tk.Label(inner, text="暂无数据", fg=Design.TEXT_MUTED,
-                         bg=Design.BACKGROUND, font=Design.FONT_UI).pack(pady=20)
+            for widget in inner.winfo_children():
+                widget.destroy()
+            state["export_rows"] = []
+
+            hourly_data = self.query_hourly_stats(state["days_ago"])
+            hours_with_data = [h for h, d in (hourly_data or {}).items() if d["reqs"] > 0]
+            if not hourly_data or not hours_with_data:
+                set_stats([])
                 chart_state.clear()
                 chart_canvas.delete("all")
-                return
-
-            hours_with_data = [h for h, d in hourly_data.items() if d["reqs"] > 0]
-            if not hours_with_data:
                 tk.Label(inner, text="暂无数据", fg=Design.TEXT_MUTED,
                          bg=Design.BACKGROUND, font=Design.FONT_UI).pack(pady=20)
-                chart_state.clear()
-                chart_canvas.delete("all")
                 return
 
-            start_hour = min(hours_with_data)
-            end_hour = max(hours_with_data)
+            hours = list(range(min(hours_with_data), max(hours_with_data) + 1))
 
-            # 合计
+            def hour_token(hour):
+                d = hourly_data.get(hour) or {}
+                return (d.get("output", 0) + d.get("input", 0)
+                        + d.get("cache_read", 0) + d.get("cache_create", 0))
+
             total_reqs = sum(d["reqs"] for d in hourly_data.values())
-            total_token = sum(d["output"] + d["input"] + d["cache_read"] for d in hourly_data.values())
-            total_cache = sum(d["cache_read"] for d in hourly_data.values())
+            total_token = sum(hour_token(h) for h in hours)
+            total_cache = sum((hourly_data.get(h) or {}).get("cache_read", 0) for h in hours)
 
-            # 绘制柱状图（按日期偏移色相）
-            day_of_year = target_date.timetuple().tm_yday
-            hue_offset = (day_of_year % 6) / 6.0
-            values = [hourly_data.get(h, {}).get("reqs", 0) for h in range(start_hour, end_hour + 1)]
-            labels = list(range(start_hour, end_hour + 1))
+            # 峰值时段按 token 取（mac 同口径），图表也按 token 画
+            values = [hour_token(h) for h in hours]
+            peak_index = values.index(max(values)) if max(values) > 0 else None
+            peak_hour = hours[peak_index] if peak_index is not None else None
+
+            day_of_year = state["date"].timetuple().tm_yday
             chart_state.clear()
-            chart_state.update(values=values, labels=labels, hue_offset=hue_offset)
+            chart_state.update(values=values, labels=hours,
+                               hue_offset=(day_of_year % 6) / 6.0, peak=peak_index)
             draw_chart()
 
-            # 合计行
-            total_row = tk.Frame(inner, bg=Design.BACKGROUND)
-            total_row.pack(fill=tk.X)
-            cells = [("合计", 7, 'w'), (f"{total_reqs}次", 9, 'e'),
-                     (Design.fmt_tokens(total_token), 11, 'e'),
-                     (Design.fmt_tokens(total_cache), 11, 'e')]
-            for text, width, anchor in cells:
-                tk.Label(total_row, text=text, width=width, anchor=anchor,
-                         fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
-                         font=("Consolas", 10, "bold")).pack(side=tk.LEFT)
+            set_stats([
+                ("总 Token", Design.fmt_tokens(total_token), None),
+                ("请求数", "%d" % total_reqs, None),
+                ("峰值时段", ("%d时" % peak_hour) if peak_hour is not None else "-",
+                 Design.WARNING),
+            ])
 
+            # 合计行
+            self._detail_total_row(inner, [("合计", 7, 'w'), ("%d次" % total_reqs, 9, 'e'),
+                                           (Design.fmt_tokens(total_token), 11, 'e'),
+                                           (Design.fmt_tokens(total_cache), 11, 'e')])
             tk.Frame(inner, bg=Design.CARD_BORDER, height=1).pack(fill=tk.X, pady=3)
 
-            # 每小时数据
-            for hour in range(start_hour, end_hour + 1):
-                d = hourly_data.get(hour, {"reqs": 0, "output": 0, "input": 0, "cache_read": 0})
-                hour_token = d["output"] + d["input"] + d["cache_read"]
-
-                row = tk.Frame(inner, bg=Design.BACKGROUND)
-                row.pack(fill=tk.X, pady=1)
-
-                vals = [
-                    (f"{hour}时", 7, 'w', Design.GRADIENT[0]),
-                    (f"{d['reqs']}次" if d['reqs'] > 0 else "-", 9, 'e',
-                     Design.TEXT_PRIMARY if d['reqs'] > 0 else Design.TEXT_MUTED),
-                    (Design.fmt_tokens(hour_token), 11, 'e',
-                     Design.TEXT_PRIMARY if hour_token > 0 else Design.TEXT_MUTED),
-                    (Design.fmt_tokens(d['cache_read']), 11, 'e',
-                     Design.TEXT_SECONDARY if d['cache_read'] > 0 else Design.TEXT_MUTED),
-                ]
-                for text, width, anchor, fg in vals:
-                    tk.Label(row, text=text, width=width, anchor=anchor, fg=fg,
-                             bg=Design.BACKGROUND, font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT)
+            for hour in hours:
+                d = hourly_data.get(hour) or {"reqs": 0, "output": 0, "input": 0,
+                                              "cache_read": 0, "cache_create": 0}
+                token = hour_token(hour)
+                cache_read = d.get("cache_read", 0)
+                state["export_rows"].append(["%d时" % hour, d["reqs"], token, cache_read])
+                self._detail_data_row(inner, [
+                    ("%d时" % hour, 7, 'w', Design.GRADIENT[0]),
+                    ("%d次" % d["reqs"] if d["reqs"] > 0 else "-", 9, 'e',
+                     Design.TEXT_PRIMARY if d["reqs"] > 0 else Design.TEXT_MUTED),
+                    (Design.fmt_tokens(token), 11, 'e',
+                     Design.TEXT_PRIMARY if token > 0 else Design.TEXT_MUTED),
+                    (Design.fmt_tokens(cache_read), 11, 'e',
+                     Design.TEXT_SECONDARY if cache_read > 0 else Design.TEXT_MUTED),
+                ], highlight=(peak_hour is not None and hour == peak_hour))
 
         refresh()
+        bind_wheel()
         self._bring_to_front(root)
 
     def show_weekly_detail(self, icon=None, item=None):
@@ -1756,51 +2277,60 @@ class CcBarTray:
 
     @_on_gui
     def show_model_detail(self, icon=None, item=None):
-        """显示模型分布详情（带环形图）"""
+        """显示模型分布详情（环形图 + 分渠道表格）
+
+        对齐 mac ModelDetailWindowController：统计卡（总 Token / 模型数 / Top1 占比）、
+        环形图与图例、‹ / 日期 / › / 回到今天 导航、CSV 导出与位置记忆。
+        """
         import tkinter as tk
 
         root = tk.Toplevel(self._ui_root)
         root.title("模型分布详情")
-        root.geometry("620x620")
+        self._apply_window_geometry(root, "model", "620x620")
         root.configure(bg=Design.BACKGROUND)
         root.minsize(520, 420)
+        self._remember_window_geometry(root, "model")
 
-        current_days_ago = 0
-        current_date = datetime.now()
+        state = {"date": datetime.now().replace(hour=0, minute=0, second=0, microsecond=0),
+                 "days_ago": 0, "export_rows": []}
 
-        # 顶部导航栏
+        # 顶部导航：‹ / 日期文本 / › / 回到今天
         nav = tk.Frame(root, bg=Design.BACKGROUND)
         nav.pack(fill=tk.X, padx=16, pady=(12, 4))
 
-        def nav_btn(parent, text, cmd):
-            return tk.Button(parent, text=text, command=cmd,
-                             bg=Design.CARD_FILL, fg=Design.TEXT_PRIMARY,
-                             activebackground=Design.CARD_BORDER,
-                             activeforeground=Design.TEXT_PRIMARY,
-                             relief="flat", bd=0, width=3,
-                             font=Design.FONT_UI_SMALL, cursor="hand2")
-
-        def prev_day():
-            nonlocal current_days_ago, current_date
-            current_days_ago += 1
-            current_date = datetime.now() - timedelta(days=current_days_ago)
+        def shift(delta):
+            state["date"] += timedelta(days=delta)
+            state["days_ago"] = (datetime.now().date() - state["date"].date()).days
             refresh_model()
 
+        def prev_day():
+            shift(-1)
+
         def next_day():
-            nonlocal current_days_ago, current_date
-            if current_days_ago > 0:
-                current_days_ago -= 1
-                current_date = datetime.now() - timedelta(days=current_days_ago)
-                refresh_model()
+            if state["days_ago"] > 0:
+                shift(1)
 
-        nav_btn(nav, "◀", prev_day).pack(side=tk.LEFT)
+        def go_today():
+            state["date"] = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            state["days_ago"] = 0
+            refresh_model()
 
-        date_label = tk.Label(nav, text=current_date.strftime("%y-%m-%d"),
-                              font=Design.FONT_MONO, fg=Design.TEXT_PRIMARY,
+        def export_csv():
+            self._export_detail_csv("导出模型分布", "ccbar-模型分布.csv",
+                                    ["模型", "请求数", "总Token", "缓存读"],
+                                    state["export_rows"])
+
+        self._detail_nav_button(nav, "‹", prev_day).pack(side=tk.LEFT)
+        date_label = tk.Label(nav, text="", font=Design.FONT_MONO, fg=Design.TEXT_PRIMARY,
                               bg=Design.BACKGROUND)
         date_label.pack(side=tk.LEFT, expand=True)
+        self._detail_export_button(nav, export_csv).pack(side=tk.RIGHT)
+        today_chip = self._detail_today_chip(nav, go_today)
+        today_chip.pack(side=tk.RIGHT, padx=(0, 6))
+        next_btn = self._detail_nav_button(nav, "›", next_day)
+        next_btn.pack(side=tk.RIGHT)
 
-        nav_btn(nav, "▶", next_day).pack(side=tk.RIGHT)
+        _holder, set_stats = self._detail_stats_holder(root)
 
         # 图表区：左侧环形图 + 右侧图例
         chart_frame = tk.Frame(root, bg=Design.BACKGROUND)
@@ -1813,62 +2343,33 @@ class CcBarTray:
         legend_frame = tk.Frame(chart_frame, bg=Design.BACKGROUND)
         legend_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(12, 0))
 
-        # 表头
-        header = tk.Frame(root, bg=Design.BACKGROUND)
-        header.pack(fill=tk.X, padx=16)
-
-        cols = [("模型", 22, 'w'), ("请求数", 9, 'e'), ("总token", 11, 'e'), ("缓存读", 11, 'e')]
-        for text, width, anchor in cols:
-            tk.Label(header, text=text, width=width, anchor=anchor,
-                     fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
-                     font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT)
-
-        tk.Frame(root, bg=Design.CARD_BORDER, height=1).pack(fill=tk.X, padx=16, pady=4)
-
-        # 数据滚动区
-        list_container = tk.Frame(root, bg=Design.BACKGROUND)
-        list_container.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 12))
-
-        scrollbar = tk.Scrollbar(list_container, orient="vertical")
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-        data_frame = tk.Frame(list_container, bg=Design.BACKGROUND)
-        data_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        canvas_scroll = tk.Canvas(data_frame, bg=Design.BACKGROUND, highlightthickness=0,
-                                  yscrollcommand=scrollbar.set)
-        canvas_scroll.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.config(command=canvas_scroll.yview)
-
-        inner = tk.Frame(canvas_scroll, bg=Design.BACKGROUND)
-        canvas_scroll.create_window((0, 0), window=inner, anchor="nw", tags="inner")
-
-        def on_configure(event):
-            canvas_scroll.configure(scrollregion=canvas_scroll.bbox("all"))
-            canvas_scroll.itemconfigure("inner", width=canvas_scroll.winfo_width())
-
-        inner.bind("<Configure>", on_configure)
-        canvas_scroll.bind("<Configure>", on_configure)
-
-        def on_mousewheel(event):
-            canvas_scroll.yview_scroll(int(-event.delta / 120), "units")
-
-        canvas_scroll.bind("<MouseWheel>", on_mousewheel)
-        inner.bind("<MouseWheel>", on_mousewheel)
+        # 表头 + 可滚动数据区
+        self._detail_table_header(root, [("模型", 22, 'w'), ("请求数", 9, 'e'),
+                                         ("总token", 11, 'e'), ("缓存读", 11, 'e')])
+        inner, bind_wheel = self._detail_scroll_area(root)
 
         def refresh_model():
             for widget in inner.winfo_children():
                 widget.destroy()
             for widget in legend_frame.winfo_children():
                 widget.destroy()
+            state["export_rows"] = []
 
-            date_label.config(text=current_date.strftime("%y-%m-%d"))
+            date_label.config(text=state["date"].strftime("%y-%m-%d"))
+            if state["days_ago"] == 0:
+                today_chip.pack_forget()
+                next_btn.configure(state=tk.DISABLED)
+            else:
+                today_chip.pack(side=tk.RIGHT, before=next_btn, padx=(0, 6))
+                next_btn.configure(state=tk.NORMAL)
 
-            models = self.query_model_breakdown_by_day(current_days_ago)
+            models = [m for m in (self.query_model_breakdown_by_day(state["days_ago"]) or [])
+                      if m["total_token"] > 0 or m["reqs"] > 0]
             if not models:
+                set_stats([])
+                donut_canvas.delete("all")
                 tk.Label(inner, text="暂无数据", fg=Design.TEXT_MUTED,
                          bg=Design.BACKGROUND, font=Design.FONT_UI).pack(pady=20)
-                donut_canvas.delete("all")
                 return
 
             total_reqs = sum(m["reqs"] for m in models)
@@ -1881,18 +2382,22 @@ class CcBarTray:
             # 环形图：跨渠道按模型合并，展示整体分布（取前 6）
             merged = {}
             for m in models:
-                acc = merged.get(m["model"], (0, 0))
-                merged[m["model"]] = (acc[0] + m["total_token"], acc[1] + m["cache_read"])
-            merged_list = sorted(merged.items(), key=lambda kv: kv[1][0], reverse=True)
+                merged[m["model"]] = merged.get(m["model"], 0) + m["total_token"]
+            merged_list = sorted(merged.items(), key=lambda kv: kv[1], reverse=True)
 
-            items = []
-            for idx, (model_name, (token, _)) in enumerate(merged_list[:6]):
-                items.append((token, colors[idx % len(colors)], model_name))
-
+            items = [(token, colors[idx % len(colors)], name)
+                     for idx, (name, token) in enumerate(merged_list[:6])]
             ChartCanvas.draw_donut(donut_canvas, items, 160)
 
+            top_share = (merged_list[0][1] / total_token * 100) if total_token > 0 else 0
+            set_stats([
+                ("总 Token", Design.fmt_tokens(total_token), None),
+                ("模型数", "%d" % len(merged_list), None),
+                ("Top1 占比", "%.0f%%" % top_share, Design.WARNING),
+            ])
+
             # 图例
-            for idx, (model_name, (token, _)) in enumerate(merged_list[:6]):
+            for idx, (model_name, token) in enumerate(merged_list[:6]):
                 color = colors[idx % len(colors)]
                 pct = (token / total_token * 100) if total_token > 0 else 0
                 short_name = model_name[:16] + "…" if len(model_name) > 16 else model_name
@@ -1900,7 +2405,6 @@ class CcBarTray:
                 item_frame = tk.Frame(legend_frame, bg=Design.BACKGROUND)
                 item_frame.pack(fill=tk.X, pady=2)
 
-                # 颜色圆点
                 dot = tk.Canvas(item_frame, width=10, height=10,
                                 bg=Design.BACKGROUND, highlightthickness=0)
                 dot.create_oval(1, 1, 9, 9, fill=color, outline="")
@@ -1944,7 +2448,6 @@ class CcBarTray:
                     row = tk.Frame(inner, bg=Design.BACKGROUND)
                     row.pack(fill=tk.X, pady=1)
 
-                    # 颜色圆点（前6个有色，其余灰色）
                     color = (colors[idx % len(colors)]
                              if gi == 0 and idx < 6 else Design.TEXT_MUTED)
                     dot = tk.Canvas(row, width=10, height=10,
@@ -1952,91 +2455,117 @@ class CcBarTray:
                     dot.create_oval(1, 1, 9, 9, fill=color, outline="")
                     dot.pack(side=tk.LEFT, padx=(0, 4))
 
-                short_name = m["model"][:18] + "…" if len(m["model"]) > 18 else m["model"]
+                    short_name = (m["model"][:18] + "…"
+                                  if len(m["model"]) > 18 else m["model"])
+                    tk.Label(row, text=short_name, width=20, anchor='w',
+                             fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+                             font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT)
+                    tk.Label(row, text=f"{m['reqs']}次", width=9, anchor='e',
+                             fg=Design.TEXT_PRIMARY if m['reqs'] > 0 else Design.TEXT_MUTED,
+                             bg=Design.BACKGROUND,
+                             font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT)
+                    tk.Label(row, text=Design.fmt_tokens(m['total_token']), width=11,
+                             anchor='e',
+                             fg=(Design.TEXT_PRIMARY if m['total_token'] > 0
+                                 else Design.TEXT_MUTED),
+                             bg=Design.BACKGROUND,
+                             font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT)
+                    tk.Label(row, text=Design.fmt_tokens(m['cache_read']), width=11,
+                             anchor='e',
+                             fg=(Design.TEXT_SECONDARY if m['cache_read'] > 0
+                                 else Design.TEXT_MUTED),
+                             bg=Design.BACKGROUND,
+                             font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT)
+                    state["export_rows"].append([m["model"], m["reqs"], m["total_token"],
+                                                 m["cache_read"]])
 
-                tk.Label(row, text=short_name, width=20, anchor='w', fg=Design.TEXT_PRIMARY,
-                         bg=Design.BACKGROUND, font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT)
-                tk.Label(row, text=f"{m['reqs']}次", width=9, anchor='e',
-                         fg=Design.TEXT_PRIMARY if m['reqs'] > 0 else Design.TEXT_MUTED,
-                         bg=Design.BACKGROUND, font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT)
-                tk.Label(row, text=Design.fmt_tokens(m['total_token']), width=11, anchor='e',
-                         fg=Design.TEXT_PRIMARY if m['total_token'] > 0 else Design.TEXT_MUTED,
-                         bg=Design.BACKGROUND, font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT)
-                tk.Label(row, text=Design.fmt_tokens(m['cache_read']), width=11, anchor='e',
-                         fg=Design.TEXT_SECONDARY if m['cache_read'] > 0 else Design.TEXT_MUTED,
-                         bg=Design.BACKGROUND, font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT)
+            # 合计行（mac 同款收口）
+            self._detail_total_row(inner, [("合计", 20, 'w'), ("%d次" % total_reqs, 9, 'e'),
+                                           (Design.fmt_tokens(total_token), 11, 'e'),
+                                           (Design.fmt_tokens(total_cache), 11, 'e')])
 
         refresh_model()
+        bind_wheel()
         self._bring_to_front(root)
 
     @_on_gui
     def show_daily_detail(self, days=7, title="近7天用量"):
-        """显示每日详情窗口（7天/30天）"""
+        """显示每日详情窗口（近7天 / 近30天）
+
+        对齐 mac DetailWindowController / MonthDetailWindowController：统计卡
+        （总 Token / 日均 / 请求数 / 缓存读）、折线图（峰值点高亮 + 拖选读数）、
+        ‹ / 日期文本 / › / 回到今天 导航、CSV 导出与位置记忆。
+        """
         import tkinter as tk
 
         root = tk.Toplevel(self._ui_root)
         root.title(title)
-        root.geometry("560x620")
+        geom_key = "week" if days == 7 else "month"
+        self._apply_window_geometry(root, geom_key, "560x620")
         root.configure(bg=Design.BACKGROUND)
         root.minsize(480, 400)
+        self._remember_window_geometry(root, geom_key)
 
-        current_date = datetime.now()
+        state = {"date": datetime.now(), "export_rows": []}
 
-        # 顶部导航栏
+        # 顶部导航：‹ / 日期文本 / › / 回到今天（周期可能是周一到周日或自然月）
         nav = tk.Frame(root, bg=Design.BACKGROUND)
         nav.pack(fill=tk.X, padx=16, pady=(12, 4))
 
-        def nav_btn(parent, text, cmd):
-            return tk.Button(parent, text=text, command=cmd,
-                             bg=Design.CARD_FILL, fg=Design.TEXT_PRIMARY,
-                             activebackground=Design.CARD_BORDER,
-                             activeforeground=Design.TEXT_PRIMARY,
-                             relief="flat", bd=0, width=3,
-                             font=Design.FONT_UI_SMALL, cursor="hand2")
+        def can_go_next():
+            now = datetime.now()
+            if days == 7:
+                return state["date"] + timedelta(days=7) <= now
+            return self._add_months(state["date"], 1) <= now
+
+        def is_current_period():
+            now = datetime.now()
+            if days == 7:
+                return (state["date"].date() - timedelta(days=state["date"].weekday())
+                        == now.date() - timedelta(days=now.weekday()))
+            return (state["date"].year, state["date"].month) == (now.year, now.month)
 
         def prev_period():
-            nonlocal current_date
-            if days == 7:
-                current_date -= timedelta(days=7)
-            else:
-                if current_date.month == 1:
-                    current_date = current_date.replace(year=current_date.year - 1, month=12)
-                else:
-                    current_date = current_date.replace(month=current_date.month - 1)
+            state["date"] = (state["date"] - timedelta(days=7) if days == 7
+                             else self._add_months(state["date"], -1))
             refresh_daily()
 
         def next_period():
-            nonlocal current_date
-            if days == 7:
-                if current_date + timedelta(days=7) <= datetime.now():
-                    current_date += timedelta(days=7)
-            else:
-                if current_date.month == 12:
-                    next_date = current_date.replace(year=current_date.year + 1, month=1)
-                else:
-                    next_date = current_date.replace(month=current_date.month + 1)
-                if next_date <= datetime.now():
-                    current_date = next_date
+            if can_go_next():
+                state["date"] = (state["date"] + timedelta(days=7) if days == 7
+                                 else self._add_months(state["date"], 1))
+                refresh_daily()
+
+        def go_current():
+            state["date"] = datetime.now()
             refresh_daily()
 
-        nav_btn(nav, "◀", prev_period).pack(side=tk.LEFT)
+        def export_csv():
+            name = "ccbar-近7天.csv" if days == 7 else "ccbar-近30天.csv"
+            self._export_detail_csv("导出" + title, name,
+                                    ["日期", "请求数", "总Token", "缓存读"],
+                                    state["export_rows"])
 
-        date_label = tk.Label(nav, text="", font=Design.FONT_MONO,
-                              fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND)
+        self._detail_nav_button(nav, "‹", prev_period).pack(side=tk.LEFT)
+        date_label = tk.Label(nav, text="", font=Design.FONT_MONO, fg=Design.TEXT_PRIMARY,
+                              bg=Design.BACKGROUND)
         date_label.pack(side=tk.LEFT, expand=True)
+        self._detail_export_button(nav, export_csv).pack(side=tk.RIGHT)
+        today_chip = self._detail_today_chip(nav, go_current)
+        today_chip.pack(side=tk.RIGHT, padx=(0, 6))
+        next_btn = self._detail_nav_button(nav, "›", next_period)
+        next_btn.pack(side=tk.RIGHT)
 
-        nav_btn(nav, "▶", next_period).pack(side=tk.RIGHT)
+        _holder, set_stats = self._detail_stats_holder(root)
 
-        # 折线图
+        # 折线图（理由同每小时详情：等布局完成有宽度再画）
         chart_frame = tk.Frame(root, bg=Design.BACKGROUND)
         chart_frame.pack(fill=tk.X, padx=16, pady=(8, 4))
-
-        chart_canvas = tk.Canvas(chart_frame, height=70, bg=Design.BACKGROUND,
+        chart_canvas = tk.Canvas(chart_frame, height=90, bg=Design.BACKGROUND,
                                  highlightthickness=0)
         chart_canvas.pack(fill=tk.X)
-
-        # 折线图状态：理由同每小时详情，等布局完成有宽度再画
         chart_state = {}
+        ChartReadout(chart_canvas, chart_state, kind="line")
 
         def draw_chart(_event=None):
             if not chart_state:
@@ -2045,135 +2574,236 @@ class CcBarTray:
             width = chart_canvas.winfo_width()
             if width <= 1:
                 return
-            ChartCanvas.draw_sparkline(chart_canvas, chart_state["values"], width, 70,
+            ChartCanvas.draw_sparkline(chart_canvas, chart_state["values"], width, 90,
                                        use_gradient=True,
-                                       hue_offset=chart_state["hue_offset"])
+                                       hue_offset=chart_state["hue_offset"],
+                                       highlight_index=chart_state.get("peak"))
 
         chart_canvas.bind("<Configure>", draw_chart)
 
-        # 表头
-        header = tk.Frame(root, bg=Design.BACKGROUND)
-        header.pack(fill=tk.X, padx=16)
-
-        cols = [("日期", 8, 'w'), ("请求数", 9, 'e'), ("总token", 11, 'e'), ("缓存读", 11, 'e')]
-        for text, width, anchor in cols:
-            tk.Label(header, text=text, width=width, anchor=anchor,
-                     fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
-                     font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT)
-
-        tk.Frame(root, bg=Design.CARD_BORDER, height=1).pack(fill=tk.X, padx=16, pady=4)
-
-        # 数据滚动区
-        list_container = tk.Frame(root, bg=Design.BACKGROUND)
-        list_container.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 12))
-
-        scrollbar = tk.Scrollbar(list_container, orient="vertical")
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-        data_frame = tk.Frame(list_container, bg=Design.BACKGROUND)
-        data_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        canvas_scroll = tk.Canvas(data_frame, bg=Design.BACKGROUND, highlightthickness=0,
-                                  yscrollcommand=scrollbar.set)
-        canvas_scroll.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.config(command=canvas_scroll.yview)
-
-        inner = tk.Frame(canvas_scroll, bg=Design.BACKGROUND)
-        canvas_scroll.create_window((0, 0), window=inner, anchor="nw", tags="inner")
-
-        def on_configure(event):
-            canvas_scroll.configure(scrollregion=canvas_scroll.bbox("all"))
-            canvas_scroll.itemconfigure("inner", width=canvas_scroll.winfo_width())
-
-        inner.bind("<Configure>", on_configure)
-        canvas_scroll.bind("<Configure>", on_configure)
-
-        def on_mousewheel(event):
-            canvas_scroll.yview_scroll(int(-event.delta / 120), "units")
-
-        canvas_scroll.bind("<MouseWheel>", on_mousewheel)
-        inner.bind("<MouseWheel>", on_mousewheel)
+        # 表头 + 可滚动数据区
+        self._detail_table_header(root, [("日期", 8, 'w'), ("请求数", 9, 'e'),
+                                         ("总token", 11, 'e'), ("缓存读", 11, 'e')])
+        inner, bind_wheel = self._detail_scroll_area(root)
 
         def refresh_daily():
             for widget in inner.winfo_children():
                 widget.destroy()
+            state["export_rows"] = []
+
+            if is_current_period():
+                today_chip.pack_forget()
+            else:
+                today_chip.pack(side=tk.RIGHT, before=next_btn, padx=(0, 6))
+            next_btn.configure(state=tk.NORMAL if can_go_next() else tk.DISABLED)
 
             if days == 7:
-                weekday = current_date.weekday()
-                week_start = current_date - timedelta(days=weekday)
+                # 周窗口：周一到周日
+                week_start = state["date"] - timedelta(days=state["date"].weekday())
                 week_end = week_start + timedelta(days=6)
                 start_date = week_start.strftime("%Y-%m-%d")
                 end_date = week_end.strftime("%Y-%m-%d")
-                date_label.config(text=f"{week_start.strftime('%y-%m-%d')} ~ {week_end.strftime('%y-%m-%d')}")
+                date_label.config(text="%s ~ %s" % (week_start.strftime("%y-%m-%d"),
+                                                    week_end.strftime("%y-%m-%d")))
                 hue_offset = (week_start.isocalendar()[1] % 8) / 8.0
             else:
-                month_start = current_date.replace(day=1)
-                if current_date.month == 12:
-                    month_end = current_date.replace(year=current_date.year + 1, month=1, day=1) - timedelta(days=1)
-                else:
-                    month_end = current_date.replace(month=current_date.month + 1, day=1) - timedelta(days=1)
+                # 月窗口：自然月
+                month_start = state["date"].replace(day=1)
+                month_end = self._add_months(month_start, 1) - timedelta(days=1)
                 start_date = month_start.strftime("%Y-%m-%d")
                 end_date = min(month_end, datetime.now()).strftime("%Y-%m-%d")
-                date_label.config(text=current_date.strftime("%y-%m"))
-                hue_offset = ((current_date.month * 3) % 8) / 8.0
+                date_label.config(text=state["date"].strftime("%y-%m"))
+                hue_offset = ((state["date"].month * 3) % 8) / 8.0
 
-            daily_data = self.query_daily_stats_for_range(start_date, end_date)
-            if not daily_data:
-                tk.Label(inner, text="暂无数据", fg=Design.TEXT_MUTED,
-                         bg=Design.BACKGROUND, font=Design.FONT_UI).pack(pady=20)
+            daily_data = self.query_daily_stats_for_range(start_date, end_date) or {}
+            sorted_dates = sorted(daily_data.keys())
+            if not sorted_dates:
+                set_stats([])
                 chart_state.clear()
                 chart_canvas.delete("all")
+                tk.Label(inner, text="暂无数据", fg=Design.TEXT_MUTED,
+                         bg=Design.BACKGROUND, font=Design.FONT_UI).pack(pady=20)
                 return
 
-            sorted_dates = sorted(daily_data.keys())
+            def day_token(key):
+                d = daily_data[key]
+                return d.get("output", 0) + d.get("input", 0) + d.get("cache_read", 0)
 
             total_reqs = sum(d["reqs"] for d in daily_data.values())
-            total_token = sum(d["output"] + d["input"] + d["cache_read"] for d in daily_data.values())
+            total_token = sum(day_token(key) for key in sorted_dates)
             total_cache = sum(d["cache_read"] for d in daily_data.values())
+            days_with_data = sum(1 for key in sorted_dates if day_token(key) > 0)
+            daily_avg = total_token // days_with_data if days_with_data > 0 else 0
 
-            # 绘制折线图
-            values = [d["output"] + d["input"] + d["cache_read"] for d in daily_data.values()]
+            values = [day_token(key) for key in sorted_dates]
+            peak_token = max(values) if values else 0
+            peak_index = values.index(peak_token) if peak_token > 0 else None
             chart_state.clear()
-            chart_state.update(values=values, hue_offset=hue_offset)
+            chart_state.update(values=values,
+                               labels=[key[5:].replace("-", "/") for key in sorted_dates],
+                               hue_offset=hue_offset, peak=peak_index)
+            draw_chart()
+
+            set_stats([
+                ("总 Token", Design.fmt_tokens(total_token), None),
+                ("日均", Design.fmt_tokens(daily_avg), None),
+                ("请求数", "%d" % total_reqs, None),
+                ("缓存读", Design.fmt_tokens(total_cache), None),
+            ])
+
+            # 合计行
+            self._detail_total_row(inner, [("合计", 8, 'w'), ("%d次" % total_reqs, 9, 'e'),
+                                           (Design.fmt_tokens(total_token), 11, 'e'),
+                                           (Design.fmt_tokens(total_cache), 11, 'e')])
+            tk.Frame(inner, bg=Design.CARD_BORDER, height=1).pack(fill=tk.X, pady=3)
+
+            for key in sorted_dates:
+                d = daily_data[key]
+                token = day_token(key)
+                cache_read = d["cache_read"]
+                state["export_rows"].append([key, d["reqs"], token, cache_read])
+                self._detail_data_row(inner, [
+                    (key[5:].replace("-", "/"), 8, 'w', Design.GRADIENT[0]),
+                    ("%d次" % d["reqs"] if d["reqs"] > 0 else "-", 9, 'e',
+                     Design.TEXT_PRIMARY if d["reqs"] > 0 else Design.TEXT_MUTED),
+                    (Design.fmt_tokens(token), 11, 'e',
+                     Design.TEXT_PRIMARY if token > 0 else Design.TEXT_MUTED),
+                    (Design.fmt_tokens(cache_read), 11, 'e',
+                     Design.TEXT_SECONDARY if cache_read > 0 else Design.TEXT_MUTED),
+                ], highlight=(peak_token > 0 and token == peak_token))
+
+        refresh_daily()
+        bind_wheel()
+        self._bring_to_front(root)
+
+    @_on_gui
+    def show_all_time_detail(self, icon=None, item=None):
+        """显示历史总量窗口（按月汇总）
+
+        对齐 mac AllTimeDetailWindowController：历史总量 / 月均 / 最佳月 / 请求数
+        四张统计卡、峰值月高亮柱状图（最早 → 最新）、CSV 导出与位置记忆；
+        今日实时用量并入当前月（daily_agg 不含今天）。
+        """
+        import tkinter as tk
+
+        root = tk.Toplevel(self._ui_root)
+        root.title("历史总量")
+        self._apply_window_geometry(root, "alltime", "560x620")
+        root.configure(bg=Design.BACKGROUND)
+        root.minsize(480, 420)
+        self._remember_window_geometry(root, "alltime")
+
+        state = {"export_rows": []}
+
+        nav = tk.Frame(root, bg=Design.BACKGROUND)
+        nav.pack(fill=tk.X, padx=16, pady=(12, 4))
+        tk.Label(nav, text="按月汇总", font=Design.FONT_MONO, fg=Design.TEXT_PRIMARY,
+                 bg=Design.BACKGROUND).pack(side=tk.LEFT, expand=True)
+
+        def export_csv():
+            self._export_detail_csv("导出历史总量", "ccbar-按月汇总.csv",
+                                    ["月份", "请求数", "总Token", "缓存读"],
+                                    state["export_rows"])
+
+        self._detail_export_button(nav, export_csv).pack(side=tk.RIGHT)
+
+        _holder, set_stats = self._detail_stats_holder(root)
+
+        chart_frame = tk.Frame(root, bg=Design.BACKGROUND)
+        chart_frame.pack(fill=tk.X, padx=16, pady=(8, 4))
+        chart_canvas = tk.Canvas(chart_frame, height=100, bg=Design.BACKGROUND,
+                                 highlightthickness=0)
+        chart_canvas.pack(fill=tk.X)
+        chart_state = {}
+        ChartReadout(chart_canvas, chart_state, kind="bars")
+
+        def draw_chart(_event=None):
+            if not chart_state:
+                chart_canvas.delete("all")
+                return
+            width = chart_canvas.winfo_width()
+            if width <= 1:
+                return
+            ChartCanvas.draw_bar_chart(chart_canvas, chart_state["values"], width, 100,
+                                       labels=chart_state["labels"], use_gradient=True,
+                                       hue_offset=chart_state["hue_offset"],
+                                       highlight_index=chart_state.get("peak"))
+
+        chart_canvas.bind("<Configure>", draw_chart)
+
+        self._detail_table_header(root, [("月份", 8, 'w'), ("请求数", 9, 'e'),
+                                         ("总token", 11, 'e'), ("缓存读", 11, 'e')])
+        inner, bind_wheel = self._detail_scroll_area(root)
+
+        def refresh_all():
+            for widget in inner.winfo_children():
+                widget.destroy()
+            state["export_rows"] = []
+
+            rows = list(self.store.query_monthly_totals(limit=36) or [])
+            # 今日实时并入当前月（daily_agg 不含今天）
+            today = self.query_day_stats(0)
+            month = self._day_str(0)[:7]
+            if today and (today["reqs"] > 0 or today["total"] > 0):
+                for i, r in enumerate(rows):
+                    if r[0] == month:
+                        rows[i] = (r[0], r[1] + today["reqs"], r[2] + today["total"],
+                                   r[3] + today["cache_read"])
+                        break
+                else:
+                    rows.insert(0, (month, today["reqs"], today["total"],
+                                    today["cache_read"]))
+
+            if not rows:
+                set_stats([])
+                chart_state.clear()
+                chart_canvas.delete("all")
+                tk.Label(inner, text="暂无数据", fg=Design.TEXT_MUTED,
+                         bg=Design.BACKGROUND, font=Design.FONT_UI).pack(pady=20)
+                return
+
+            total_reqs = sum(r[1] for r in rows)
+            total_token = sum(r[2] for r in rows)
+            total_cache = sum(r[3] for r in rows)
+            peak_token = max(r[2] for r in rows)
+            best_month = max(rows, key=lambda r: r[2])[0]
+
+            set_stats([
+                ("历史总量", Design.fmt_tokens(total_token), None),
+                ("月均", Design.fmt_tokens(total_token // max(len(rows), 1)), None),
+                ("最佳月", best_month, Design.WARNING),
+                ("请求数", "%d" % total_reqs, None),
+            ])
+
+            # 图表：最近月份在最前，倒过来让时间从左到右
+            ordered = list(reversed(rows))
+            values = [r[2] for r in ordered]
+            chart_state.clear()
+            chart_state.update(values=values, labels=[r[0] for r in ordered],
+                               hue_offset=0.35,
+                               peak=values.index(peak_token) if peak_token > 0 else None)
             draw_chart()
 
             # 合计行
-            total_row = tk.Frame(inner, bg=Design.BACKGROUND)
-            total_row.pack(fill=tk.X)
-            cells = [("合计", 8, 'w'), (f"{total_reqs}次", 9, 'e'),
-                     (Design.fmt_tokens(total_token), 11, 'e'),
-                     (Design.fmt_tokens(total_cache), 11, 'e')]
-            for text, width, anchor in cells:
-                tk.Label(total_row, text=text, width=width, anchor=anchor,
-                         fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
-                         font=("Consolas", 10, "bold")).pack(side=tk.LEFT)
-
+            self._detail_total_row(inner, [("合计", 8, 'w'), ("%d次" % total_reqs, 9, 'e'),
+                                           (Design.fmt_tokens(total_token), 11, 'e'),
+                                           (Design.fmt_tokens(total_cache), 11, 'e')])
             tk.Frame(inner, bg=Design.CARD_BORDER, height=1).pack(fill=tk.X, pady=3)
 
-            # 每日数据
-            for date_str in sorted_dates:
-                d = daily_data[date_str]
-                day_token = d["output"] + d["input"] + d["cache_read"]
-                date_obj = datetime.strptime(date_str, "%Y-%m-%d")
-                display_date = date_obj.strftime("%m/%d")
+            for r in rows:
+                state["export_rows"].append([r[0], r[1], r[2], r[3]])
+                self._detail_data_row(inner, [
+                    (r[0], 8, 'w', Design.GRADIENT[0]),
+                    ("%d次" % r[1] if r[1] > 0 else "-", 9, 'e',
+                     Design.TEXT_PRIMARY if r[1] > 0 else Design.TEXT_MUTED),
+                    (Design.fmt_tokens(r[2]), 11, 'e',
+                     Design.TEXT_PRIMARY if r[2] > 0 else Design.TEXT_MUTED),
+                    (Design.fmt_tokens(r[3]), 11, 'e',
+                     Design.TEXT_SECONDARY if r[3] > 0 else Design.TEXT_MUTED),
+                ], highlight=(peak_token > 0 and r[2] == peak_token))
 
-                row = tk.Frame(inner, bg=Design.BACKGROUND)
-                row.pack(fill=tk.X, pady=1)
-
-                vals = [
-                    (display_date, 8, 'w', Design.GRADIENT[0]),
-                    (f"{d['reqs']}次" if d['reqs'] > 0 else "-", 9, 'e',
-                     Design.TEXT_PRIMARY if d['reqs'] > 0 else Design.TEXT_MUTED),
-                    (Design.fmt_tokens(day_token), 11, 'e',
-                     Design.TEXT_PRIMARY if day_token > 0 else Design.TEXT_MUTED),
-                    (Design.fmt_tokens(d['cache_read']), 11, 'e',
-                     Design.TEXT_SECONDARY if d['cache_read'] > 0 else Design.TEXT_MUTED),
-                ]
-                for text, width, anchor, fg in vals:
-                    tk.Label(row, text=text, width=width, anchor=anchor, fg=fg,
-                             bg=Design.BACKGROUND, font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT)
-
-        refresh_daily()
+        refresh_all()
+        bind_wheel()
         self._bring_to_front(root)
 
     def copy_stats(self, icon, item):
@@ -2205,8 +2835,7 @@ class CcBarTray:
 
         try:
             pyperclip.copy(text)
-            toaster = win10toast.ToastNotifier()
-            toaster.show_toast("已复制", "统计数据已复制到剪贴板", duration=3)
+            self._toast("已复制", "统计数据已复制到剪贴板", duration=3)
         except:
             pass
 
@@ -2314,10 +2943,7 @@ class CcBarTray:
     @staticmethod
     def _fmt_credits(v):
         """积分显示：整数不带小数点，小数保留两位（与 mac formatCredits 同口径）"""
-        v = float(v or 0)
-        if v == round(v) and abs(v) < 100_000:
-            return str(int(v))
-        return "%.2f" % v
+        return format_credits(v)
 
     @staticmethod
     def _short_date(epoch):
@@ -2418,6 +3044,15 @@ class CcBarTray:
         apps = store.query_app_daily(30)
         comp = store.query_composition_daily(30)
         today_timeline = store.query_timeline()
+        # 积分页（Trae 口径）：0/7/30 天消耗 + 官方账单余额 + 近 30 天走势
+        credits_today = store.query_credits_sum(0)
+        credits7 = store.query_credits_sum(7)
+        credits30 = store.query_credits_sum(30)
+        credits_daily = store.query_credits_daily(30)
+        try:
+            credits_ent = store.trae_ent_summary()
+        except Exception:
+            credits_ent = None
         # 月度预算（设置里 > 0 才出面）；未计费渠道按默认单价（$/M tokens）估算
         budget = float(self.settings.get("monthly_budget_usd") or 0)
         price = float(self.settings.get("default_token_price") or 0)
@@ -3154,6 +3789,77 @@ class CcBarTray:
         model_box.bind("<<ComboboxSelected>>", refill)
         refresh_day()
 
+        # ============ 积分 ============
+        # 顺序与 mac InsightsPage 枚举一致：费用 / 洞察 / 分享 / 渠道 / 流水 / 积分
+        f_cred = tab("积分")
+        cred_page, cred_wheel = scroll_page(f_cred)
+
+        cred_row = tk.Frame(cred_page, bg=Design.BACKGROUND)
+        cred_row.pack(fill=tk.X, padx=10, pady=(8, 0))
+        for i, (title, value) in enumerate([("今日积分", credits_today),
+                                            ("近 7 天", credits7),
+                                            ("近 30 天", credits30)]):
+            card = tk.Frame(cred_row, bg=Design.CARD_FILL,
+                            highlightbackground=Design.CARD_BORDER,
+                            highlightthickness=1, padx=16, pady=12)
+            card.grid(row=0, column=i, sticky="nsew", padx=6, pady=4)
+            cred_row.grid_columnconfigure(i, weight=1)
+            tk.Label(card, text=title, fg=Design.TEXT_SECONDARY, bg=Design.CARD_FILL,
+                     font=("Microsoft YaHei UI", 10), anchor='w').pack(fill=tk.X)
+            tk.Label(card, text=format_credits(value), fg=Design.BIG_NUMBER,
+                     bg=Design.CARD_FILL, font=("Microsoft YaHei UI", 19, "bold"),
+                     anchor='w').pack(fill=tk.X)
+
+        if credits_ent:
+            consumed, ent_total = credits_ent
+            ecard = tk.Frame(cred_page, bg=Design.CARD_FILL,
+                             highlightbackground=Design.CARD_BORDER,
+                             highlightthickness=1, padx=16, pady=12)
+            ecard.pack(fill=tk.X, padx=16, pady=(10, 0))
+            tk.Label(ecard, text="积分余额（官方账单）", fg=Design.TEXT_SECONDARY,
+                     bg=Design.CARD_FILL, font=("Microsoft YaHei UI", 10),
+                     anchor='w').pack(fill=tk.X)
+            erow = tk.Frame(ecard, bg=Design.CARD_FILL)
+            erow.pack(fill=tk.X, pady=(4, 0))
+            tk.Label(erow, text=format_credits(consumed), fg=Design.DATA,
+                     bg=Design.CARD_FILL, font=("Microsoft YaHei UI", 19, "bold"),
+                     anchor='w').pack(side=tk.LEFT)
+            tk.Label(erow, text="已用 / 共 %s" % format_credits(ent_total),
+                     fg=Design.TEXT_SECONDARY, bg=Design.CARD_FILL,
+                     font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT, padx=(10, 0))
+            ent_ratio = (consumed / ent_total) if ent_total > 0 else 0.0
+            if ent_total > 0:
+                tk.Label(erow, text="%.0f%%" % (ent_ratio * 100), fg=Design.BRAND,
+                         bg=Design.CARD_FILL, font=Design.FONT_MONO_SMALL).pack(side=tk.RIGHT)
+                # 胶囊进度条
+                bar = tk.Frame(ecard, bg=Design.BTN_BG, height=5)
+                bar.pack(fill=tk.X, pady=(8, 0))
+                bar.pack_propagate(False)
+                fill_ratio = min(max(ent_ratio, 0.0), 1.0)
+                tk.Frame(bar, bg=blend(Design.BRAND, Design.CARD_FILL, 0.75)).place(
+                    relwidth=fill_ratio, relheight=1.0)
+
+        section(cred_page, "近 30 天积分走势")
+        if credits30 <= 0:
+            muted(cred_page, "接入 Trae 并产生用量后展示积分消耗")
+        elif not credits_daily:
+            muted(cred_page, "暂无数据")
+        else:
+            # 逐柱取主题模型色板（与 mac CreditsPage / 模型分布卡同一机制）
+            palette = model_colors(max(len(credits_daily), 1))
+            cred_series = [(d[5:], {d: v}) for d, v in credits_daily]
+            cred_colors = {d: palette[i % len(palette)]
+                           for i, (d, _v) in enumerate(credits_daily)}
+            png_label(cred_page, self._bar_chart_png(cred_series, cred_colors,
+                                                     value_fmt=format_credits))
+
+        tk.Label(cred_page,
+                 text="积分为 Trae 官方计费口径；历史数据自接入起最多回溯 90 天",
+                 fg=Design.TEXT_MUTED, bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL,
+                 anchor='w', justify=tk.LEFT,
+                 wraplength=690).pack(fill=tk.X, padx=16, pady=(14, 8))
+        cred_wheel(cred_page)
+
         # ============ 页签记忆 ============
         titles = [nb.tab(t, "text") for t in nb.tabs()]
         last_page = self.settings.get("insights_last_page") or "费用"
@@ -3454,6 +4160,45 @@ class CcBarTray:
                 status.config(text="未连接", fg=WARN_COLOR)
             entry.bind("<FocusOut>", lambda e, aid=adapter.id: validate_source(aid))
 
+        # Trae 是 HTTP 源（不在 SOURCE_REGISTRY 里），用登录凭据代替库路径
+        trae_row = tk.Frame(inner, bg=Design.BACKGROUND)
+        trae_row.pack(fill=tk.X, padx=24, pady=(8, 0))
+        trae_head = tk.Frame(trae_row, bg=Design.BACKGROUND)
+        trae_head.pack(fill=tk.X)
+
+        trae_var = tk.BooleanVar(value=self.settings.get("trae_enabled", False))
+        tk.Checkbutton(trae_head, variable=trae_var, bg=Design.BACKGROUND,
+                       fg=Design.TEXT_PRIMARY, activebackground=Design.BACKGROUND,
+                       activeforeground=Design.TEXT_PRIMARY, selectcolor=Design.CARD_FILL,
+                       bd=0, highlightthickness=0,
+                       cursor="hand2").pack(side=tk.LEFT)
+        tk.Label(trae_head, text="Trae", fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+                 font=Design.FONT_UI, width=10, anchor='w').pack(side=tk.LEFT)
+
+        trae_entry = tk.Entry(trae_head, bg=Design.CARD_FILL, fg=Design.TEXT_PRIMARY,
+                              insertbackground=Design.TEXT_PRIMARY, relief="flat",
+                              font=Design.FONT_MONO_SMALL, highlightthickness=1,
+                              highlightbackground=Design.CARD_BORDER,
+                              highlightcolor=Design.BRAND)
+        trae_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=4)
+        trae_entry.insert(0, self.settings.get("trae_sessionid") or "")
+        tk.Label(trae_row, text="粘贴 trae.cn 登录后的 sessionid cookie 值",
+                 fg=Design.TEXT_MUTED, bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL,
+                 anchor='w').pack(fill=tk.X, pady=(2, 0))
+
+        # 状态行：HTTP 源没有库路径可校验，直接透出统计库的诊断信息
+        try:
+            trae_status_text = self.store.source_status.get("trae", "") or ""
+            ent = self.store.trae_ent_summary()
+        except Exception:
+            trae_status_text, ent = "", None
+        if ent:
+            trae_status_text += " · 积分 %s/%s" % (self._fmt_credits(ent[0]),
+                                                   self._fmt_credits(ent[1]))
+        tk.Label(trae_row, text=trae_status_text, fg=Design.TEXT_MUTED,
+                 bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL,
+                 anchor='w').pack(fill=tk.X, pady=(2, 0))
+
         # ------------------------------------------------------------ 提醒与费用
         section("提醒")
         warning_entry = field_row("预警阈值 (万):", "超过此值将弹出通知提醒")
@@ -3570,6 +4315,8 @@ class CcBarTray:
             custom[:] = []
             theme_var.set("默认主题")
             refresh_theme_menu()
+            trae_var.set(False)
+            trae_entry.delete(0, tk.END)
 
         def collect():
             updates = {
@@ -3592,6 +4339,9 @@ class CcBarTray:
                 updates[enable_key] = source_vars[adapter.id].get()
                 path_value = source_entries[adapter.id].get().strip()
                 updates[path_key] = path_value or adapter.default_path
+            # Trae 是 HTTP 源：开关 + 登录凭据（settings.validate/apply 一并处理）
+            updates["trae_enabled"] = trae_var.get()
+            updates["trae_sessionid"] = trae_entry.get().strip()
             return updates
 
         def save():
@@ -3704,6 +4454,8 @@ class CcBarTray:
             time.sleep(self.settings["refresh_interval"])
             # 懒惰补账：历史（昨天及更早）落后就同步进自建库
             self.store.sync_if_needed()
+            # Trae 用量（HTTP 源）：后台节流 15 分钟一次，0-9 点静默
+            self.sync_trae(interactive=False)
             # 按用量更新图标颜色
             self.update_icon_color()
             # 检查里程碑（每1000万token冒泡通知）
@@ -3712,6 +4464,8 @@ class CcBarTray:
                 self.check_token_milestone(today["total"])
             # 每天首次刷新自动备份统计库（滚动保留 7 份）
             self.maybe_auto_backup()
+            # 周一自动生成上周用量周报（错过周一下次刷新补生成）
+            self.maybe_generate_weekly_report()
             # 静默检查更新（3 天一次，只有真有新版才提示）
             self.maybe_check_updates_silently()
             # 更新菜单
@@ -3719,6 +4473,22 @@ class CcBarTray:
                 menu = pystray.Menu(*self.build_menu())
                 self.icon.menu = menu
                 self.icon.title = self.get_tooltip_text()
+
+    def sync_trae(self, interactive=False):
+        """跑一次 Trae 同步（网络请求不能堵 GUI/托盘线程，放后台线程）"""
+        sync = getattr(self.store, "sync_trae_if_needed", None)
+        if sync is None or not self.settings.get("trae_enabled"):
+            return
+        # 登录态可能在设置里改过，先同步进统计库
+        self.store.trae_sessionid = self.settings.get("trae_sessionid") or ""
+
+        def worker():
+            try:
+                sync(interactive=interactive)
+            except Exception as e:
+                print("Trae 同步失败:", e)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def maybe_check_updates_silently(self):
         """静默检查更新：3 天一次，只在真有新版时提示（与 macOS 版同款节流）"""
@@ -3755,6 +4525,11 @@ class CcBarTray:
 
         # 初始化自建统计库并 ATTACH 各数据源（首次自动全量回填）
         self.connect_store()
+
+        # 启动时补一次日常维护：周一没开机的话在这里补出周报；Trae 也拉一次
+        self.maybe_auto_backup()
+        self.maybe_generate_weekly_report()
+        self.sync_trae(interactive=False)
 
         # 创建图标（按当前用量着色：浅绿 → 黄 → 橙，超过 8000万 才红）
         today = self.query_day_stats(0)
