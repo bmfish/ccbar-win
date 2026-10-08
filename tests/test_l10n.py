@@ -21,8 +21,12 @@ class TestL10n(unittest.TestCase):
     # ------------------------------------------------------------ 词条
 
     def test_dict_is_complete_and_clean(self):
-        self.assertEqual(len(l10n.L10N_EN), 284,
-                         "词条数应与 macOS 版 L10n.swift 一致（缺词条会静默回落中文）")
+        # macOS 版 L10n.swift 共 284 条；Windows 端另有 127 条独有文案（设置页新项、
+        # 主题包管理、多机合并、周报目录、托盘菜单等），合并在同一个表里。
+        self.assertGreaterEqual(len(l10n.L10N_EN), 284,
+                                "词条不得少于 macOS 版（缺词条会静默回落中文）")
+        for key in ("今日用量", "费用", "跟随系统", "连续使用", "上周周报已生成"):
+            self.assertIn(key, l10n.L10N_EN, "macOS 版词条不得被覆盖删除")
         for key, value in l10n.L10N_EN.items():
             self.assertIsInstance(key, str)
             self.assertIsInstance(value, str)
