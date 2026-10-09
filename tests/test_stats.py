@@ -100,6 +100,27 @@ class TestStatsStore(unittest.TestCase):
     def _rebuild(self):
         self.store.rebuild([(CCSwitchAdapter(), True, self.source_path)])
 
+    def _make_fixture_zcode(self):
+        self.zcode_path = os.path.join(self.tmp, "zcode.db")
+        conn = sqlite3.connect(self.zcode_path)
+        conn.executescript("""
+        CREATE TABLE model_usage (
+            id TEXT PRIMARY KEY, model_id TEXT,
+            input_tokens INTEGER, output_tokens INTEGER,
+            reasoning_tokens INTEGER, started_at INTEGER, status TEXT
+        );
+        """)
+        conn.commit()
+        conn.close()
+
+    def _insert_zcode_row(self, rid, created_at_sec, inp, out):
+        conn = sqlite3.connect(self.zcode_path)
+        conn.execute(
+            "INSERT INTO model_usage VALUES (?, 'zcode-model', ?, ?, 0, ?, 'completed')",
+            (rid, inp, out, created_at_sec * 1000))
+        conn.commit()
+        conn.close()
+
     # ------------------------------------------------------------ 用例
 
     def test_sync_daily_agg_and_queries(self):
@@ -295,6 +316,28 @@ class TestStatsStore(unittest.TestCase):
         self.assertEqual(len(tl), 1)
         self.assertEqual(tl[0][3], 360)
         self.assertAlmostEqual(tl[0][4], 0.5, places=4)
+
+    def test_channel_today_covers_every_source(self):
+        """今日各渠道必须每个 source 一行——GROUP BY 配 query_one 会只留下首行"""
+        self._make_fixture_source()
+        self._make_fixture_zcode()
+        now = max(local_midnight(0) + 60, int(datetime.now().timestamp()) - 60)
+        self._insert_row("req-A", now, 100, 200, cache_read=50, cache_create=10)
+        self._insert_zcode_row("z-1", now, 1000, 2000)
+        self.store.rebuild([
+            (CCSwitchAdapter(), True, self.source_path),
+            (ZCodeAdapter(), True, self.zcode_path),
+        ])
+        self.store.sync_if_needed()
+
+        channels = self.store.query_channel_daily(30)
+        today = datetime.now().strftime("%Y-%m-%d")
+        today_srcs = {r[1] for r in channels if r[0] == today}
+        self.assertEqual(today_srcs, {"cc-switch", "zcode"})
+        # 今日 token 各自成行，不串味
+        by_src = {r[1]: r[2] for r in channels if r[0] == today}
+        self.assertEqual(by_src["cc-switch"], 360)
+        self.assertEqual(by_src["zcode"], 3000)
 
     def test_export_import_idempotent(self):
         """导出 → 全新库导入 → 重复导入零新增（幂等）"""

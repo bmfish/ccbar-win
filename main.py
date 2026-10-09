@@ -36,7 +36,6 @@ APP_VERSION = "1.7.0"   # Windows 仓库自己的版本线（功能对齐 macOS 
 # 数据库路径（cc-switch 默认值，可在设置中修改）
 DB_PATH = os.path.expanduser("~/.cc-switch/cc-switch.db")
 
-
 # ============================================================
 # 设计系统（与 macOS 版保持一致）
 # ============================================================
@@ -53,16 +52,28 @@ class Design:
     BRAND = "#E86D45"          # 品牌橙
     DATA = "#F2B373"           # 数据高亮（表格里的数值）
     BIG_NUMBER = "#E86D45"     # 大数字（空=跟随 BRAND）
-    BACKGROUND = "#1C1C1C"     # 深色背景
-    CARD_FILL = "#2A2A2A"      # 卡片填充
-    CARD_BORDER = "#3D3D3D"    # 卡片边框
-    SEPARATOR = "#2A2A2A"      # 分隔线
+    BACKGROUND = "#171719"     # 深色背景（mac Design.backgroundDark = rgb(0.09,0.09,0.11)）
+    CARD_FILL = "#252527"      # 卡片填充（白 6% 叠在背景上）
+    CARD_BORDER = "#2E2E30"    # 卡片边框（白 10%）
+    SEPARATOR = "#2E2E30"      # 分隔线（白 10%）
     SCANLINES = False          # CRT 扫描线特效
 
-    # 文字
+    # 主题驱动，但 mac 把它们算出来后被 Design.apply 丢掉过；现在一并落到 Design 上
+    TREND = {"yesterday": "#007AFF", "week": "#AF52DE",
+             "month": "#32ADE2", "total": "#E86D45"}
+    GLOW_RADIUS = 14           # 大数字光晕半径
+    GLOW_ALPHA = 0.30          # 大数字光晕不透明度
+    BIG_NUMBER_WEIGHT = "bold"  # "bold" / "heavy"
+
+    # 文字（mac 是 white @ 0.60 / 0.38 叠在背景上，这里直接算成等效色）
     TEXT_PRIMARY = "#FFFFFF"
-    TEXT_SECONDARY = "#8C8C8C"
-    TEXT_MUTED = "#6B6B6B"
+    TEXT_SECONDARY = themes.blend("#FFFFFF", "#171719", 0.60)
+    TEXT_MUTED = themes.blend("#FFFFFF", "#171719", 0.38)
+
+    # 圆角（mac Design.cardCornerRadius=10 / barHeight=6）
+    CARD_RADIUS = 10
+    FIELD_RADIUS = 4
+    BAR_HEIGHT = 6
 
     # 图表渐变色带（蓝 → 青 → 绿 → 黄 → 橙 → 粉）
     GRADIENT = [
@@ -89,10 +100,16 @@ class Design:
     WARNING = "#F2A65A"
     ERROR = "#E5675C"
 
-    # 面板交互色（白色以 8% / 16% / 4% 叠在 #1C1C1C 上的等效色）
-    BTN_BG = "#2E2E2E"
-    BTN_BG_HOVER = "#404040"
-    ROW_HOVER = "#262626"
+    # 闪电 LED 三态（对齐 mac makeMenuBarIcon）：静息是模板单色（系统自适应灰，
+    # Windows 没有 template 机制，取等效中灰）、本次刷新有增量转绿、增量撞红线转红。
+    LED_IDLE = "#8E8E93"     # mac template（系统自适应）的等效灰
+    LED_GREEN = "#34C759"    # NSColor.systemGreen
+    LED_RED = "#FF3B30"      # NSColor.systemRed
+
+    # 面板交互色（白色以 8% / 16% / 4% 叠在背景上的等效色）
+    BTN_BG = themes.blend("#FFFFFF", "#171719", 0.08)
+    BTN_BG_HOVER = themes.blend("#FFFFFF", "#171719", 0.16)
+    ROW_HOVER = themes.blend("#FFFFFF", "#171719", 0.04)
 
     # 用量色阶关键色（按进度 0.0 ~ 1.0 排列）
     USAGE_STOPS = [
@@ -103,7 +120,8 @@ class Design:
         (1.00, "#E6474D"),  # 红
     ]
 
-    # 字体
+    # 字体（对齐 mac 的磅值；tkinter 无 SF Pro Rounded / monospacedDigits，
+    # 中文走雅黑、数字走 Consolas 等宽，只调 size/weight。雅黑渲染比 SF 大，故 CJK 取 mac-2）
     FONT_UI = ("Microsoft YaHei UI", 10)
     FONT_UI_SMALL = ("Microsoft YaHei UI", 9)
     FONT_UI_TINY = ("Microsoft YaHei UI", 8)
@@ -111,10 +129,21 @@ class Design:
     FONT_MONO_SMALL = ("Consolas", 9)
     FONT_MONO_TINY = ("Consolas", 8)
     FONT_TITLE = ("Microsoft YaHei UI", 11, "bold")
-    FONT_BIG = ("Consolas", 22, "bold")
-    FONT_VALUE = ("Consolas", 12)
+    FONT_WINDOW_TITLE = ("Microsoft YaHei UI", 14, "bold")   # mac 设置窗口 18pt semibold
+    FONT_BIG = ("Segoe UI", 26, "bold")            # mac 30pt bold rounded + monospacedDigits
+    FONT_VALUE = ("Consolas", 12, "bold")          # mac 13pt semibold monospacedDigits
     FONT_SECTION = ("Microsoft YaHei UI", 9, "bold")
-    FONT_CHEVRON = ("Microsoft YaHei UI", 11)
+    FONT_SECTION_TITLE = ("Microsoft YaHei UI", 9, "bold")   # mac 11pt semibold（「趋势」）
+    FONT_CARD_TITLE = ("Microsoft YaHei UI", 10, "bold")     # mac 12pt semibold
+    FONT_GREETING = ("Microsoft YaHei UI", 9)               # mac 11pt medium
+    FONT_MODEL_NAME = ("Microsoft YaHei UI", 9)              # mac 11pt medium
+    FONT_MODEL_VALUE = ("Consolas", 9, "bold")               # mac 11pt medium
+    FONT_TREND = ("Microsoft YaHei UI", 10)                  # mac 12pt medium
+    FONT_TREND_VALUE = ("Consolas", 10, "bold")              # mac 12pt semibold
+    FONT_PREDICTION = ("Microsoft YaHei UI", 8)              # mac 10pt
+    FONT_DETAIL_STAT = ("Microsoft YaHei UI", 12, "bold")    # mac 16pt bold
+    FONT_INSIGHT_VALUE = ("Microsoft YaHei UI", 16, "bold")  # mac 24pt bold
+    FONT_CHEVRON = ("Microsoft YaHei UI", 13)                # mac 15pt medium
     FONT_BTN = ("Microsoft YaHei UI", 8)
     FONT_BTN_ICON = ("Segoe UI Emoji", 13)
 
@@ -141,14 +170,18 @@ class Design:
         cls.BTN_BG_HOVER = tokens["BTN_BG_HOVER"]
         cls.ROW_HOVER = tokens["ROW_HOVER"]
         cls.SCANLINES = tokens["SCANLINES"]
+        # 这四个以前被算出来又丢掉：glow 是大数字光晕，TREND 是趋势行图标色，
+        # BIG_NUMBER_WEIGHT 是大数字字重——mac 三处都用，缺了就对不上。
+        cls.TREND = tokens["TREND"]
+        cls.GLOW_RADIUS = tokens["GLOW_RADIUS"]
+        cls.GLOW_ALPHA = tokens["GLOW_ALPHA"]
+        cls.BIG_NUMBER_WEIGHT = tokens["BIG_NUMBER_WEIGHT"]
         return tokens
-
 
 def _hex_to_rgb(hex_color):
     """#RRGGBB -> (r, g, b)"""
     h = hex_color.lstrip("#")
     return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
-
 
 def _rgb_to_hex(rgb):
     """(r, g, b) -> #RRGGBB"""
@@ -158,13 +191,11 @@ def _rgb_to_hex(rgb):
         max(0, min(255, int(rgb[2]))),
     )
 
-
 def blend(color, background, alpha):
     """把 color 以 alpha 不透明度混合到 background 上（tkinter Canvas 不支持透明度）"""
     c = _hex_to_rgb(color)
     b = _hex_to_rgb(background)
     return _rgb_to_hex(tuple(c[i] * alpha + b[i] * (1 - alpha) for i in range(3)))
-
 
 def usage_color(progress):
     """按用量进度取色（0.0 浅绿 → 1.0 红）"""
@@ -183,6 +214,7 @@ def usage_color(progress):
             return _rgb_to_hex(rgb)
 
     return stops[-1][1]
+
 
 
 # 今日用量（面板大数字 + 托盘图标）标红的阈值：超过 8000万 才变红
@@ -226,7 +258,6 @@ def model_colors(count=6):
 
     return [colors[i % len(colors)] for i in range(count)]
 
-
 def gradient_color(colors, progress, hue_offset=0.0):
     """在色带上按进度取色，可选色相偏移"""
     import colorsys
@@ -251,7 +282,6 @@ def gradient_color(colors, progress, hue_offset=0.0):
         rgb = colorsys.hsv_to_rgb(h, s, v)
 
     return _rgb_to_hex(tuple(x * 255 for x in rgb))
-
 
 class ChartCanvas:
     """基于 tkinter Canvas 的图表绘制工具"""
@@ -415,6 +445,209 @@ class ChartCanvas:
         canvas.create_text(center, center, text=Design.fmt_tokens(total),
                            fill=Design.TEXT_PRIMARY, font=Design.FONT_MONO_SMALL)
 
+    @staticmethod
+    def draw_sparkline_backdrop(canvas, values, width, height):
+        """趋势行背后的淡色 sparkline（mac 的 hourlySparkline backdrop）。
+
+        白 22% 细线 + 5% 面积，两端横向淡出；不画端点和峰值环——它只是垫底装饰，
+        不能抢趋势数值的视觉焦点。detail 窗口用的 draw_sparkline 不受影响。
+        """
+        if not values or width <= 1 or height <= 1:
+            return
+        canvas.delete("all")
+        vmax = max(values) or 1
+        n = len(values)
+        pad = 4
+        usable_w = width - pad * 2
+        usable_h = height - pad * 2
+        pts = [(pad + usable_w * i / max(n - 1, 1),
+                pad + usable_h * (1 - v / vmax)) for i, v in enumerate(values)]
+        base = height - pad
+
+        def fade(t):
+            # mac 的横向遮罩：0 → 0.05 淡入，0.94 → 1 淡出
+            if t < 0.05:
+                return t / 0.05
+            if t > 0.94:
+                return max(0.0, (1.0 - t) / 0.06)
+            return 1.0
+
+        for i in range(n - 1):
+            a = fade(i / max(n - 1, 1))
+            x1, y1 = pts[i]
+            x2, y2 = pts[i + 1]
+            canvas.create_polygon(x1, y1, x2, y2, x2, base, x1, base,
+                                  fill=blend("#FFFFFF", Design.BACKGROUND, 0.05 * a),
+                                  outline="")
+            canvas.create_line(x1, y1, x2, y2,
+                               fill=blend("#FFFFFF", Design.BACKGROUND, 0.22 * a),
+                               width=1)
+
+# ------------------------------------------------------------ 卡片 / 语义取色原语
+# 对齐 macOS 的 popoverCard / insightCard。tkinter 的 Frame 没有圆角，
+# SetWindowRgn 又只作用于 Toplevel，所以卡片一律用 Canvas 自绘圆角底。
+# 注意 tkinter 只在函数内 import：tests 在无显示环境下也要能 import main。
+
+def work_area():
+    """工作区矩形 (left, top, right, bottom)，排除任务栏。
+
+    Windows 走 SPI_GETWORKAREA；取不到就退化成整屏。弹窗贴靠与窗口居中都用它。
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+        rect = wintypes.RECT()
+        # SPI_GETWORKAREA = 0x0030
+        if ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):
+            return rect.left, rect.top, rect.right, rect.bottom
+    except Exception:
+        pass
+    import tkinter as tk
+    root = tk._default_root
+    w = root.winfo_screenwidth() if root is not None else 1920
+    h = root.winfo_screenheight() if root is not None else 1080
+    return 0, 0, w, h
+
+def center_geometry(default, work=None):
+    """把 "WxH" 形式的缺省几何居中到工作区，返回 "WxH+X+Y"。
+
+    只给 WxH 时 Tk 会把窗口丢在级联起点（34, 57，就在屏幕左上角），
+    所以详情/洞察/设置这些没几何记忆的窗口必须显式给坐标。
+    """
+    import re
+    m = re.match(r"^\s*(\d+)x(\d+)\s*$", default or "")
+    if not m:
+        return default
+    w, h = int(m.group(1)), int(m.group(2))
+    left, top, right, bottom = work if work else work_area()
+    x = left + max((right - left - w) // 2, 0)
+    y = top + max((bottom - top - h) // 2, 0)
+    return "%dx%d+%d+%d" % (w, h, x, y)
+
+def card_underlay(canvas, w, h, radius=None, fill=None, border=None):
+    """铺一张圆角卡片底：外层边框色 + 内层填充色收 1px。
+
+    ChartCanvas.round_rect 不支持描边——它把 kwargs 原样传给两个 create_rectangle，
+    outline 会横穿卡片中间，所以边框只能靠双层填充叠出来。
+    """
+    radius = Design.CARD_RADIUS if radius is None else radius
+    fill = fill or Design.CARD_FILL
+    border = border or Design.CARD_BORDER
+    canvas.delete("all")
+    if w <= 2 or h <= 2:
+        return
+    ChartCanvas.round_rect(canvas, 0, 0, w, h, radius, fill=border)
+    ChartCanvas.round_rect(canvas, 1, 1, w - 1, h - 1, max(radius - 1, 0), fill=fill)
+
+def rounded_card(parent, padx=12, pady=8, radius=None, fill=None, border=None,
+                 bg=None, expand=False):
+    """圆角卡片容器，返回 (card, content)。
+
+    content 是真正放控件的 Frame，背景是 CARD_FILL；它按 padx/pady 内缩，
+    内缩量（默认 12）大于圆角（10），方角就不会盖住卡片的圆角。
+    card 直接 pack/grid 即可。content 的子控件 bg 要设成 CARD_FILL，不是 BACKGROUND。
+    """
+    import tkinter as tk
+    radius = Design.CARD_RADIUS if radius is None else radius
+    fill = fill or Design.CARD_FILL
+    border = border or Design.CARD_BORDER
+    bg = bg or Design.BACKGROUND
+
+    card = tk.Frame(parent, bg=bg, highlightthickness=0)
+    canvas = tk.Canvas(card, bg=bg, highlightthickness=0, bd=0)
+    canvas.place(x=0, y=0, relwidth=1, relheight=1)
+    content = tk.Frame(card, bg=fill, highlightthickness=0)
+    content.pack(fill=tk.BOTH if expand else tk.X, expand=expand,
+                 padx=padx, pady=pady)
+
+    def _redraw(event, c=canvas, r=radius, f=fill, b=border):
+        card_underlay(c, event.width, event.height, r, f, b)
+
+    canvas.bind("<Configure>", _redraw)
+    card.underlay = canvas
+    card.content = content
+    return card, content
+
+def card_title(parent, title, command=None):
+    """卡片标题行：标题（含 emoji 图标）在左，`›` 在右，对齐 mac createCompactHeader。
+
+    返回 row，command 不为 None 时整行可点。
+    """
+    import tkinter as tk
+    row = tk.Frame(parent, bg=Design.CARD_FILL, highlightthickness=0)
+    row.pack(fill=tk.X)
+    tk.Label(row, text=title, fg=Design.TEXT_PRIMARY, bg=Design.CARD_FILL,
+             font=Design.FONT_CARD_TITLE, anchor='w').pack(side=tk.LEFT)
+    tk.Label(row, text="›", fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+             font=Design.FONT_CHEVRON).pack(side=tk.RIGHT)
+    return row
+
+def section_title(parent, text, padx=16, pady=(12, 2), bg=None):
+    """非卡片小节标题（mac 的「趋势」那类），没有 `›`。"""
+    import tkinter as tk
+    bg = bg or Design.BACKGROUND
+    tk.Label(parent, text=text, fg=Design.TEXT_PRIMARY, bg=bg,
+             font=Design.FONT_SECTION_TITLE, anchor='w').pack(
+        anchor='w', padx=padx, pady=pady)
+
+def muted_line(parent, text, padx=20, bg=None, pady=2):
+    """灰色说明行。"""
+    import tkinter as tk
+    bg = bg or Design.BACKGROUND
+    tk.Label(parent, text=text, fg=Design.TEXT_MUTED, bg=bg,
+             font=Design.FONT_UI_SMALL, anchor='w').pack(fill=tk.X, padx=padx, pady=pady)
+
+def flat_button(parent, text, cmd, primary=False):
+    """扁平按钮（洞察/设置页的工具按钮）。"""
+    import tkinter as tk
+    return tk.Button(
+        parent, text=text, command=cmd,
+        bg=Design.BRAND if primary else Design.CARD_FILL, fg=Design.TEXT_PRIMARY,
+        activebackground=Design.BTN_BG_HOVER, activeforeground=Design.TEXT_PRIMARY,
+        relief=tk.FLAT, bd=0, padx=12, pady=4, cursor="hand2",
+        font=Design.FONT_UI_SMALL)
+
+def semantic_color(role, **ctx):
+    """mac 的语义取色规则集中在这里，别处不要各写各的。
+
+    role: primary / secondary / muted / data / bigNumber / accent / cache_rate
+    """
+    if role == "primary":
+        return Design.TEXT_PRIMARY
+    if role == "secondary":
+        return Design.TEXT_SECONDARY
+    if role == "muted":
+        return Design.TEXT_MUTED
+    if role == "data":
+        return Design.DATA
+    if role == "bigNumber":
+        return Design.BIG_NUMBER
+    if role == "accent":
+        return Design.BRAND
+    if role == "cache_rate":
+        # mac cacheRateColor：rate > 75 成功色，否则警告色（75.0% 恰好算警告）
+        rate = float(ctx.get("rate", 0) or 0)
+        return Design.SUCCESS if rate > 75 else Design.WARNING
+    return Design.TEXT_PRIMARY
+
+def glow_text(canvas, x, y, text, font=None, color=None, anchor="w"):
+    """大数字带光晕（mac 的 .shadow(accent.opacity(glowAlpha), radius: glowRadius)）。
+
+    tkinter 没有阴影，用多圈半透明同字叠出柔光，真文字压在最上面。
+    没走 PIL：_pil_font 在没装雅黑的机器上会回落到默认字体，而 _build 会被
+    tests/ui_fixture 在裸 Frame 上调用，不该多出图片资源依赖。
+    """
+    import math
+    font = font or Design.FONT_BIG
+    color = color or Design.BIG_NUMBER
+    halo = blend(color, Design.BACKGROUND, Design.GLOW_ALPHA * 0.30)
+    for ring in (1.0, 0.45):
+        r = max(1.0, Design.GLOW_RADIUS * ring)
+        for i in range(8):
+            angle = 2 * math.pi * i / 8
+            canvas.create_text(x + r * math.cos(angle), y + r * math.sin(angle),
+                               text=text, fill=halo, font=font, anchor=anchor)
+    return canvas.create_text(x, y, text=text, fill=color, font=font, anchor=anchor)
 
 class ChartReadout:
     """图表拖选读数（对齐 mac 的 BarReadoutChart / LineTrendChart）
@@ -518,14 +751,12 @@ class ChartReadout:
         if dx:
             self.canvas.move(item, dx, 0)
 
-
 def format_credits(value):
     """积分显示：整数不带小数点，小数保留两位（与 mac fmtCredits 同口径）"""
     v = float(value or 0)
     if v == round(v) and abs(v) < 100_000:
         return str(int(v))
     return "%.2f" % v
-
 
 def _on_gui(method):
     """把整个方法体调度到 GUI 线程执行
@@ -539,7 +770,6 @@ def _on_gui(method):
         self._ui(lambda: method(self, *args, **kwargs))
     return wrapper
 
-
 class PopoverWindow:
     """托盘左键弹出的自绘面板（对齐 macOS 版 popover 的观感）
 
@@ -547,7 +777,7 @@ class PopoverWindow:
     """
 
     WIDTH = 300          # 默认宽；设置里开了宽版弹窗后为 380
-    PAD = 12
+    PAD = 14             # mac 内容左右内边距 14
     RADIUS = 10
     BTN_HEIGHT = 40
     BTN_GAP = 4
@@ -609,7 +839,7 @@ class PopoverWindow:
         inner.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
 
         body = tk.Frame(inner, bg=Design.BACKGROUND)
-        body.pack(fill=tk.BOTH, expand=True, padx=self.PAD, pady=(8, 6))
+        body.pack(fill=tk.BOTH, expand=True, padx=self.PAD, pady=(10, 6))
 
         self._build(body)
 
@@ -681,9 +911,13 @@ class PopoverWindow:
         except Exception:
             pass
 
-    @staticmethod
-    def _position(win, height):
-        """面板贴在光标上方（托盘在右下角），并钳制在工作区内"""
+    def _position(self, win, height):
+        """面板贴在光标上方（托盘在右下角），并钳制在工作区内
+
+        必须是实例方法：WIDTH 在 show() 里按宽版弹窗设置改成 380，
+        而且 staticmethod 里没有 self，原来那行 self.WIDTH 直接 NameError，
+        geometry 设不上，窗口就停在默认的左上角 (0,0)。
+        """
         cx, cy = win.winfo_pointerxy()
         left, top, right, bottom = PopoverWindow._work_area(win)
         width = self.WIDTH
@@ -698,16 +932,9 @@ class PopoverWindow:
     def _work_area(win):
         """工作区（排除任务栏）"""
         try:
-            import ctypes
-            from ctypes import wintypes
-            rect = wintypes.RECT()
-            # SPI_GETWORKAREA = 0x0030
-            if ctypes.windll.user32.SystemParametersInfoW(
-                    0x0030, 0, ctypes.byref(rect), 0):
-                return rect.left, rect.top, rect.right, rect.bottom
+            return work_area()
         except Exception:
-            pass
-        return 0, 0, win.winfo_screenwidth(), win.winfo_screenheight()
+            return 0, 0, win.winfo_screenwidth(), win.winfo_screenheight()
 
     @staticmethod
     def _round_corners(win, radius):
@@ -1027,12 +1254,17 @@ class PopoverWindow:
             for i, (icon, label, _cmd) in enumerate(buttons):
                 x1 = i * (bw + self.BTN_GAP)
                 x2 = x1 + bw
-                fill = Design.BTN_BG_HOVER if i == state["index"] else Design.BTN_BG
-                ChartCanvas.round_rect(bar, x1, 0, x2, self.BTN_HEIGHT, 6, fill=fill)
+                fill = Design.BTN_BG_HOVER if i == state["index"] else Design.CARD_FILL
+                # 边框靠双层叠出来：round_rect 不支持描边（outline 会横穿中间）
+                ChartCanvas.round_rect(bar, x1, 0, x2, self.BTN_HEIGHT, 8,
+                                       fill=Design.CARD_BORDER)
+                ChartCanvas.round_rect(bar, x1 + 1, 1, x2 - 1, self.BTN_HEIGHT - 1, 7,
+                                       fill=fill)
                 cx = (x1 + x2) / 2
-                bar.create_text(cx, 13, text=icon, fill=Design.TEXT_PRIMARY,
+                # mac BarActionButton：图标与文字都是 textSecondary
+                bar.create_text(cx, 13, text=icon, fill=Design.TEXT_SECONDARY,
                                 font=Design.FONT_BTN_ICON)
-                bar.create_text(cx, 28, text=label, fill=Design.TEXT_PRIMARY,
+                bar.create_text(cx, 28, text=label, fill=Design.TEXT_SECONDARY,
                                 font=Design.FONT_BTN)
 
         def on_motion(event):
@@ -1090,6 +1322,20 @@ class PopoverWindow:
             except Exception:
                 pass
 
+    def _bind_card(self, card, command):
+        """卡片整块可点，但不加 hover 高亮（mac 的 TodayCard/ModelCard 只有 onTapGesture）。
+
+        不能复用 _bind_row：它会把 hover 背景刷到所有后代上，而卡片的圆角垫底是
+        place 管理的 Canvas，一染色就把圆角糊成方块。
+        """
+        card._row_command = command
+        for widget in self._descendants(card):
+            widget.bind("<Button-1>", lambda e, c=command: c())
+            try:
+                widget.configure(cursor="hand2")
+            except Exception:
+                pass
+
     @staticmethod
     def _descendants(widget):
         yield widget
@@ -1108,6 +1354,12 @@ class PopoverWindow:
     @staticmethod
     def _set_bg(widget, color):
         for w in PopoverWindow._descendants(widget):
+            # place 管理的是卡片圆角垫底 Canvas，染色会把圆角糊成方块，跳过
+            try:
+                if w.winfo_manager() == "place":
+                    continue
+            except Exception:
+                pass
             try:
                 w.configure(bg=color)
             except Exception:
@@ -1134,7 +1386,6 @@ class PopoverWindow:
     def _on_quit(self):
         self.close()
         self.app.quit_app(self.app.icon, None)
-
 
 class CcBarTray:
     # 问候语原文表在 l10n 里（原文即词条 key）；显示时才经 L() 取词条，
@@ -1342,23 +1593,28 @@ class CcBarTray:
         return img.resize((size, size), Image.LANCZOS)
 
     def update_icon_color(self):
-        """根据今日用量更新托盘图标颜色
+        """闪电 LED 变色（口径与 mac AppDelegate 的 LED 段逐条对齐）
 
-        默认按绝对用量走色阶（绿 → 黄 → 橙，超 8000 万才红）；「红色门槛」
-        （万 tokens，0=关闭）另有增量语义（mac ledRedThreshold）：本次刷新的
-        今日增量 ≥ 门槛时当次强制标红。首次没有基准不触发，跨天回退也不触发。
+        比的是「本次刷新相对上次刷新的今日增量」，不是今日总量的绝对值：
+          · 没有基准（首次）或增量 ≤ 0（含跨天回退）→ 静息灰（mac 模板单色）
+          · 0 < 增量 < 红线                        → 绿
+          · 增量 ≥ 红线（红线 > 0 才生效）          → 红
+        红线 = 「红色门槛」（万 tokens，0=关闭）× 10000。
         """
         today = self.query_day_stats(0)
         if not today:
             return
 
         total = today["total"]
-        color = today_usage_color(total)
-
-        threshold = int(self.settings.get("led_red_threshold") or 0) * 10_000
         last = getattr(self, "_led_last_total", None)
-        if threshold > 0 and last is not None and total >= last and total - last >= threshold:
-            color = usage_color(1.0)        # 强制红
+        color = Design.LED_IDLE
+        if last is not None:
+            delta = total - last
+            red_line = max(int(self.settings.get("led_red_threshold") or 0), 0) * 10_000
+            if red_line > 0 and delta >= red_line:
+                color = Design.LED_RED
+            elif delta > 0:
+                color = Design.LED_GREEN
         self._led_last_total = total
 
         if color == getattr(self, "_last_icon_color", None):
@@ -1734,105 +1990,58 @@ class CcBarTray:
         return total_str
 
     def build_menu(self):
-        """构建菜单"""
+        """托盘右键菜单：一屏摊开所有数据，纯显示不带入口
+
+        动作（复制 / 刷新 / 洞察 / 设置 / 退出）全在左键弹窗的按钮栏里，
+        右键这里只负责看数：用量、积分、渠道分布、模型分布——不分层、不点开子菜单，
+        一次右键就看全。顺带跑一次用量预警检查（历史做法，通知不依赖菜单内容）。
+        """
         today = self.query_day_stats(0)
-        yesterday = self.query_day_stats(1)
-        week = self.query_day_stats(7)
-        month = self.query_day_stats(30)
-        total = self.query_total_stats()
-        models = self.query_model_breakdown()
-        work_hours = self.query_work_hours()
-
-        menu_items = []
-
-        # default=True 的项会被左键点击触发，右键仍出原生菜单
-        menu_items.append(pystray.MenuItem(L("打开面板"), self.toggle_popover, default=True))
-
-        greeting = L(random.choice(self.GREETINGS))
-        menu_items.append(pystray.MenuItem(greeting[:16], None, enabled=False))
-        menu_items.append(pystray.Menu.SEPARATOR)
-
-        # 今日数据
         if today:
             self.check_warning(today)
 
-            today_str = self.fmt_tokens(today["total"])
-            menu_items.append(pystray.MenuItem(L("📊 今日: %s") % today_str,
-                                               self.show_hourly_detail_today))
+        # 积分（Trae 口径；没接入就是 0）
+        try:
+            credits = float(self.store.query_today_credits() or 0)
+        except Exception:
+            credits = 0.0
 
-            menu_items.append(pystray.MenuItem(
-                L("  🔢 请求: %d次") % today['reqs'], None, enabled=False))
+        def info(text):
+            # 纯展示行：action=None 就是点了不做事（pystray 会包成空操作）。
+            # 不置灰：整份菜单都是数据，灰掉就没法看了。
+            return pystray.MenuItem(text, None)
 
-            # 缓存命中率
-            total_input = today["input"] + today["cache_create"] + today["cache_read"]
-            cache_rate = (today["cache_read"] / total_input * 100) if total_input > 0 else 0
-            menu_items.append(pystray.MenuItem(
-                L("  💾 缓存命中: %.1f%%") % cache_rate, None, enabled=False))
-
-            if work_hours:
-                menu_items.append(pystray.MenuItem(
-                    L("  ⏱️ 时长: %sh") % work_hours, None, enabled=False))
-        else:
-            if self.store.attached:
-                menu_items.append(pystray.MenuItem(L("📊 今日暂无数据"), None, enabled=False))
-            else:
-                menu_items.append(pystray.MenuItem(L("🌶️ 未找到数据源，请去设置"), self.show_settings))
-
-        menu_items.append(pystray.Menu.SEPARATOR)
-
-        # 模型分布
-        if models:
-            menu_items.append(pystray.MenuItem(L("🤖 模型分布"), self.show_model_detail))
-            for m in models[:3]:
-                model_name = m["model"][:15] + "…" if len(m["model"]) > 15 else m["model"]
-                menu_items.append(pystray.MenuItem(f"  {model_name}: {self.fmt_tokens(m['total'])}", None, enabled=False))
-            menu_items.append(pystray.Menu.SEPARATOR)
-
-        # 昨日
-        if yesterday:
-            menu_items.append(pystray.MenuItem(
-                L("📅 昨日: %s") % self.fmt_tokens(yesterday['total']),
-                self.show_hourly_detail_yesterday))
-
-        # 近7天
-        if week:
-            menu_items.append(pystray.MenuItem(
-                L("📅 近7天: %s") % self.fmt_tokens(week['total']),
-                self.show_weekly_detail))
-
-        # 近30天
-        if month:
-            menu_items.append(pystray.MenuItem(
-                L("📆 近30天: %s") % self.fmt_tokens(month['total']),
-                self.show_monthly_detail))
-
-        # 历史总量（按月汇总窗口，不是近30天）
-        if total:
-            menu_items.append(pystray.MenuItem(
-                L("📈 历史总量: %s") % self.fmt_tokens(total['total']),
-                self.show_all_time_detail))
-
-        menu_items.append(pystray.Menu.SEPARATOR)
-
-        # 刷新
-        menu_items.append(pystray.MenuItem(L("🔄 刷新"), self.refresh_data))
-
-        # 洞察中心
-        menu_items.append(pystray.MenuItem(L("📈 洞察中心"), self.show_insights))
-
-        # 备份数据
-        menu_items.append(pystray.MenuItem(L("💾 备份数据"), self.backup_data))
-
-        # 检查更新
-        menu_items.append(pystray.MenuItem(L("⬇️ 检查更新"), self.check_for_updates))
-
-        # 设置
-        menu_items.append(pystray.MenuItem(L("⚙️ 设置"), self.show_settings))
-
-        # 退出
-        menu_items.append(pystray.MenuItem(L("❌ 退出"), self.quit_app))
-
+        menu_items = [
+            # 左键触发项，故意不显示。pystray 左键走 Menu.__call__，它在 items 里
+            # 找 default=True 的那条；右键走 _visible_items()，visible=False 会被滤掉。
+            # 这条没了左键就是死的——托盘没有任何别的左键入口。
+            pystray.MenuItem(L("打开面板"), self.toggle_popover,
+                             default=True, visible=False),
+            info(L("📊 用量: %s")
+                 % (self.fmt_tokens(today["total"]) if today else "-")),
+            info(L("💳 积分: %s") % format_credits(credits)),
+            pystray.Menu.SEPARATOR,
+            info(L("📡 渠道分布")),
+        ]
+        menu_items.extend(self._menu_stat_rows(
+            [(self.store.source_display_name(s["source"]), s["total"])
+             for s in self.query_source_breakdown()]))
+        menu_items.append(info(L("🤖 模型分布")))
+        menu_items.extend(self._menu_stat_rows(
+            [(m["model"], m["total"])
+             for m in (self.query_model_breakdown() or [])]))
         return menu_items
+
+    def _menu_stat_rows(self, pairs):
+        """缩进的「名称  用量」展示行；空数据留一行占位，别让小节整个消失"""
+        if not pairs:
+            return [pystray.MenuItem("  " + L("暂无数据"), None)]
+        rows = []
+        for name, total in pairs:
+            label = name if len(name) <= 18 else name[:18] + "…"
+            rows.append(pystray.MenuItem(
+                "  %s  %s" % (label, self.fmt_tokens(total)), None))
+        return rows
 
     # ------------------------------------------------------------ 详情窗口公共件
     # 五个详情窗口（每小时/模型/近7天/近30天/历史总量）共用：统计卡行、
@@ -1899,14 +2108,12 @@ class CcBarTray:
         row.pack(fill=tk.X)
         for i, (label, value, accent) in enumerate(stats):
             row.grid_columnconfigure(i, weight=1, uniform="detailstat")
-            card = tk.Frame(row, bg=Design.CARD_FILL,
-                            highlightbackground=Design.CARD_BORDER,
-                            highlightthickness=1, padx=10, pady=8)
+            card, body = rounded_card(row, padx=10, pady=8)
             card.grid(row=0, column=i, sticky="nsew", padx=4, pady=2)
-            tk.Label(card, text=label, fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+            tk.Label(body, text=label, fg=semantic_color("muted"), bg=Design.CARD_FILL,
                      font=Design.FONT_UI_SMALL, anchor='w').pack(fill=tk.X)
-            tk.Label(card, text=value, fg=accent or Design.DATA, bg=Design.CARD_FILL,
-                     font=("Microsoft YaHei UI", 13, "bold"), anchor='w').pack(fill=tk.X)
+            tk.Label(body, text=value, fg=accent or Design.DATA, bg=Design.CARD_FILL,
+                     font=Design.FONT_DETAIL_STAT, anchor='w').pack(fill=tk.X)
         return row
 
     @staticmethod
@@ -1918,9 +2125,9 @@ class CcBarTray:
         header.pack(fill=tk.X, padx=padx)
         for text, width, anchor in cols:
             tk.Label(header, text=text, width=width, anchor=anchor,
-                     fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
+                     fg=semantic_color("muted"), bg=Design.BACKGROUND,
                      font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT)
-        tk.Frame(root, bg=Design.CARD_BORDER, height=1).pack(fill=tk.X, padx=padx, pady=4)
+        tk.Frame(root, bg=Design.SEPARATOR, height=1).pack(fill=tk.X, padx=padx, pady=4)
 
     @staticmethod
     def _detail_total_row(parent, cells):
@@ -1932,7 +2139,7 @@ class CcBarTray:
         for text, width, anchor in cells:
             tk.Label(row, text=text, width=width, anchor=anchor,
                      fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
-                     font=("Consolas", 10, "bold")).pack(side=tk.LEFT)
+                     font=Design.FONT_VALUE).pack(side=tk.LEFT)
         return row
 
     @staticmethod
@@ -2038,14 +2245,21 @@ class CcBarTray:
         # 至少露出一角，否则用户再也拖不回来
         return (x + w > 40 and y + h > 40 and x < sw - 40 and y < sh - 40)
 
+    # Tk 的级联起点在 (34, 57) 附近；落在这个角落里的"记忆"其实是当年没给坐标的遗留，
+    # 不是用户放的位置，还原时当没放过处理，改走居中。
+    CASCADE_ARTIFACT_ZONE = 80
+
     def _apply_window_geometry(self, root, name, default):
-        """还原窗口几何：缺省/非法/已移出屏幕都回落默认值"""
+        """还原窗口几何：缺省/非法/已移出屏幕/级联遗留，都回落到居中"""
         parsed = self._parse_geometry(self.settings.get("window_geometry_%s" % name))
-        if parsed and self._geometry_on_screen(root, parsed[2], parsed[3],
-                                               parsed[0], parsed[1]):
-            root.geometry("%dx%d+%d+%d" % parsed)
-            return True
-        root.geometry(default)
+        if parsed:
+            w, h, x, y = parsed
+            artifact = (abs(x) < self.CASCADE_ARTIFACT_ZONE
+                        and abs(y) < self.CASCADE_ARTIFACT_ZONE)
+            if not artifact and self._geometry_on_screen(root, x, y, w, h):
+                root.geometry("%dx%d+%d+%d" % parsed)
+                return True
+        root.geometry(center_geometry(default))
         return False
 
     def _remember_window_geometry(self, root, name):
@@ -2864,7 +3078,7 @@ class CcBarTray:
         """
         from PIL import Image, ImageDraw
 
-        img = Image.new("RGB", (width, height), "#1E1E1E")
+        img = Image.new("RGB", (width, height), Design.CARD_FILL)
         d = ImageDraw.Draw(img)
         if not series:
             d.text((width // 2, height // 2), L("暂无数据"), fill="#6B6B6B",
@@ -2911,7 +3125,7 @@ class CcBarTray:
         """深底折线图。points: [(label, value)]"""
         from PIL import Image, ImageDraw
 
-        img = Image.new("RGB", (width, height), "#1E1E1E")
+        img = Image.new("RGB", (width, height), Design.CARD_FILL)
         d = ImageDraw.Draw(img)
         if len(points) < 2:
             d.text((width // 2, height // 2), L("暂无数据"), fill="#6B6B6B",
@@ -2997,18 +3211,17 @@ class CcBarTray:
 
     @staticmethod
     def _insight_card(parent, row, col, title, value, sub=""):
-        """洞察页统计卡（两列网格中的一项）"""
+        """洞察页统计卡（两列网格中的一项，mac insightCard）"""
         import tkinter as tk
 
-        card = tk.Frame(parent, bg=Design.CARD_FILL, highlightbackground=Design.CARD_BORDER,
-                        highlightthickness=1, padx=14, pady=10)
+        card, body = rounded_card(parent, padx=14, pady=14)
         card.grid(row=row, column=col, sticky="nsew", padx=6, pady=6)
-        tk.Label(card, text=title, fg=Design.TEXT_SECONDARY, bg=Design.CARD_FILL,
-                 font=("Microsoft YaHei UI", 10), anchor='w').pack(fill=tk.X)
-        tk.Label(card, text=value, fg=Design.BIG_NUMBER, bg=Design.CARD_FILL,
-                 font=("Microsoft YaHei UI", 17, "bold"), anchor='w').pack(fill=tk.X)
+        tk.Label(body, text=title, fg=semantic_color("secondary"), bg=Design.CARD_FILL,
+                 font=Design.FONT_UI, anchor='w').pack(fill=tk.X)
+        tk.Label(body, text=value, fg=Design.BIG_NUMBER, bg=Design.CARD_FILL,
+                 font=Design.FONT_INSIGHT_VALUE, anchor='w').pack(fill=tk.X)
         if sub:
-            tk.Label(card, text=sub, fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+            tk.Label(body, text=sub, fg=semantic_color("muted"), bg=Design.CARD_FILL,
                      font=Design.FONT_UI_SMALL, anchor='w').pack(fill=tk.X)
 
     @_on_gui
@@ -3073,7 +3286,7 @@ class CcBarTray:
 
         root = tk.Toplevel(self._ui_root)
         root.title(L("洞察中心"))
-        root.geometry("760x600")
+        root.geometry(center_geometry("760x600"))
         root.minsize(700, 480)
         root.configure(bg=Design.BACKGROUND)
 
@@ -3101,12 +3314,18 @@ class CcBarTray:
             return f
 
         def png_label(frame, img):
-            lbl = tk.Label(frame, bg=Design.CARD_FILL, highlightbackground=Design.CARD_BORDER,
-                           highlightthickness=1)
+            """图表卡片：圆角卡里放 PIL 图。
+
+            图的底色必须和卡片填充同为 CARD_FILL，否则圆角处会露出一块方角深色。
+            padx 必须 ≥ 圆角半径，否则内容 Frame 的方角会盖住卡片圆角。
+            """
+            card, body = rounded_card(frame, padx=12, pady=8)
+            card.pack(fill=tk.X, padx=16, pady=(10, 4))
+            lbl = tk.Label(body, bg=Design.CARD_FILL)
             photo = ImageTk.PhotoImage(img)
             lbl.configure(image=photo)
             lbl.image = photo
-            lbl.pack(fill=tk.X, padx=16, pady=(10, 4))
+            lbl.pack(fill=tk.X)
             return lbl
 
         def scroll_page(parent):
@@ -3133,20 +3352,15 @@ class CcBarTray:
 
             return inner, bind_wheel
 
+        # 三个助手收敛到模块级原语，和设置页共用一套（原来两处各自实现、参数还不一样）
         def section(parent, text):
-            tk.Label(parent, text=text, fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
-                     font=("Microsoft YaHei UI", 10, "bold")).pack(anchor='w', padx=16, pady=(12, 2))
+            section_title(parent, text, padx=16, pady=(12, 2))
 
         def muted(parent, text):
-            tk.Label(parent, text=text, fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
-                     font=Design.FONT_UI_SMALL, anchor='w').pack(fill=tk.X, padx=20, pady=2)
+            muted_line(parent, text, padx=20)
 
         def btn(parent, text, cmd, primary=False):
-            return tk.Button(parent, text=text, command=cmd,
-                             bg=Design.BRAND if primary else Design.CARD_FILL,
-                             fg=Design.TEXT_PRIMARY, activebackground=Design.BTN_BG_HOVER,
-                             activeforeground=Design.TEXT_PRIMARY, relief="flat", bd=0,
-                             padx=12, pady=4, cursor="hand2", font=Design.FONT_UI_SMALL)
+            return flat_button(parent, text, cmd, primary)
 
         money = lambda v: f"${v:.2f}"
 
@@ -3159,37 +3373,45 @@ class CcBarTray:
         for i, (title, value, estimate) in enumerate(
                 [(L("今日费用"), cost_today, est[0]), (L("近 7 天"), cost7, est[7]),
                  (L("近 30 天"), cost30, est[30])]):
-            card = tk.Frame(card_row, bg=Design.CARD_FILL, highlightbackground=Design.CARD_BORDER,
-                            highlightthickness=1, padx=16, pady=12)
+            card, body = rounded_card(card_row, padx=16, pady=12)
             card.grid(row=0, column=i, sticky="nsew", padx=6, pady=4)
             card_row.grid_columnconfigure(i, weight=1)
-            tk.Label(card, text=title, fg=Design.TEXT_SECONDARY, bg=Design.CARD_FILL,
-                     font=("Microsoft YaHei UI", 10), anchor='w').pack(fill=tk.X)
-            tk.Label(card, text=money(value + estimate), fg=Design.BIG_NUMBER, bg=Design.CARD_FILL,
-                     font=("Microsoft YaHei UI", 19, "bold"), anchor='w').pack(fill=tk.X)
+            tk.Label(body, text=title, fg=semantic_color("secondary"), bg=Design.CARD_FILL,
+                     font=Design.FONT_UI, anchor='w').pack(fill=tk.X)
+            tk.Label(body, text=money(value + estimate), fg=Design.BIG_NUMBER, bg=Design.CARD_FILL,
+                     font=Design.FONT_INSIGHT_VALUE, anchor='w').pack(fill=tk.X)
             if estimate > 0:
                 # mac 版卡片小字：实测 $a · 估算 $b
-                tk.Label(card, text=L("实测 %s · 估算 %s") % (money(value), money(estimate)),
-                         fg=Design.TEXT_MUTED, bg=Design.CARD_FILL, font=Design.FONT_MONO_TINY,
-                         anchor='w').pack(fill=tk.X)
+                tk.Label(body, text=L("实测 %s · 估算 %s") % (money(value), money(estimate)),
+                         fg=semantic_color("muted"), bg=Design.CARD_FILL,
+                         font=Design.FONT_MONO_TINY, anchor='w').pack(fill=tk.X)
 
         if budget > 0:
             # 月度预算卡（mac CostPage.budgetCard 同款文案与字段）
             ratio = cost_mtd / budget
             over = cost_mtd > budget
             projected_cost = cost_mtd / mtd_elapsed * month_days if mtd_elapsed else 0.0
-            bcard = tk.Frame(cost_page, bg=Design.CARD_FILL, highlightbackground=Design.CARD_BORDER,
-                             highlightthickness=1, padx=16, pady=12)
+            bcard, bbody = rounded_card(cost_page, padx=16, pady=12)
             bcard.pack(fill=tk.X, padx=16, pady=(10, 0))
-            tk.Label(bcard, text=L("本月预算 $%.2f") % budget, fg=Design.TEXT_PRIMARY,
-                     bg=Design.CARD_FILL, font=("Microsoft YaHei UI", 11, "bold"),
-                     anchor='w').pack(fill=tk.X)
-            bar = tk.Frame(bcard, bg=Design.BTN_BG, height=6)
+            tk.Label(bbody, text=L("本月预算 $%.2f") % budget, fg=Design.TEXT_PRIMARY,
+                     bg=Design.CARD_FILL, font=Design.FONT_TITLE, anchor='w').pack(fill=tk.X)
+            # 预算进度条：胶囊形（圆角 = 半高），同 mac
+            bar_h = Design.BAR_HEIGHT
+            bar = tk.Canvas(bbody, height=bar_h, bg=Design.CARD_FILL, highlightthickness=0)
             bar.pack(fill=tk.X, pady=(8, 6))
-            bar.pack_propagate(False)
             fill_ratio = min(max(ratio, 0.0), 1.0)
-            tk.Frame(bar, bg=usage_color(fill_ratio)).place(relwidth=fill_ratio, relheight=1.0)
-            brow = tk.Frame(bcard, bg=Design.CARD_FILL)
+
+            def _draw_budget(event, c=bar, fr=fill_ratio):
+                c.delete("all")
+                w = max(event.width, 1)
+                r = bar_h / 2
+                ChartCanvas.round_rect(c, 0, 0, w, bar_h, r, fill=Design.BTN_BG)
+                if fr > 0:
+                    ChartCanvas.round_rect(c, 0, 0, max(w * fr, 2), bar_h, r,
+                                           fill=usage_color(fr))
+
+            bar.bind("<Configure>", _draw_budget)
+            brow = tk.Frame(bbody, bg=Design.CARD_FILL)
             brow.pack(fill=tk.X)
             tk.Label(brow, text=L("本月已花 ") + money(cost_mtd), fg=Design.TEXT_PRIMARY,
                      bg=Design.CARD_FILL, font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT)
@@ -3198,10 +3420,10 @@ class CcBarTray:
                      else (L("剩余 ") + money(budget - cost_mtd)),
                      fg=Design.ERROR if over else Design.SUCCESS, bg=Design.CARD_FILL,
                      font=Design.FONT_MONO_SMALL).pack(side=tk.RIGHT)
-            tk.Label(bcard,
+            tk.Label(bbody,
                      text=L("按当前速率预计 %s · 已用预算 %.0f%%") % (money(projected_cost), ratio * 100),
-                     fg=Design.TEXT_MUTED, bg=Design.CARD_FILL, font=Design.FONT_UI_SMALL,
-                     anchor='w').pack(fill=tk.X, pady=(4, 0))
+                     fg=semantic_color("muted"), bg=Design.CARD_FILL,
+                     font=Design.FONT_UI_SMALL, anchor='w').pack(fill=tk.X, pady=(4, 0))
 
         section(cost_page, L("近 30 天费用走势"))
         cost_series = [(d[5:], {L("费用"): c}) for d, c in cost_daily]
@@ -3572,24 +3794,34 @@ class CcBarTray:
         f_ch = tab(L("渠道"))
         ch_page, ch_wheel = scroll_page(f_ch)
         section(ch_page, L("近 30 天渠道用量（堆叠）"))
-        src_names = sorted({r[1] for r in channels})
-        src_colors = {"cc-switch": "#4A90E2", "zcode": "#34C759", "trae": "#AF52DE"}
-        palette = {n: src_colors.get(n, f"#{hash(n) % 0xFFFFFF:06X}") for n in src_names}
+        # 按显示名归并：cc-switch-rollup 是 cc-switch 的历史聚合源，
+        # 直接按 source 分键会拆成两条都叫「cc-switch」的序列。
         by_date = {}
         for d, src, tok in channels:
-            by_date.setdefault(d, {}).setdefault(src, 0)
-            by_date[d][src] += tok
+            name = store.source_display_name(src)
+            by_date.setdefault(d, {}).setdefault(name, 0)
+            by_date[d][name] += tok
+        src_names = sorted({n for v in by_date.values() for n in v})
+        src_colors = {"cc-switch": "#4A90E2", "ZCode": "#34C759", "Trae": "#AF52DE"}
+        # 兜底色按序号取；hash() 随 PYTHONHASHSEED 变，不能拿来定颜色
+        palette = {n: src_colors.get(n, Design.MODEL_COLORS[i % len(Design.MODEL_COLORS)])
+                   for i, n in enumerate(src_names)}
         ch_series = [(d[5:], by_date[d]) for d in sorted(by_date)]
         png_label(ch_page, self._bar_chart_png(ch_series, palette))
 
         section(ch_page, L("今日各渠道"))
-        today_src = [r for r in channels if r[0] == datetime.now().strftime("%Y-%m-%d")]
-        if not today_src:
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        today_map = {}
+        for r in channels:
+            if r[0] == today_str:
+                n = store.source_display_name(r[1])
+                today_map[n] = today_map.get(n, 0) + r[2]
+        if not today_map:
             muted(ch_page, L("暂无数据"))
-        for src, _d, tok in [(r[1], r[0], r[2]) for r in today_src]:
+        for name, tok in sorted(today_map.items(), key=lambda x: -x[1]):
             row = tk.Frame(ch_page, bg=Design.BACKGROUND)
             row.pack(fill=tk.X, padx=20)
-            tk.Label(row, text=f"● {store.source_display_name(src)}", fg=Design.BRAND,
+            tk.Label(row, text=f"● {name}", fg=Design.BRAND,
                      bg=Design.BACKGROUND, font=("Microsoft YaHei UI", 10, "bold")).pack(side=tk.LEFT)
             tk.Label(row, text=self.fmt_tokens(tok), fg=Design.DATA, bg=Design.BACKGROUND,
                      font=Design.FONT_MONO_SMALL).pack(side=tk.RIGHT)
@@ -3610,8 +3842,8 @@ class CcBarTray:
             app_by_date[d][name] += tok
         used_names = [n for n in app_names if any(n in v for v in app_by_date.values())]
         app_palette = {n: c for n, c in app_palette.items() if n in used_names}
-        for n in used_names:
-            app_palette.setdefault(n, f"#{(hash(n) * 7919) % 0xFFFFFF:06X}")
+        for i, n in enumerate(used_names):
+            app_palette.setdefault(n, Design.MODEL_COLORS[i % len(Design.MODEL_COLORS)])
         app_series = [(d[5:], app_by_date[d]) for d in sorted(app_by_date)]
         png_label(ch_page, self._bar_chart_png(app_series, app_palette))
 
@@ -3791,45 +4023,49 @@ class CcBarTray:
         for i, (title, value) in enumerate([(L("今日积分"), credits_today),
                                             (L("近 7 天"), credits7),
                                             (L("近 30 天"), credits30)]):
-            card = tk.Frame(cred_row, bg=Design.CARD_FILL,
-                            highlightbackground=Design.CARD_BORDER,
-                            highlightthickness=1, padx=16, pady=12)
+            card, body = rounded_card(cred_row, padx=16, pady=12)
             card.grid(row=0, column=i, sticky="nsew", padx=6, pady=4)
             cred_row.grid_columnconfigure(i, weight=1)
-            tk.Label(card, text=title, fg=Design.TEXT_SECONDARY, bg=Design.CARD_FILL,
-                     font=("Microsoft YaHei UI", 10), anchor='w').pack(fill=tk.X)
-            tk.Label(card, text=format_credits(value), fg=Design.BIG_NUMBER,
-                     bg=Design.CARD_FILL, font=("Microsoft YaHei UI", 19, "bold"),
+            tk.Label(body, text=title, fg=semantic_color("secondary"), bg=Design.CARD_FILL,
+                     font=Design.FONT_UI, anchor='w').pack(fill=tk.X)
+            tk.Label(body, text=format_credits(value), fg=Design.BIG_NUMBER,
+                     bg=Design.CARD_FILL, font=Design.FONT_INSIGHT_VALUE,
                      anchor='w').pack(fill=tk.X)
 
         if credits_ent:
             consumed, ent_total = credits_ent
-            ecard = tk.Frame(cred_page, bg=Design.CARD_FILL,
-                             highlightbackground=Design.CARD_BORDER,
-                             highlightthickness=1, padx=16, pady=12)
+            ecard, ebody = rounded_card(cred_page, padx=16, pady=12)
             ecard.pack(fill=tk.X, padx=16, pady=(10, 0))
-            tk.Label(ecard, text=L("积分余额（官方账单）"), fg=Design.TEXT_SECONDARY,
-                     bg=Design.CARD_FILL, font=("Microsoft YaHei UI", 10),
-                     anchor='w').pack(fill=tk.X)
-            erow = tk.Frame(ecard, bg=Design.CARD_FILL)
+            tk.Label(ebody, text=L("积分余额（官方账单）"), fg=semantic_color("secondary"),
+                     bg=Design.CARD_FILL, font=Design.FONT_UI, anchor='w').pack(fill=tk.X)
+            erow = tk.Frame(ebody, bg=Design.CARD_FILL)
             erow.pack(fill=tk.X, pady=(4, 0))
             tk.Label(erow, text=format_credits(consumed), fg=Design.DATA,
-                     bg=Design.CARD_FILL, font=("Microsoft YaHei UI", 19, "bold"),
+                     bg=Design.CARD_FILL, font=Design.FONT_INSIGHT_VALUE,
                      anchor='w').pack(side=tk.LEFT)
             tk.Label(erow, text=L("已用 / 共 %s") % format_credits(ent_total),
-                     fg=Design.TEXT_SECONDARY, bg=Design.CARD_FILL,
+                     fg=semantic_color("secondary"), bg=Design.CARD_FILL,
                      font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT, padx=(10, 0))
             ent_ratio = (consumed / ent_total) if ent_total > 0 else 0.0
             if ent_total > 0:
                 tk.Label(erow, text="%.0f%%" % (ent_ratio * 100), fg=Design.BRAND,
                          bg=Design.CARD_FILL, font=Design.FONT_MONO_SMALL).pack(side=tk.RIGHT)
                 # 胶囊进度条
-                bar = tk.Frame(ecard, bg=Design.BTN_BG, height=5)
+                bar_h = Design.BAR_HEIGHT
+                bar = tk.Canvas(ebody, height=bar_h, bg=Design.CARD_FILL, highlightthickness=0)
                 bar.pack(fill=tk.X, pady=(8, 0))
-                bar.pack_propagate(False)
                 fill_ratio = min(max(ent_ratio, 0.0), 1.0)
-                tk.Frame(bar, bg=blend(Design.BRAND, Design.CARD_FILL, 0.75)).place(
-                    relwidth=fill_ratio, relheight=1.0)
+
+                def _draw_ent(event, c=bar, fr=fill_ratio):
+                    c.delete("all")
+                    w = max(event.width, 1)
+                    r = bar_h / 2
+                    ChartCanvas.round_rect(c, 0, 0, w, bar_h, r, fill=Design.BTN_BG)
+                    if fr > 0:
+                        ChartCanvas.round_rect(c, 0, 0, max(w * fr, 2), bar_h, r,
+                                               fill=blend(Design.BRAND, Design.CARD_FILL, 0.75))
+
+                bar.bind("<Configure>", _draw_ent)
 
         section(cred_page, L("近 30 天积分走势"))
         if credits30 <= 0:
@@ -3883,11 +4119,11 @@ class CcBarTray:
 
         root = tk.Toplevel(self._ui_root)
         root.title(L("ccBar 设置"))
-        root.geometry("560x640")
+        root.geometry(center_geometry("560x640"))
         root.minsize(520, 420)
         root.configure(bg=Design.BACKGROUND)
 
-        tk.Label(root, text=L("⚙️ 设置"), font=Design.FONT_TITLE, fg=Design.TEXT_PRIMARY,
+        tk.Label(root, text=L("⚙️ 设置"), font=Design.FONT_WINDOW_TITLE, fg=Design.TEXT_PRIMARY,
                  bg=Design.BACKGROUND).pack(anchor='w', padx=24, pady=(18, 10))
         tk.Frame(root, bg=Design.SEPARATOR, height=1).pack(fill=tk.X, padx=24)
 
@@ -3942,11 +4178,7 @@ class CcBarTray:
             return entry
 
         def small_btn(parent, text, cmd, primary=False):
-            return tk.Button(parent, text=text, command=cmd,
-                             bg=Design.BRAND if primary else Design.CARD_FILL,
-                             fg=Design.TEXT_PRIMARY, activebackground=Design.BTN_BG_HOVER,
-                             activeforeground=Design.TEXT_PRIMARY, relief="flat", bd=0,
-                             padx=12, pady=4, cursor="hand2", font=Design.FONT_UI_SMALL)
+            return flat_button(parent, text, cmd, primary)
 
         def check_row(text, value):
             var = tk.BooleanVar(value=bool(value))
@@ -4518,16 +4750,18 @@ class CcBarTray:
         threading.Thread(target=worker, daemon=True).start()
 
     def get_tooltip_text(self):
-        """托盘悬停提示（对齐 macOS 版：今日 / 昨日 / 请求数 三行）"""
+        """托盘悬停提示：只显示今日用量；有积分才追加今日积分"""
         today = self.query_day_stats(0)
         if not today:
             return L("ccBar - 未找到数据")
-        lines = [L("今日：%s") % self.fmt_tokens(today["total"])]
-        yesterday = self.query_day_stats(1)
-        if yesterday:
-            lines.append(L("昨日：%s") % self.fmt_tokens(yesterday["total"]))
-        lines.append(L("请求数：%d") % int(today.get("reqs", 0)))
-        return "\n".join(lines)
+        text = L("今日用量：%s") % self.fmt_tokens(today["total"])
+        try:
+            credits = float(self.store.query_today_credits() or 0)
+        except Exception:
+            credits = 0.0
+        if credits > 0:
+            text += "\n" + L("今日积分：%s") % format_credits(credits)
+        return text
 
     def run(self):
         """运行应用"""
@@ -4542,11 +4776,10 @@ class CcBarTray:
         self.maybe_generate_weekly_report()
         self.sync_trae(interactive=False)
 
-        # 创建图标（按当前用量着色：浅绿 → 黄 → 橙，超过 8000万 才红）
-        today = self.query_day_stats(0)
-        initial_color = (today_usage_color(today["total"])
-                         if today else Design.BRAND)
+        # 创建图标：启动即静息灰（mac 同款，下一次刷新有增量才亮绿/红）
+        initial_color = Design.LED_IDLE
         self._last_icon_color = initial_color
+        self._led_last_total = None
         image = self.create_icon(initial_color)
 
         # 初始菜单
