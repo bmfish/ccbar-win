@@ -1048,10 +1048,9 @@ class PopoverWindow:
         self._hourly_sparkline(parent)
         self._separator(parent)
 
-        # 按钮栏（复制 / 刷新 / 洞察 / 设置 / 退出：5 格等宽，300px 面板放得下）
+        # 按钮栏（流水 / 洞察 / 设置 / 退出：4 格等宽，300px 面板放得下）
         self._button_bar(parent, [
-            ("📋", L("复制"), self._on_copy),
-            ("🔄", L("刷新"), self._on_refresh),
+            ("🧾", L("流水"), self._on_flow),
             ("📈", L("洞察"), self._on_insights),
             ("⚙️", L("设置"), self._on_settings),
             ("❌", L("退出"), self._on_quit),
@@ -1367,16 +1366,14 @@ class PopoverWindow:
 
     # ---------------- 按钮动作 ----------------
 
-    def _on_copy(self):
+    def _on_flow(self):
+        """从面板打开洞察中心的「流水」页：先收起面板"""
         self.close()
-        self.app.copy_stats(self.app.icon, None)
-
-    def _on_refresh(self):
-        self.app.refresh_data(self.app.icon, None)
-        self.show()          # 重建内容，刷新数据
+        self.app.show_insights(initial_page=L("流水"))
 
     def _on_insights(self):
-        """从面板打开洞察中心：刻意不收面板（mac v1.8.2 起就是侧对照看的用法）"""
+        """从面板打开洞察中心：先收起面板"""
+        self.close()
         self.app.show_insights()
 
     def _on_settings(self):
@@ -1992,7 +1989,7 @@ class CcBarTray:
     def build_menu(self):
         """托盘右键菜单：一屏摊开所有数据，纯显示不带入口
 
-        动作（复制 / 刷新 / 洞察 / 设置 / 退出）全在左键弹窗的按钮栏里，
+        动作（流水 / 洞察 / 设置 / 退出）全在左键弹窗的按钮栏里，
         右键这里只负责看数：用量、积分、渠道分布、模型分布——不分层、不点开子菜单，
         一次右键就看全。顺带跑一次用量预警检查（历史做法，通知不依赖菜单内容）。
         """
@@ -3015,45 +3012,6 @@ class CcBarTray:
         bind_wheel()
         self._bring_to_front(root)
 
-    def copy_stats(self, icon, item):
-        """复制今日统计"""
-        import pyperclip
-
-        today = self.query_day_stats(0)
-        models = self.query_model_breakdown()
-
-        text = L("ccBar 今日用量统计\n")
-        text += "==================\n"
-
-        if today:
-            text += L("Token 总量: %s\n") % self.fmt_tokens(today['total'])
-            text += L("请求数量: %d\n") % today['reqs']
-            text += L("输入 Token: %s\n") % self.fmt_tokens(today['input'])
-            text += L("输出 Token: %s\n") % self.fmt_tokens(today['output'])
-
-        sources = self.query_source_breakdown()
-        if len(sources) > 1:
-            text += L("\n数据源分布:\n")
-            for src in sources:
-                text += f"  {self.store.source_display_name(src['source'])}: {self.fmt_tokens(src['total'])}\n"
-
-        if models:
-            text += L("\n模型分布:\n")
-            for m in models:
-                text += f"  {m['model']}: {self.fmt_tokens(m['total'])}\n"
-
-        try:
-            pyperclip.copy(text)
-            self._toast(L("已复制"), L("统计数据已复制到剪贴板"), duration=3)
-        except:
-            pass
-
-    def refresh_data(self, icon, item):
-        """刷新数据"""
-        if self.icon:
-            menu = pystray.Menu(*self.build_menu())
-            self.icon.menu = menu
-
     # ------------------------------------------------------------ 洞察中心
 
     @staticmethod
@@ -3225,8 +3183,11 @@ class CcBarTray:
                      font=Design.FONT_UI_SMALL, anchor='w').pack(fill=tk.X)
 
     @_on_gui
-    def show_insights(self, icon=None, item=None):
-        """洞察中心：费用 / 洞察 / 分享 / 渠道 / 流水 五页（与 macOS 版同口径）"""
+    def show_insights(self, icon=None, item=None, initial_page=None):
+        """洞察中心：费用 / 洞察 / 分享 / 渠道 / 流水 / 积分 六页（与 macOS 版同口径）
+
+        initial_page 覆盖页签记忆（面板「流水」按钮直达流水页）。
+        """
         import tkinter as tk
         from tkinter import ttk
         from PIL import ImageTk
@@ -4090,7 +4051,7 @@ class CcBarTray:
 
         # ============ 页签记忆 ============
         titles = [nb.tab(t, "text") for t in nb.tabs()]
-        last_page = self.settings.get("insights_last_page") or L("费用")
+        last_page = initial_page or self.settings.get("insights_last_page") or L("费用")
         if last_page not in titles:
             last_page = L("费用")
         try:

@@ -113,6 +113,19 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
         _win, nb = self._build_insights()
         self.assertEqual(nb.tab(nb.select(), "text"), "费用")
 
+    def test_insights_initial_page_overrides_memory(self):
+        """面板「流水」按钮直达流水页：initial_page 覆盖页签记忆"""
+        import l10n
+        self.app.settings.set("insights_last_page", "分享")
+        CcBarTray.show_insights.__wrapped__(self.app, initial_page="流水")
+        title = l10n.L("洞察中心")
+        wins = [w for w in self.root.winfo_children()
+                if isinstance(w, tk.Toplevel) and w.title() == title]
+        self.assertEqual(len(wins), 1, "洞察中心没建出来")
+        nb = self._find_notebook(wins[0])
+        self.assertEqual(nb.tab(nb.select(), "text"), "流水")
+        wins[0].destroy()
+
     def test_session_stats_matches_mac(self):
         """会话判定：相邻间隔 > 30 分钟切新会话，时长取会话内末次-首次"""
         base = int(datetime(2026, 1, 1, 9, 0).timestamp())
@@ -573,13 +586,13 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
 
     # ------------------------------------------------------------ 面板（mac PopoverRootView）
 
-    def test_popover_five_buttons_and_insights_keeps_panel(self):
-        """按钮栏 5 格（复制/刷新/洞察/设置/退出）；洞察故意不收面板，设置先收"""
+    def test_popover_four_buttons_and_insights_closes_panel(self):
+        """按钮栏 4 格（流水/洞察/设置/退出）；洞察与流水都先收面板"""
         popover, body = self._build_popover()
         self.assertEqual([b[1] for b in popover._buttons],
-                         ["复制", "刷新", "洞察", "设置", "退出"])
+                         ["流水", "洞察", "设置", "退出"])
         usable = popover.WIDTH - 2 - 2 * popover.PAD
-        self.assertGreaterEqual(usable / 5, 40, "5 格按钮在 300px 面板里放不下")
+        self.assertGreaterEqual(usable / 4, 40, "4 格按钮在 300px 面板里放不下")
 
         class FakeWin:
             def __init__(self):
@@ -592,10 +605,18 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
                 return None
 
         insights = [b for b in popover._buttons if b[1] == "洞察"][0]
-        popover.win = FakeWin()
+        fake = FakeWin()
+        popover.win = fake
         insights[2]()
-        self.assertIsNotNone(popover.win, "「洞察」把面板收起来了")
-        self.assertFalse(popover.win.destroyed)
+        self.assertIsNone(popover.win, "「洞察」应先收起面板")
+        self.assertTrue(fake.destroyed)
+
+        flow = [b for b in popover._buttons if b[1] == "流水"][0]
+        fake = FakeWin()
+        popover.win = fake
+        flow[2]()
+        self.assertIsNone(popover.win, "「流水」应先收起面板")
+        self.assertTrue(fake.destroyed)
 
         settings = [b for b in popover._buttons if b[1] == "设置"][0]
         fake = FakeWin()
@@ -683,7 +704,7 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
         body = tk.Frame(self.root, bg=Design.BACKGROUND)
         popover._build(body)
         self.assertEqual([b[1] for b in popover._buttons],
-                         ["复制", "刷新", "洞察", "设置", "退出"])
+                         ["流水", "洞察", "设置", "退出"])
         self.assertTrue(self._find_by_text(body, "📊 今日暂无数据"))
         body.destroy()
 
