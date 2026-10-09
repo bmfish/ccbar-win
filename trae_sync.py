@@ -7,7 +7,8 @@ Trae 的用量不走本地 SQLite——本地 ai-agent 库是 SQLCipher 加密�
    └→ POST /cloudide/api/v3/trae/Login               —— 换 X-Cloudide-Session（14 天，Set-Cookie 返回）
        └→ POST /cloudide/api/v3/common/GetUserToken —— 换 Cloud-IDE-JWT（8 小时，可续签）
            ├→ POST /trae/api/v1/pay/query_user_usage_group_by_session  逐会话用量（token 四元组 + credits + 金额）
-           └→ POST /trae/api/v2/pay/ide_user_ent_usage                 积分总量/已用（官方账单口径）
+           ├→ POST /trae/api/v2/pay/ide_user_ent_usage                 积分总量/已用（官方账单口径）
+           └→ POST /trae/api/v2/ug/checkin_credits/status|claim        每日签到（100 积分 + 会员加成）
 
 鉴权头只有 Authorization: Cloud-IDE-JWT，cookie 只在换签时用。
 usage_type=[7] 是 IDE 对话/Agent 消耗（1~8 里唯一有数据的类型，实测）。
@@ -37,6 +38,8 @@ LOGIN_PATH = "/cloudide/api/v3/trae/Login"
 TOKEN_PATH = "/cloudide/api/v3/common/GetUserToken"
 USAGE_PATH = "/trae/api/v1/pay/query_user_usage_group_by_session"
 ENT_USAGE_PATH = "/trae/api/v2/pay/ide_user_ent_usage"
+CHECKIN_STATUS_PATH = "/trae/api/v2/ug/checkin_credits/status"
+CHECKIN_CLAIM_PATH = "/trae/api/v2/ug/checkin_credits/claim"
 
 # 拉取窗口：首次 90 天全量回填，之后水位 - 2 天回看
 FIRST_FETCH_DAYS = 90
@@ -51,6 +54,7 @@ MAX_PAGES = 50
 BG_MIN_INTERVAL = 900          # 后台 15 分钟
 INTERACTIVE_MIN_INTERVAL = 60  # 点开弹窗 1 分钟
 ENT_MIN_INTERVAL = 3600        # 积分账单 1 小时
+CHECKIN_RETRY_INTERVAL = 3600  # 签到失败后 1 小时重试（成功/已签由水位挡住）
 NIGHT_SILENT_UNTIL_HOUR = 9    # 0–9 点静默
 
 
@@ -431,6 +435,134 @@ def _fetch_sessions(jwt, from_epoch, to_epoch, send):
     if page > MAX_PAGES:
         print("[ccBar] Trae 分页达到上限 %d，本窗口可能不完整" % MAX_PAGES)
     return ("success", "", rows)
+
+
+# ---- 每日签到（100 积分 + 会员加成）----
+
+class TraeCheckinResult:
+    """签到结果：status ∈ claimed / already / disabled / not_configured / auth_expired / failed
+
+    claimed 时 credits 是本次到账积分（基础 + 会员加成）；其余状态 credits 为 0。
+    """
+
+    def __init__(self, status, credits=0.0, message=""):
+        self.status = status
+        self.credits = credits or 0.0
+        self.message = message
+
+    @property
+    def is_claimed(self):
+        return self.status == "claimed"
+
+    def __repr__(self):
+        return "TraeCheckinResult(%r, credits=%r, message=%r)" % (
+            self.status, self.credits, self.message)
+
+
+def checkin_plan(enable, checked_in):
+    """纯决策：enable=False 不参与；checked_in=True 已签；其余尝试领取"""
+    if enable is False:
+        return "disabled"
+    if checked_in is True:
+        return "already"
+    return "claim"
+
+
+def _checkin_post(path, jwt, body, send):
+    """单次签到请求。返回 (status, payload)：success 时 payload 是响应对象，否则是原因"""
+    _, _, text = send(API_BASE + path, auth="Cloud-IDE-JWT " + jwt, body=body)
+    if text is None:
+        return ("failed", "无响应")
+    try:
+        obj = json.loads(text)
+    except (ValueError, TypeError):
+        return ("failed", "签到响应解析失败")
+    if not isinstance(obj, dict):
+        return ("failed", "签到响应解析失败")
+    if _int(obj.get("code"), -1) == 1001:
+        return ("auth_expired", "会话失效")
+    return ("success", obj)
+
+
+def _checkin_with_retry(path, body, sessionid, auth, send, now):
+    """带一次强制换签重试的签到请求（status 与 claim 共用）。
+
+    缓存的 JWT 可能被服务端提前作废（exp 未到但 1001），此时清掉重签再试一次，
+    而不是把 cookie 误判成过期。返回 (status, payload)。
+    """
+    status, payload = _checkin_post(path, auth.jwt, body, send)
+    if status != "auth_expired":
+        return (status, payload)
+
+    auth.jwt = ""
+    auth.jwt_exp = 0
+    st, val = _ensure_jwt(sessionid, auth, send, now)
+    if st == "success":
+        return _checkin_post(path, val, body, send)
+    if st == "not_configured":
+        return ("not_configured", val)
+    if st == "auth_expired":
+        return ("auth_expired", val)
+    return ("failed", val)
+
+
+def checkin(sessionid, auth=None, post=None, now=None):
+    """每日签到：先查状态，未签则领取。
+
+    auth 会被就地更新（换签结果），调用方负责持久化；post 可注入假 transport；
+    返回 TraeCheckinResult（不抛异常）。
+    """
+    send = post or http_post
+    auth = auth if auth is not None else TraeAuth()
+    sessionid = (sessionid or "").strip()
+    if not sessionid:
+        return TraeCheckinResult("not_configured", message="未配置登录")
+
+    # ---- 1. 确保 JWT 可用（无效就换签）----
+    st, val = _ensure_jwt(sessionid, auth, send, now)
+    if st == "not_configured":
+        return TraeCheckinResult("not_configured", message="未配置登录")
+    if st == "auth_expired":
+        return TraeCheckinResult("auth_expired", message=val)
+    if st == "failed":
+        return TraeCheckinResult("failed", message=val)
+
+    expired_msg = "登录已过期，请重新提供 sessionid"
+
+    # ---- 2. 查签到状态（1001 → 强制换签重试一次）----
+    st, obj = _checkin_with_retry(CHECKIN_STATUS_PATH, "{}", sessionid, auth, send, now)
+    if st == "not_configured":
+        return TraeCheckinResult("not_configured", message="未配置登录")
+    if st == "auth_expired":
+        return TraeCheckinResult("auth_expired", message=expired_msg)
+    if st == "failed":
+        return TraeCheckinResult("failed", message=obj)
+
+    plan = checkin_plan(obj.get("enable"), obj.get("checked_in"))
+    if plan == "already":
+        return TraeCheckinResult("already")
+    if plan == "disabled":
+        return TraeCheckinResult("disabled")
+
+    # ---- 3. 领取（官方客户端同样带 req_source）----
+    st, obj = _checkin_with_retry(CHECKIN_CLAIM_PATH, '{"req_source":1}',
+                                  sessionid, auth, send, now)
+    if st == "not_configured":
+        return TraeCheckinResult("not_configured", message="未配置登录")
+    if st == "auth_expired":
+        return TraeCheckinResult("auth_expired", message=expired_msg)
+    if st == "failed":
+        return TraeCheckinResult("failed", message=obj)
+
+    code = obj.get("code")
+    if code is not None and _int(code, -1) != 0:
+        msg = "签到失败 code %s" % code
+        if obj.get("message"):
+            msg += "：" + str(obj["message"])
+        return TraeCheckinResult("failed", message=msg)
+
+    credits = _num(obj.get("credits")) + _num(obj.get("extra_credits"))
+    return TraeCheckinResult("claimed", credits=credits)
 
 
 # ---- 主入口 ----

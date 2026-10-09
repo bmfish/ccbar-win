@@ -24,7 +24,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import trae_sync
-from trae_sync import TraeAuth, TraeResult
+from trae_sync import TraeAuth, TraeCheckinResult, TraeResult
 
 DAILY_AGG_DDL = """
 CREATE TABLE IF NOT EXISTS daily_agg (
@@ -229,6 +229,7 @@ class StatsStore:
         self.trae_enabled = False
         self.trae_sessionid = ""
         self._last_trae_sync_at = 0.0   # 上次 Trae 同步时刻（in-memory，重启无妨）
+        self._last_checkin_attempt_at = 0.0   # 上次 Trae 签到尝试时刻（同上）
         # 每源连接诊断（设置页展示）：已连接 / 未启用 / 具体失败原因
         self.source_status = {}
         # 是否有任一可用数据源（SQLite ATTACH 或 Trae HTTP）。
@@ -584,6 +585,58 @@ class StatsStore:
             else:
                 print(f"Trae 同步失败: {result.message}")
                 self.source_status["trae"] = "同步失败：" + (result.message or "")
+            self.conn.commit()
+        return result
+
+    def trae_checkin_if_needed(self, now=None, interactive=False):
+        """Trae 每日自动签到。返回 TraeCheckinResult 或 None（被守卫拦下）。
+
+        水位 trae_checkin_day = 当天日期：成功/已签即写，当天不再发请求；
+        失败/未开启按 CHECKIN_RETRY_INTERVAL（1 小时）重试。
+        interactive=True 是用户点开弹窗的主动查看：夜间静默只限定时器，不拦主动操作
+        （凌晨点弹窗同样能签，与 macOS 版一致）。
+        """
+        now_epoch = self._now_epoch(now)
+        now_dt = datetime.fromtimestamp(now_epoch)
+        today = now_dt.strftime("%Y-%m-%d")
+
+        # ---- 守卫（锁内取快照；网络绝不在锁内跑）----
+        with self._lock:
+            if self.conn is None:
+                return None
+            if not self.trae_enabled:
+                return None
+            if not interactive and trae_sync.is_night_silent(now_dt):
+                return None   # 0–9 点静默，不消耗重试窗口
+            if not self.trae_sessionid:
+                return None   # 没有凭据就不发 HTTP
+            if self._meta_get("trae_checkin_day") == today:
+                return None   # 今天已到账
+            if now_epoch - self._last_checkin_attempt_at < trae_sync.CHECKIN_RETRY_INTERVAL:
+                return None   # 失败重试窗口内
+            # 占住尝试窗口，防定时器与弹窗同时触发打双发
+            self._last_checkin_attempt_at = now_epoch
+            auth = TraeAuth.from_json(self._meta_get("trae_auth")) or TraeAuth()
+
+        # ---- 网络（锁外）----
+        try:
+            result = trae_sync.checkin(self.trae_sessionid, auth=auth, now=now_epoch)
+        except Exception as e:   # 注入的 transport 等异常也不许把界面打挂
+            result = TraeCheckinResult("failed", message=str(e))
+
+        # ---- 状态（锁内）----
+        with self._lock:
+            if self.conn is None:
+                return result
+            # 换签结果（checkin 就地更新了 auth）必须持久化，重启不丢
+            self._meta_set("trae_auth", auth.to_json())
+            if result.status in ("claimed", "already"):
+                self._meta_set("trae_checkin_day", today)
+            elif result.status == "not_configured":
+                self.source_status["trae"] = "未配置登录"
+            elif result.status == "auth_expired":
+                self.source_status["trae"] = "登录已过期，请重新提供 sessionid"
+            # disabled / failed 不占水位，按小时重试；状态文案留给用量同步维护
             self.conn.commit()
         return result
 

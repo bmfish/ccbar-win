@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import trae_sync  # noqa: E402
 from stats_store import (StatsStore, CCSwitchAdapter, ZCodeAdapter, DAILY_AGG_DDL,
                          USAGE_LOG_DDL, _local_epoch, validate_db)  # noqa: E402
-from trae_sync import TraeAuth, TraeResult, TraeRow  # noqa: E402
+from trae_sync import TraeAuth, TraeCheckinResult, TraeResult, TraeRow  # noqa: E402
 
 
 class _FakeTraeRunner:
@@ -1208,6 +1208,138 @@ class TestStatsStore(unittest.TestCase):
             self.assertIsNone(self.store.sync_trae_if_needed(now=self._at(hour=10)))
         self.assertEqual(fake.calls, [])
         self.assertIsNone(self.store.query_all("SELECT * FROM usage_all"))
+
+    def test_trae_checkin_once_per_day_watermark(self):
+        """签到成功写 trae_checkin_day 水位；当天不再发请求，次日放行"""
+        self._trae_store()
+        t0 = self._at(hour=10)
+        calls = []
+
+        def claim(sessionid, auth=None, post=None, now=None):
+            calls.append({"sessionid": sessionid, "now": now})
+            return TraeCheckinResult("claimed", credits=100.0)
+
+        with mock.patch.object(trae_sync, "checkin", claim):
+            result = self.store.trae_checkin_if_needed(now=t0)
+            self.assertTrue(result.is_claimed)
+            self.assertAlmostEqual(result.credits, 100.0)
+            self.assertEqual(self.store._meta_get("trae_checkin_day"),
+                             t0.strftime("%Y-%m-%d"))
+            # 当天再问（含交互档）：水位挡住，不发请求
+            self.assertIsNone(self.store.trae_checkin_if_needed(now=t0 + timedelta(hours=2)))
+            self.assertIsNone(self.store.trae_checkin_if_needed(
+                now=t0 + timedelta(hours=3), interactive=True))
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0]["sessionid"], "sid-1")
+
+            # 次日：水位不再是今天 → 放行
+            self.assertIsNotNone(self.store.trae_checkin_if_needed(now=t0 + timedelta(days=1)))
+        self.assertEqual(len(calls), 2)
+
+    def test_trae_checkin_guards_and_night_silence(self):
+        """无连接/未启用/无凭据不签到；夜间静默只限定时器档，点弹窗照签"""
+        bare = StatsStore()   # 无连接
+        self.assertIsNone(bare.trae_checkin_if_needed())
+
+        called = []
+        stub = lambda *a, **k: called.append(1) or TraeCheckinResult("claimed")
+
+        self.store.rebuild([], trae_enabled=False)
+        self.assertIsNone(self.store.trae_checkin_if_needed(now=self._at(hour=10)))
+        self.assertEqual(self.store.source_status["trae"], "未启用")
+
+        self.store.rebuild([], trae_enabled=True, trae_sessionid="   ")
+        with mock.patch.object(trae_sync, "checkin", stub):
+            self.assertIsNone(self.store.trae_checkin_if_needed(now=self._at(hour=10)))
+        self.assertEqual(called, [], "没 sessionid 不得发 HTTP")
+
+        self._trae_store()
+        with mock.patch.object(trae_sync, "checkin", stub):
+            self.assertIsNone(self.store.trae_checkin_if_needed(now=self._at(hour=3)),
+                              "0–9 点定时器不签到")
+            self.assertEqual(self.store._last_checkin_attempt_at, 0.0,
+                             "夜间静默不占重试窗口")
+            self.assertIsNotNone(self.store.trae_checkin_if_needed(
+                now=self._at(hour=3), interactive=True),
+                "点开弹窗（交互档）夜间同样能签")
+        self.assertEqual(len(called), 1)
+
+    def test_trae_checkin_failure_retries_hourly_without_watermark(self):
+        """失败/未开启不写水位，按 1 小时重试；尝试窗口在所有出口推进"""
+        self._trae_store()
+        t0 = self._at(hour=10)
+        calls = []
+
+        def failing(sessionid, auth=None, post=None, now=None):
+            calls.append(now)
+            return TraeCheckinResult("failed", message="boom")
+
+        with mock.patch.object(trae_sync, "checkin", failing):
+            result = self.store.trae_checkin_if_needed(now=t0)
+            self.assertEqual(result.status, "failed")
+            self.assertEqual(self.store._meta_get("trae_checkin_day"), "",
+                             "失败不占水位")
+            self.assertEqual(self.store._last_checkin_attempt_at, t0.timestamp())
+
+            self.assertIsNone(self.store.trae_checkin_if_needed(
+                now=t0 + timedelta(seconds=3599)), "1 小时内不重试")
+            self.assertEqual(len(calls), 1)
+            self.assertIsNotNone(self.store.trae_checkin_if_needed(
+                now=t0 + timedelta(seconds=3600)), "满 1 小时重试")
+            self.assertEqual(len(calls), 2)
+
+        # 未开启签到：状态归 disabled，同样不占水位
+        with mock.patch.object(trae_sync, "checkin",
+                               lambda *a, **k: TraeCheckinResult("disabled")):
+            d = self.store.trae_checkin_if_needed(now=t0 + timedelta(seconds=7200))
+            self.assertEqual(d.status, "disabled")
+            self.assertEqual(self.store._meta_get("trae_checkin_day"), "")
+
+    def test_trae_checkin_persists_auth_and_maps_status(self):
+        """换签结果落 meta；not_configured/auth_expired 映射到逐源状态文案"""
+        self._trae_store()
+        t0 = self._at(hour=10)
+
+        def resigning(sessionid, auth=None, post=None, now=None):
+            auth.cloudide_session = "new-session"   # 模拟换签就地更新
+            auth.jwt = "a.b.c"
+            auth.jwt_exp = int(now) + 3600
+            return TraeCheckinResult("claimed", credits=100.0)
+
+        with mock.patch.object(trae_sync, "checkin", resigning):
+            self.store.trae_checkin_if_needed(now=t0)
+        persisted = TraeAuth.from_json(self.store._meta_get("trae_auth"))
+        self.assertEqual(persisted.cloudide_session, "new-session")
+        self.assertEqual(persisted.jwt, "a.b.c")
+        self.assertEqual(persisted.jwt_exp, int(t0.timestamp()) + 3600)
+
+        # 清掉刚写下的水位（同一个库），否则当天会被幂等守卫挡住
+        self.store.conn.execute("DELETE FROM meta WHERE key='trae_checkin_day'")
+        self.store.conn.commit()
+
+        cases = [
+            (TraeCheckinResult("not_configured", message="未配置登录"), "未配置登录"),
+            (TraeCheckinResult("auth_expired", message="会话失效"),
+             "登录已过期，请重新提供 sessionid"),
+        ]
+        for i, (result, status) in enumerate(cases):
+            self.store.rebuild([], trae_enabled=True, trae_sessionid="sid-1")
+            when = t0 + timedelta(seconds=7200 * (i + 1))
+            with mock.patch.object(trae_sync, "checkin", lambda *a, **k: result):
+                self.assertIsNotNone(self.store.trae_checkin_if_needed(now=when))
+            self.assertEqual(self.store.source_status["trae"], status)
+            self.assertEqual(self.store._meta_get("trae_checkin_day"), "",
+                             "非成功状态不得写水位")
+
+    def test_trae_checkin_after_close_is_noop(self):
+        """_close 后签到安全返回 None（无连接）"""
+        self._trae_store()
+        self.store._close()
+        called = []
+        with mock.patch.object(trae_sync, "checkin",
+                               lambda *a, **k: called.append(1) or TraeCheckinResult("claimed")):
+            self.assertIsNone(self.store.trae_checkin_if_needed(now=self._at(hour=10)))
+        self.assertEqual(called, [])
 
     # ------------------------------------------------------------ 批次 3a：事务收口
     # 残留写事务会让 VACUUM INTO 报 "cannot VACUUM from within a transaction"

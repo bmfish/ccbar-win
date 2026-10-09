@@ -4726,8 +4726,27 @@ class CcBarTray:
                 sync(interactive=interactive)
             except Exception as e:
                 print(L("Trae 同步失败:"), e)
+            # 每日自动签到与用量同步同批跑（同一条后台线程，省一次线程开销）
+            self.checkin_trae(interactive=interactive)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def checkin_trae(self, interactive=False):
+        """Trae 每日自动签到（网络在后台线程）。只有"签到成功"才冒泡通知，
+        已签/未开启/失败都静默——与 macOS 版一致。"""
+        fn = getattr(self.store, "trae_checkin_if_needed", None)
+        if fn is None or not self.settings.get("trae_enabled"):
+            return
+        try:
+            result = fn(interactive=interactive)
+        except Exception as e:
+            print(L("Trae 签到失败:"), e)
+            return
+        if result is None or result.status != "claimed":
+            return
+        credits = result.credits or 0
+        body = (L("今日 +%d 积分") % int(credits)) if credits > 0 else L("今日积分已到账")
+        self._toast(L("Trae 签到成功"), body)
 
     def maybe_check_updates_silently(self):
         """静默检查更新：3 天一次，只在真有新版时提示（与 macOS 版同款节流）"""

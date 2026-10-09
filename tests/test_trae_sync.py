@@ -469,6 +469,144 @@ class TestRun(unittest.TestCase):
         self.assertEqual(ts.http_post.__defaults__[-1], 15)
 
 
+# ---- 每日签到 ----
+
+
+class TestCheckinPlan(unittest.TestCase):
+    def test_pure_decision_table(self):
+        self.assertEqual(ts.checkin_plan(False, False), "disabled")
+        self.assertEqual(ts.checkin_plan(False, True), "disabled", "未开启优先于已签")
+        self.assertEqual(ts.checkin_plan(True, True), "already")
+        self.assertEqual(ts.checkin_plan(True, False), "claim")
+        # 字段缺失（None）按"能签"处理，与 macOS 版 Bool? 语义一致
+        self.assertEqual(ts.checkin_plan(None, None), "claim")
+        self.assertEqual(ts.checkin_plan(None, True), "already")
+
+
+class TestCheckin(unittest.TestCase):
+    def test_not_configured_makes_no_http_call(self):
+        for sid in ("", None, "   "):
+            fake = FakePost()
+            res = ts.checkin(sid, post=fake, now=NOW)
+            self.assertEqual(res.status, "not_configured")
+            self.assertFalse(res.is_claimed)
+            self.assertEqual(fake.calls, [], "空凭据不得发起任何请求")
+
+    def test_claim_success_sums_base_and_bonus_credits(self):
+        fake = (FakePost()
+                .add(ts.CHECKIN_STATUS_PATH, ok_response({"code": 0, "enable": True,
+                                                          "checked_in": False}))
+                .add(ts.CHECKIN_CLAIM_PATH, ok_response({"code": 0, "credits": 100.0,
+                                                         "extra_credits": 50.0})))
+        res = ts.checkin("sessionid=x", auth=signed_in(), post=fake, now=NOW)
+        self.assertEqual(res.status, "claimed")
+        self.assertAlmostEqual(res.credits, 150.0)
+        self.assertTrue(res.is_claimed)
+        self.assertEqual(fake.paths(), [ts.CHECKIN_STATUS_PATH, ts.CHECKIN_CLAIM_PATH])
+        self.assertEqual(fake.calls[0]["json"], {}, "status 请求体为空对象")
+        self.assertEqual(fake.calls[1]["json"], {"req_source": 1}, "claim 带 req_source")
+        self.assertEqual(fake.calls[0]["auth"], "Cloud-IDE-JWT " + signed_in().jwt)
+
+    def test_claim_credits_default_to_zero_when_missing(self):
+        fake = (FakePost()
+                .add(ts.CHECKIN_STATUS_PATH, ok_response({"checked_in": False}))
+                .add(ts.CHECKIN_CLAIM_PATH, ok_response({"code": 0})))
+        res = ts.checkin("sessionid=x", auth=signed_in(), post=fake, now=NOW)
+        self.assertEqual(res.status, "claimed")
+        self.assertEqual(res.credits, 0.0)
+
+    def test_already_checked_in_skips_claim(self):
+        fake = FakePost().add(ts.CHECKIN_STATUS_PATH,
+                              ok_response({"enable": True, "checked_in": True}))
+        res = ts.checkin("sessionid=x", auth=signed_in(), post=fake, now=NOW)
+        self.assertEqual(res.status, "already")
+        self.assertEqual(fake.paths(), [ts.CHECKIN_STATUS_PATH], "已签不该再领")
+        # enable 缺失但 checked_in=true 同样算已签
+        fake2 = FakePost().add(ts.CHECKIN_STATUS_PATH, ok_response({"checked_in": True}))
+        self.assertEqual(ts.checkin("sessionid=x", auth=signed_in(),
+                                    post=fake2, now=NOW).status, "already")
+
+    def test_disabled_account_skips_claim(self):
+        fake = FakePost().add(ts.CHECKIN_STATUS_PATH,
+                              ok_response({"enable": False, "checked_in": False}))
+        res = ts.checkin("sessionid=x", auth=signed_in(), post=fake, now=NOW)
+        self.assertEqual(res.status, "disabled")
+        self.assertEqual(fake.paths(), [ts.CHECKIN_STATUS_PATH])
+
+    def test_claim_api_code_fails_with_message(self):
+        fake = (FakePost()
+                .add(ts.CHECKIN_STATUS_PATH, ok_response({"checked_in": False}))
+                .add(ts.CHECKIN_CLAIM_PATH, ok_response({"code": 9004, "message": "参数不对"})))
+        res = ts.checkin("sessionid=x", auth=signed_in(), post=fake, now=NOW)
+        self.assertEqual(res.status, "failed")
+        self.assertIn("9004", res.message)
+        self.assertIn("参数不对", res.message)
+        self.assertEqual(res.credits, 0.0)
+
+    def test_status_1001_forces_resign_and_retries_once(self):
+        """缓存的 JWT 被提前作废（exp 未到但 1001）：强制换签重试，不得误报登录过期"""
+        fresh = make_jwt(NOW + 8 * 3600)
+        fake = (FakePost()
+                .add(ts.CHECKIN_STATUS_PATH, ok_response({"code": 1001}),
+                     ok_response({"enable": True, "checked_in": False}))
+                .add(ts.TOKEN_PATH, ok_response({"Result": {"Token": fresh}}))
+                .add(ts.CHECKIN_CLAIM_PATH, ok_response({"code": 0, "credits": 100.0})))
+        auth = signed_in(cloudide_session="cached-sess")
+        res = ts.checkin("sessionid=x", auth=auth, post=fake, now=NOW)
+
+        self.assertEqual(res.status, "claimed")
+        self.assertAlmostEqual(res.credits, 100.0)
+        self.assertEqual(fake.paths(), [ts.CHECKIN_STATUS_PATH, ts.TOKEN_PATH,
+                                        ts.CHECKIN_STATUS_PATH, ts.CHECKIN_CLAIM_PATH])
+        self.assertNotIn(ts.LOGIN_PATH, fake.paths(), "Session 还活着就不该重新 Login")
+        self.assertEqual(auth.jwt, fresh)
+        self.assertEqual(auth.cloudide_session, "cached-sess")
+
+    def test_claim_1001_also_resigns(self):
+        """claim 阶段 1001 同样走一次换签重试"""
+        fresh = make_jwt(NOW + 8 * 3600)
+        fake = (FakePost()
+                .add(ts.CHECKIN_STATUS_PATH, ok_response({"checked_in": False}))
+                .add(ts.CHECKIN_CLAIM_PATH, ok_response({"code": 1001}),
+                     ok_response({"code": 0, "credits": 100.0}))
+                .add(ts.TOKEN_PATH, ok_response({"Result": {"Token": fresh}})))
+        res = ts.checkin("sessionid=x", auth=signed_in(), post=fake, now=NOW)
+        self.assertEqual(res.status, "claimed")
+        self.assertEqual(fake.paths(), [ts.CHECKIN_STATUS_PATH, ts.CHECKIN_CLAIM_PATH,
+                                        ts.TOKEN_PATH, ts.CHECKIN_CLAIM_PATH])
+
+    def test_1001_twice_is_auth_expired(self):
+        fresh = make_jwt(NOW + 8 * 3600)
+        fake = (FakePost()
+                .add(ts.CHECKIN_STATUS_PATH, ok_response({"code": 1001}))
+                .add(ts.TOKEN_PATH, ok_response({"Result": {"Token": fresh}})))
+        res = ts.checkin("sessionid=x", auth=signed_in(), post=fake, now=NOW)
+        self.assertEqual(res.status, "auth_expired")
+        self.assertIn("登录已过期", res.message)
+
+    def test_login_failure_is_auth_expired(self):
+        fake = FakePost().add(ts.LOGIN_PATH, (403, {}, "forbidden"))
+        res = ts.checkin("sessionid=x", auth=TraeAuth(), post=fake, now=NOW)
+        self.assertEqual(res.status, "auth_expired")
+        self.assertEqual(fake.paths(), [ts.LOGIN_PATH])
+
+    def test_transport_and_parse_errors_are_failed(self):
+        fake = FakePost().add(ts.CHECKIN_STATUS_PATH, (0, None, None))
+        res = ts.checkin("sessionid=x", auth=signed_in(), post=fake, now=NOW)
+        self.assertEqual(res.status, "failed")
+        self.assertEqual(res.message, "无响应")
+
+        fake = FakePost().add(ts.CHECKIN_STATUS_PATH, ("200", {}, "not json"))
+        self.assertEqual(ts.checkin("sessionid=x", auth=signed_in(),
+                                    post=fake, now=NOW).status, "failed")
+
+    def test_result_repr_and_is_claimed(self):
+        r = ts.TraeCheckinResult("claimed", credits=100.0)
+        self.assertTrue(r.is_claimed)
+        self.assertIn("claimed", repr(r))
+        self.assertFalse(ts.TraeCheckinResult("already").is_claimed)
+
+
 # ---- 夜间静默 ----
 
 
@@ -490,6 +628,9 @@ class TestNightSilent(unittest.TestCase):
         self.assertEqual((ts.PAGE_SIZE, ts.MAX_PAGES), (20, 50))
         self.assertEqual((ts.BG_MIN_INTERVAL, ts.INTERACTIVE_MIN_INTERVAL), (900, 60))
         self.assertEqual((ts.ENT_MIN_INTERVAL, ts.NIGHT_SILENT_UNTIL_HOUR), (3600, 9))
+        self.assertEqual(ts.CHECKIN_RETRY_INTERVAL, 3600)
+        self.assertEqual(ts.CHECKIN_STATUS_PATH, "/trae/api/v2/ug/checkin_credits/status")
+        self.assertEqual(ts.CHECKIN_CLAIM_PATH, "/trae/api/v2/ug/checkin_credits/claim")
         self.assertEqual(ts.API_BASE, "https://api.trae.cn")
 
 
