@@ -526,8 +526,9 @@ class StatsStore:
             if not self.trae_enabled:
                 self.source_status["trae"] = "未启用"
                 return None
-            if trae_sync.is_night_silent(now_dt):
-                return None   # 0–9 点静默，不消耗节流
+            # 夜间静默只限后台定时器（0–9 点）；用户主动点开弹窗仍放行，与签到一致
+            if not interactive and trae_sync.is_night_silent(now_dt):
+                return None   # 0–9 点后台静默，不消耗节流
             if not self.trae_sessionid:
                 self.source_status["trae"] = "未配置登录"
                 return None   # 没有凭据就不发 HTTP
@@ -568,7 +569,9 @@ class StatsStore:
             # 换签结果（run 就地更新了 auth）必须持久化，重启不丢
             self._meta_set("trae_auth", auth.to_json())
             if result.status == "ok":
-                self.upsert_trae_rows(result.rows)
+                # commit=False：明细写并入下面窗口重算/meta 的同一事务收口，
+                # 每轮同步从 3 次 commit 降到 2 次（rebuild 就地提交是 VACUUM 契约，保留）
+                self.upsert_trae_rows(result.rows, commit=False)
                 # 今日行由 usage_all 实时可见，daily_agg 只结算完整日（< 今天）
                 today = now_dt.strftime("%Y-%m-%d")
                 self._rebuild_daily_agg_window(
@@ -637,15 +640,23 @@ class StatsStore:
             elif result.status == "auth_expired":
                 self.source_status["trae"] = "登录已过期，请重新提供 sessionid"
             # disabled / failed 不占水位，按小时重试；状态文案留给用量同步维护
+            # 失败落盘：--noconsole 打包后 stdout 不可见，靠 meta 留痕供排查
+            if result.status not in ("claimed", "already"):
+                self._meta_set("trae_checkin_fail",
+                               "%s|%s|%s" % (today,
+                                             now_dt.strftime("%H:%M:%S"),
+                                             (result.message or result.status)))
             self.conn.commit()
         return result
 
-    def upsert_trae_rows(self, rows):
+    def upsert_trae_rows(self, rows, commit=True):
         """Trae 明细入库：会话级 UPSERT（同一会话用量随对话推进增长，覆盖旧值）。
 
         与其他源的 INSERT OR IGNORE 不同——Trae 行是"会话聚合快照"而非不可变流水；
         request_count 是会话数口径，更新时不动。cache_write → cache_creation_tokens。
-        调用方持锁（内部不再加锁，threading.Lock 非重入）；一个事务提交。
+        调用方持锁（内部不再加锁，threading.Lock 非重入）。
+        commit=True（默认）自成一事务提交；commit=False 时由调用方统一收口，
+        用于 sync_trae_if_needed 里与后续窗口重算合并，减少每轮同步的 fsync 次数。
         """
         if self.conn is None or not rows:
             return 0
@@ -676,7 +687,8 @@ class StatsStore:
                                         row.cache_read, row.cache_write, row.cost_usd,
                                         row.credits, row.epoch))
                 written += 1
-            self.conn.commit()
+            if commit:
+                self.conn.commit()
         except sqlite3.Error as e:
             print(f"Trae 行入库失败: {e}")
             try:

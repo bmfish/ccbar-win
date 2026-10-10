@@ -77,28 +77,31 @@ class TestConstructApp(unittest.TestCase):
             app.store._close()
 
     def test_tooltip_is_three_lines_like_macos(self):
-        """悬停提示对齐 macOS：今日 / 昨日 / 请求数"""
+        """悬停提示（需求已精简）：只显示今日用量；有积分才追加今日积分"""
         app = main.CcBarTray()
         try:
             stats = {0: {"total": 1234567, "reqs": 7}, 1: {"total": 20000}}
             app.query_day_stats = lambda days=0: stats.get(days)
             zh = app.get_tooltip_text().splitlines()
-            self.assertEqual(len(zh), 3)
-            self.assertTrue(zh[0].startswith("今日："))
-            self.assertTrue(zh[1].startswith("昨日："))
-            self.assertTrue(zh[2].startswith("请求数："))
+            self.assertEqual(len(zh), 1)                     # 无积分时只有今日用量
+            self.assertTrue(zh[0].startswith("今日用量："))
             self.assertIn("123万", zh[0])
+
+            # 有积分时追加一行今日积分
+            app.store.query_today_credits = lambda: 12.5
+            zh2 = app.get_tooltip_text().splitlines()
+            self.assertEqual(len(zh2), 2)
+            self.assertTrue(zh2[1].startswith("今日积分："))
+            self.assertIn("12.50", zh2[1])
 
             l10n.set_language("en")
             en = app.get_tooltip_text().splitlines()
             self.assertTrue(en[0].startswith("Today: "))
-            self.assertTrue(en[1].startswith("Yesterday: "))
-            self.assertTrue(en[2].startswith("Requests: "))
             self.assertIn("1.23M", en[0])
 
-            # 昨天没数据时只剩两行，且不出现 None
-            app.query_day_stats = lambda days=0: stats.get(0) if days == 0 else None
-            self.assertEqual(len(app.get_tooltip_text().splitlines()), 2)
+            # 没有积分时不出现积分行
+            app.store.query_today_credits = lambda: 0
+            self.assertEqual(len(app.get_tooltip_text().splitlines()), 1)
 
             # 完全没有数据源时回落一句人话
             app.query_day_stats = lambda days=0: None

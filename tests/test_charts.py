@@ -34,8 +34,10 @@ class TestChartHelpers(unittest.TestCase):
         """_pil_font / 两个 PNG 图 helper 必须是纯 staticmethod，不能被 _on_gui 包住"""
         for name in ("_pil_font", "_bar_chart_png", "_line_chart_png"):
             fn = CcBarTray.__dict__[name]
+            # Python 3.10+ 的 staticmethod 对象自带 __wrapped__ 属性，需先解出原函数再判
+            func = fn.__func__ if hasattr(fn, "__func__") else fn
             self.assertFalse(
-                hasattr(fn, "__wrapped__"),
+                hasattr(func, "__wrapped__"),
                 f"{name} 被装饰器包住了（_on_gui 只能用在窗口方法上）")
 
         font = CcBarTray._pil_font(13)

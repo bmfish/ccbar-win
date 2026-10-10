@@ -270,7 +270,7 @@ class TestEnglishUi(ui_fixture.TrayFixture):
         with mock.patch.object(main, "pystray", fake):
             items = self.app.build_menu()
         texts = [i.text for i in items if isinstance(i, FakeMenuItem)]
-        self.assertGreaterEqual(len(texts), 10, "托盘菜单项少了：%s" % texts)
+        self.assertEqual(len(texts), 7, "托盘菜单项数不符：%s" % texts)
         self.assertEqual([t for t in texts if CJK.search(t)], [],
                          "托盘菜单在英文模式下还有中文：%s" % texts)
 

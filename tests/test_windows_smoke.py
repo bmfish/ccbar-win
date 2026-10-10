@@ -551,7 +551,7 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
         """闪电 LED 红色门槛：增量 ≥ 门槛强制红；首次/低于门槛/回退都不红；0=关闭"""
         app = self.app
         app.icon = None
-        red = usage_color(1.0)
+        red = Design.LED_RED      # 强制红用 LED 红（对齐 mac NSColor.systemRed），不是用量色阶红
         stats = {"reqs": 0, "input": 0, "output": 0, "cache_create": 0,
                  "cache_read": 0, "total": 0}
         app.query_day_stats = lambda days=0: dict(stats)
@@ -569,7 +569,8 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
         app._led_last_total = None
         self.assertNotEqual(tick(1_000_000), red)
         self.assertNotEqual(tick(1_000_000 + 9_999), red, "增量低于门槛不该标红")
-        self.assertEqual(app._last_icon_color, main.today_usage_color(1_009_999))
+        self.assertEqual(app._last_icon_color, Design.LED_GREEN,
+                         "低于门槛但有增量 → LED 绿（mac systemGreen），不是用量色阶绿")
         self.assertNotEqual(tick(100), red, "跨天回退不该标红")
 
         app.settings.set("led_red_threshold", 0)          # 关闭
@@ -708,8 +709,8 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
         self.assertTrue(self._find_by_text(body, "📊 今日暂无数据"))
         body.destroy()
 
-    def test_build_menu_has_all_time_item(self):
-        """托盘菜单的「历史总量」要开历史总量窗口（不是近30天）"""
+    def test_build_menu_data_sections(self):
+        """托盘菜单数据区：用量 / 积分 / 渠道分布 / 模型分布四段（需求精简，无历史总量入口）"""
         class FakeMenuItem:
             def __init__(self, text="", action=None, **kwargs):
                 self.text = text
@@ -726,10 +727,18 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
         self.app.check_warning = lambda stats: None       # 不碰 ~/.ccbar/notified.txt
         with mock.patch.object(main, "pystray", fake):
             items = self.app.build_menu()
-        hist = [i for i in items
-                if getattr(i, "text", "").startswith("📈 历史总量")]
-        self.assertEqual(len(hist), 1, [getattr(i, "text", None) for i in items])
-        self.assertEqual(hist[0].action, self.app.show_all_time_detail)
+        texts = [getattr(i, "text", None) for i in items]
+        self.assertTrue(any(t is not None and "📊 用量" in t for t in texts),
+                        "菜单缺用量段：%s" % texts)
+        self.assertTrue(any(t is not None and "💳 积分" in t for t in texts),
+                        "菜单缺积分段：%s" % texts)
+        self.assertTrue(any(t is not None and "📡 渠道分布" in t for t in texts),
+                        "菜单缺渠道分布段：%s" % texts)
+        self.assertTrue(any(t is not None and "🤖 模型分布" in t for t in texts),
+                        "菜单缺模型分布段：%s" % texts)
+        # 动作入口（历史总量等）不在右键菜单里，统一走左键弹窗按钮栏
+        self.assertFalse(any(t is not None and "历史总量" in t for t in texts),
+                         "右键菜单不应再带历史总量入口：%s" % texts)
 
     # ------------------------------------------------------------ 积分页 + Trae 设置行
 
