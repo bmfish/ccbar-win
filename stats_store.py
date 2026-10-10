@@ -550,13 +550,20 @@ class StatsStore:
             to_epoch = int(now_epoch)
             # 积分账单（只喂设置页）按小时节流，不必跟着每次同步拉
             fetch_ent = now_epoch - self._meta_float("trae_ent_at") >= trae_sync.ENT_MIN_INTERVAL
+            # 剪枝：上次完整成功同步时刻 − 1h。服务端倒序返回，某页最新 usage_time
+            # 都比它旧时，该页及后续页全是已入库数据，翻页直接停（省请求）。
+            # 首次（无水位）或上次被截断时不应剪枝——由下方"仅完整成功才推进
+            # trae_synced_at"保证：截断那轮不推进，cutoff 保持旧值，剪枝自动变保守。
+            last_full_sync = self._meta_float("trae_synced_at", 0.0)
+            cutoff = int(last_full_sync) - 3600 if last_full_sync else None
             auth = TraeAuth.from_json(self._meta_get("trae_auth")) or TraeAuth()
 
         # ---- 网络（锁外）----
         try:
             result = trae_sync.run(self.trae_sessionid, auth=auth,
                                    from_epoch=from_epoch, to_epoch=to_epoch,
-                                   fetch_ent=fetch_ent, now=now_epoch)
+                                   fetch_ent=fetch_ent, now=now_epoch,
+                                   cutoff=cutoff)
         except Exception as e:   # 注入的 transport 等异常也不许把界面打挂
             result = TraeResult("failed", message=str(e))
 
@@ -577,6 +584,10 @@ class StatsStore:
                 self._rebuild_daily_agg_window(
                     datetime.fromtimestamp(from_epoch).strftime("%Y-%m-%d"), today)
                 self._meta_set("trae_synced_day", today)
+                # 仅"完整成功"（分页没截断）才推进剪枝基准；截断那轮不推进，
+                # 下次 cutoff 保持旧值 → 翻页更保守，绝不误剪新会话
+                if not result.truncated:
+                    self._meta_set("trae_synced_at", int(now_epoch))
                 if result.consumed is not None and result.total is not None:
                     self._meta_set("trae_ent", "%s|%s" % (result.consumed, result.total))
                     self._meta_set("trae_ent_at", int(now_epoch))

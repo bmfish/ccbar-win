@@ -432,6 +432,41 @@ class TestRun(unittest.TestCase):
         self.assertEqual(len(res.rows), ts.MAX_PAGES)
         self.assertEqual(len(fake.calls), ts.MAX_PAGES)
         self.assertEqual(fake.calls[-1]["json"]["page_num"], ts.MAX_PAGES)
+        self.assertTrue(res.truncated, "翻到上限还没拉完应标记截断")
+
+    def test_cutoff_stops_pagination_when_pages_are_old(self):
+        """cutoff：服务端倒序，某页最新 usage_time 都比 cutoff 旧 → 整页跳过并提前停。
+
+        第 1 页返回全新会话（不触发剪枝），第 2 页全是旧会话（全部 < cutoff）→
+        只发 2 个请求，旧页数据不入库（UPSERT 幂等，无妨）。
+        """
+        now_epoch = int(NOW)
+        fake = (FakePost()
+                .add(ts.USAGE_PATH,
+                     ok_response(usage_page([sess("s-new", usage_time=now_epoch - 100)],
+                                            total=9999)))
+                .add(ts.USAGE_PATH,
+                     ok_response(usage_page([sess("s-old-1", usage_time=now_epoch - 7200),
+                                             sess("s-old-2", usage_time=now_epoch - 10800)],
+                                            total=9999))))
+        res = ts.run("sessionid=x", auth=signed_in(), post=fake, now=NOW,
+                     cutoff=now_epoch - 3600)   # 上次成功同步时刻 - 1h
+        self.assertEqual(res.status, "ok")
+        self.assertEqual(len(res.rows), 1, "只留新页的会话，旧页整页跳过")
+        self.assertEqual([r.session_id for r in res.rows], ["s-new"])
+        self.assertEqual(len(fake.calls), 2, "旧页触发剪枝，不再翻第 3 页")
+        self.assertFalse(res.truncated, "剪枝提前停不算截断")
+
+    def test_cutoff_none_never_prunes(self):
+        """cutoff=None（首次/无水位）不做剪枝：翻页行为与历史一致"""
+        def grow(call):
+            n = call["json"]["page_num"]
+            return ok_response(usage_page([sess("s%d" % n, usage_time=int(NOW) - n)],
+                                          total=9999))
+        fake = FakePost().add(ts.USAGE_PATH, grow)
+        res = ts.run("sessionid=x", auth=signed_in(), post=fake, now=NOW)
+        self.assertEqual(len(fake.calls), ts.MAX_PAGES, "无 cutoff 时翻满页")
+        self.assertTrue(res.truncated, "翻满页应标记截断")
 
     def test_entitlements_only_fetched_when_requested(self):
         session_page = ok_response(usage_page([sess("s1")], total=1))

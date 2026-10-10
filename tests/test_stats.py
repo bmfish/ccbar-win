@@ -28,10 +28,10 @@ class _FakeTraeRunner:
         self.results = list(results or [])
 
     def __call__(self, sessionid, auth=None, from_epoch=0, to_epoch=None,
-                 fetch_ent=False, post=None, now=None):
+                 fetch_ent=False, post=None, now=None, cutoff=None):
         self.calls.append({"sessionid": sessionid, "auth": auth,
                            "from_epoch": from_epoch, "to_epoch": to_epoch,
-                           "fetch_ent": fetch_ent, "now": now})
+                           "fetch_ent": fetch_ent, "now": now, "cutoff": cutoff})
         if self.results:
             return self.results.pop(0)
         return TraeResult("ok", rows=[])
@@ -1044,8 +1044,9 @@ class TestStatsStore(unittest.TestCase):
         calls = []
 
         def failing(sessionid, auth=None, from_epoch=0, to_epoch=None,
-                    fetch_ent=False, post=None, now=None):
-            calls.append({"sessionid": sessionid, "auth": auth, "now": now})
+                    fetch_ent=False, post=None, now=None, cutoff=None):
+            calls.append({"sessionid": sessionid, "auth": auth, "now": now,
+                          "cutoff": cutoff})
             auth.cloudide_session = "new-session"   # 模拟换签就地更新
             auth.jwt = "a.b.c"
             auth.jwt_exp = int(t0.timestamp()) + 3600

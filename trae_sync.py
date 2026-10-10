@@ -293,12 +293,14 @@ def normalize(payload):
 class TraeResult:
     """同步结果对象：status ∈ ok / not_configured / auth_expired / failed"""
 
-    def __init__(self, status, rows=None, consumed=None, total=None, message=""):
+    def __init__(self, status, rows=None, consumed=None, total=None, message="",
+                 truncated=False):
         self.status = status
         self.rows = rows if rows is not None else []
         self.consumed = consumed
         self.total = total
         self.message = message
+        self.truncated = truncated   # 分页到上限没拉完（窗口内会话过多）
 
     @property
     def is_ok(self):
@@ -398,34 +400,46 @@ def _ensure_jwt(passport_cookie, auth, send, now):
 
 # ---- 使用量分页拉取 ----
 
-def _fetch_sessions(jwt, from_epoch, to_epoch, send):
+def _fetch_sessions(jwt, from_epoch, to_epoch, send, cutoff=None):
     """分页拉取会话明细。错误码：1001 = JWT/会话失效；9004 = 参数不合法；成功响应没有 code 字段。
 
-    返回 (status, 原因, rows)。
+    服务端按 usage_time 倒序返回（最新在前）。cutoff（epoch 秒）用于提前终止：
+    某页里最新一条 usage_time 都比 cutoff 旧，说明该页及后续页全是"上次已覆盖"
+    的数据，不必再翻（页内数据也一并跳过，反正 UPSERT 幂等）。
+
+    返回 (status, 原因, rows, truncated)。truncated=True 表示翻到 MAX_PAGES 上限还没拉完
+    （窗口内会话过多，本批不完整）——调用方应据此不推进"上次完整同步时刻"，避免误剪。
     """
     rows = []
     page = 1
+    truncated = False
     while page <= MAX_PAGES:
         body = json.dumps({"start_time": from_epoch, "end_time": to_epoch,
                            "page_size": PAGE_SIZE, "page_num": page,
                            "usage_type": [7]}, separators=(",", ":"))
         _, _, text = send(API_BASE + USAGE_PATH, auth="Cloud-IDE-JWT " + jwt, body=body)
         if text is None:
-            return ("failed", "无响应", rows)
+            return ("failed", "无响应", rows, truncated)
         try:
             resp = json.loads(text)
         except (ValueError, TypeError):
-            return ("failed", "响应解析失败", rows)
+            return ("failed", "响应解析失败", rows, truncated)
         if not isinstance(resp, dict):
-            return ("failed", "响应解析失败", rows)
+            return ("failed", "响应解析失败", rows, truncated)
         code = resp.get("code")
         if code is not None:
             if _int(code, -1) == 1001:
-                return ("auth_expired", "会话失效", rows)
-            return ("failed", "API code %s" % code, rows)
+                return ("auth_expired", "会话失效", rows, truncated)
+            return ("failed", "API code %s" % code, rows, truncated)
         sessions = resp.get("user_usage_group_by_sessions")
         if not isinstance(sessions, (list, tuple)):
             sessions = []
+        # 剪枝：本页最新一条都比 cutoff 旧 → 整页（及后续更旧页）全是已覆盖数据
+        if cutoff is not None and sessions:
+            newest = max((_int(s.get("usage_time")) for s in sessions
+                          if isinstance(s, dict)), default=0)
+            if newest < cutoff:
+                break
         rows.extend(normalize(sessions))
         # total 缺失按 0 处理（与 macOS 一致：此时首页即止，不再翻页）
         total = _int(resp.get("total"))
@@ -433,8 +447,9 @@ def _fetch_sessions(jwt, from_epoch, to_epoch, send):
             break
         page += 1
     if page > MAX_PAGES:
+        truncated = True
         print("[ccBar] Trae 分页达到上限 %d，本窗口可能不完整" % MAX_PAGES)
-    return ("success", "", rows)
+    return ("success", "", rows, truncated)
 
 
 # ---- 每日签到（100 积分 + 会员加成）----
@@ -568,12 +583,14 @@ def checkin(sessionid, auth=None, post=None, now=None):
 # ---- 主入口 ----
 
 def run(sessionid, auth=None, from_epoch=0, to_epoch=None, fetch_ent=False,
-        post=None, now=None):
+        post=None, now=None, cutoff=None):
     """完整同步一次。
 
     auth 会被就地更新（换签结果），调用方负责持久化；
     post 可注入假 transport（签名同 http_post），测试因此不碰网络；
-    fetch_ent=False 时跳过积分账单（它 1 小时刷一次就够，减少无谓请求）。
+    fetch_ent=False 时跳过积分账单（它 1 小时刷一次就够，减少无谓请求）；
+    cutoff（epoch 秒）透传 _fetch_sessions：某页最新 usage_time 都比 cutoff 旧
+    就提前终止翻页（上次已覆盖的数据不用重拉；None=不剪枝）。
     """
     send = post or http_post
     auth = auth if auth is not None else TraeAuth()
@@ -598,7 +615,7 @@ def run(sessionid, auth=None, from_epoch=0, to_epoch=None, fetch_ent=False,
     # 缓存的 JWT 可能被服务端提前作废（如用户在别处重新登录，exp 未到但 1001），
     # 此时强制清掉换一张再试一次，而不是把 cookie 误判成过期
     jwt2 = jwt
-    st, msg, rows = _fetch_sessions(jwt, from_epoch, to_epoch, send)
+    st, msg, rows, truncated = _fetch_sessions(jwt, from_epoch, to_epoch, send, cutoff=cutoff)
     if st == "failed":
         return TraeResult("failed", message=msg)
     if st == "auth_expired":
@@ -611,7 +628,7 @@ def run(sessionid, auth=None, from_epoch=0, to_epoch=None, fetch_ent=False,
         if st == "failed":
             return TraeResult("failed", message=val)
         jwt2 = val
-        st, msg, rows = _fetch_sessions(jwt2, from_epoch, to_epoch, send)
+        st, msg, rows, truncated = _fetch_sessions(jwt2, from_epoch, to_epoch, send, cutoff=cutoff)
         if st == "auth_expired":
             return TraeResult("auth_expired", message="登录已过期，请重新提供 sessionid")
         if st == "failed":
@@ -633,4 +650,5 @@ def run(sessionid, auth=None, from_epoch=0, to_epoch=None, fetch_ent=False,
                 consumed = _opt_num(summary.get("consumed_amount"))
                 total = _opt_num(summary.get("total_amount"))
 
-    return TraeResult("ok", rows=rows, consumed=consumed, total=total)
+    return TraeResult("ok", rows=rows, consumed=consumed, total=total,
+                      truncated=truncated)
