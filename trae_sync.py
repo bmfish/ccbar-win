@@ -48,9 +48,11 @@ MAX_PAGES = 50
 
 # ---- 节流常量（由 StatsStore 侧使用，这里只定义）----
 
-BG_MIN_INTERVAL = 900          # 后台 15 分钟
+BG_MIN_INTERVAL = 600          # 后台默认 10 分钟（设置键 trae_bg_interval 的缺省值）
 INTERACTIVE_MIN_INTERVAL = 60  # 点开弹窗 1 分钟
 ENT_MIN_INTERVAL = 3600        # 积分账单 1 小时
+BG_INTERVAL_MIN = 60           # 后台间隔可配下限（秒）
+BG_INTERVAL_MAX = 7200         # 后台间隔可配上限（秒）
 NIGHT_SILENT_UNTIL_HOUR = 9    # 0–9 点静默
 
 
@@ -74,6 +76,16 @@ def _int(v, default=0):
         return int(v)
     except (TypeError, ValueError):
         return default
+
+
+def clamp_bg_interval(value, default=None):
+    """后台同步间隔规整（秒）：非法/缺失回落 default，否则夹进
+    [BG_INTERVAL_MIN, BG_INTERVAL_MAX]，坏设置不会把托盘节流打乱。"""
+    fallback = BG_MIN_INTERVAL if default is None else default
+    seconds = _int(value, None)
+    if seconds is None:
+        return fallback
+    return max(BG_INTERVAL_MIN, min(BG_INTERVAL_MAX, seconds))
 
 
 def _num(v, default=0.0):

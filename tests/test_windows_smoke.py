@@ -37,7 +37,7 @@ except Exception:  # pragma: no cover - 没有 tkinter 的构建
 class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
     """洞察中心必须完整建出全部页签"""
 
-    EXPECTED_TABS = ["费用", "洞察", "分享", "渠道", "流水", "积分"]
+    EXPECTED_TABS = ["费用", "洞察", "分享", "渠道", "流水", "积分", "WorkBuddy"]
 
     # ------------------------------------------------------------ 用例
 
@@ -745,7 +745,7 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
     def test_credits_tab_without_trae_shows_hint(self):
         """积分页：三张卡 + 无 Trae 用量时的灰字提示 + 脚注"""
         _win, nb = self._build_insights()
-        self.assertEqual([nb.tab(t, "text") for t in nb.tabs()][-1], "积分")
+        self.assertIn("积分", [nb.tab(t, "text") for t in nb.tabs()])
         texts = self._texts(self._tab_frame(nb, "积分"))
         for expect in ("今日积分", "近 7 天", "近 30 天", "近 30 天积分走势",
                        "接入 Trae 并产生用量后展示积分消耗",
@@ -811,6 +811,138 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
         self.assertIn("trae_enabled", captured)
         self.assertEqual(captured["trae_sessionid"], "session-abc")
         self.assertEqual(self.app.settings.get("trae_sessionid"), "session-abc")
+
+    # ------------------------------------------------------------ WorkBuddy 页签 + 设置行
+
+    def test_workbuddy_tab_is_isolated_from_other_tabs(self):
+        """WorkBuddy 页签有自己的统计；同一数值绝不出现在积分/费用页"""
+        from workbuddy_sync import WorkBuddyRow
+
+        epoch = int(datetime.now().timestamp()) - 60
+        self.app.store.upsert_workbuddy_rows([
+            WorkBuddyRow("wb-1", "CodeBuddyIDE", "deepseek-v4.1-flash", 4321.5, epoch),
+            WorkBuddyRow("wb-2", "WorkBuddy", "minimax-m3", 7.25, epoch + 30),
+        ])
+
+        _win, nb = self._build_insights()
+        wb_texts = self._texts(self._tab_frame(nb, "WorkBuddy"))
+        self.assertTrue(any("历史总积分" in t for t in wb_texts), wb_texts)
+        self.assertTrue(any("4321.50" in t for t in wb_texts), wb_texts)
+        self.assertTrue(any("CodeBuddyIDE" in t for t in wb_texts), wb_texts)
+        self.assertTrue(any("按客户端（近 30 天）" in t for t in wb_texts), wb_texts)
+        self.assertTrue(any("模型排行（近 30 天）" in t for t in wb_texts), wb_texts)
+        self.assertTrue(any("workbuddy" in t.lower() or "WorkBuddy" in t
+                            for t in wb_texts))
+        self.assertFalse(any("接入 WorkBuddy 并产生用量后展示积分消耗" in t
+                             for t in wb_texts), "有数据就不该显示空态")
+
+        for other in ("积分", "费用", "渠道"):
+            texts = self._texts(self._tab_frame(nb, other))
+            self.assertFalse(any("4321" in t for t in texts),
+                             "%s 页混进了 WorkBuddy 的积分" % other)
+            self.assertFalse(any("CodeBuddyIDE" in t for t in texts),
+                             "%s 页混进了 WorkBuddy 的客户端维度" % other)
+
+    def test_workbuddy_tab_empty_state(self):
+        """没数据时 WorkBuddy 页仍要建出卡片与空态文案"""
+        _win, nb = self._build_insights()
+        texts = self._texts(self._tab_frame(nb, "WorkBuddy"))
+        self.assertTrue(any("历史总积分" in t for t in texts), texts)
+        self.assertTrue(any("接入 WorkBuddy 并产生用量后展示积分消耗" in t for t in texts))
+
+    def test_settings_window_has_workbuddy_block_and_saves_it(self):
+        """设置页 WorkBuddy 独立区块：勾选 + 多行 Cookie + 剪贴板导入按钮 + 间隔"""
+        import autostart
+
+        CcBarTray.show_settings.__wrapped__(self.app)
+        win = self._toplevels("ccBar 设置")[0]
+        self.assertTrue(self._find_by_text(win, "WorkBuddy"))
+        self.assertTrue(self._find_by_text(
+            win, "粘贴 codebuddy.cn 的 Cookie（也可直接粘贴整条 curl 命令，只需 session）"))
+        self.assertTrue(self._find_by_text(win, "从剪贴板导入"))
+        self.assertTrue(self._find_by_text(win, "清空"))
+        self.assertTrue(self._find_by_text(win, "WorkBuddy 数据独立统计，只出现在洞察中心"))
+
+        wx_texts = [w for w in self._walk(win) if isinstance(w, tk.Text)]
+        self.assertEqual(len(wx_texts), 1, "找不到 WorkBuddy 的 Cookie 输入框")
+        cookie_box = wx_texts[0]
+        # 粘贴一条带无关 cookie 的 curl，保存时应被归一化成 session / session_2
+        cookie_box.delete("1.0", tk.END)
+        cookie_box.insert("1.0", "curl 'https://www.codebuddy.cn/x' -b "
+                                 "'session=sess-v|1792744353|sig; session_2=second; junk=1'")
+        boxes = [w for w in self._walk(win) if isinstance(w, tk.Entry)]
+        wb_interval = [e for e in boxes
+                       if any("后台同步间隔 (秒):" == self._text_of(c)
+                              for c in e.master.winfo_children())]
+        self.assertEqual(len(wb_interval), 2, "Trae 与 WorkBuddy 各有一个间隔输入框")
+        wb_interval[-1].delete(0, tk.END)
+        wb_interval[-1].insert(0, "120")
+        wb_var = [w for w in self._walk(win) if isinstance(w, tk.Checkbutton)]
+        self.assertGreaterEqual(len(wb_var), 1)
+
+        captured = {}
+        original_apply = self.app.settings.apply
+
+        def spy_apply(updates):
+            captured.update(updates)
+            return original_apply(updates)
+
+        original_autostart = autostart.apply
+        original_connect = self.app.connect_store
+        self.app.settings.apply = spy_apply
+        self.app.connect_store = lambda: None
+        autostart.apply = lambda flag: None
+        try:
+            with mock.patch("tkinter.messagebox.showinfo", return_value=None), \
+                    mock.patch("tkinter.messagebox.showerror", return_value=None):
+                self._invoke_button(win, "保存")
+        finally:
+            autostart.apply = original_autostart
+            self.app.settings.apply = original_apply
+            self.app.connect_store = original_connect
+
+        self.assertIn("workbuddy_enabled", captured)
+        self.assertEqual(captured["workbuddy_cookie"],
+                         "session=sess-v|1792744353|sig; session_2=second")
+        self.assertEqual(self.app.settings.get("workbuddy_bg_interval"), 120)
+        # 归一化后的凭据落盘，且解析得出有效期
+        self.assertEqual(self.app.settings.get("workbuddy_cookie"),
+                         "session=sess-v|1792744353|sig; session_2=second")
+        from workbuddy_sync import cookie_expiry
+        self.assertEqual(cookie_expiry(self.app.settings.get("workbuddy_cookie")),
+                         1792744353)
+
+    def test_tray_loop_calls_workbuddy_sync(self):
+        """托盘刷新循环要把 WorkBuddy 也带上（否则永远不会自动更新）"""
+        calls = []
+        self.app.sync_trae = lambda interactive=False: calls.append(("trae", interactive))
+        self.app.sync_workbuddy = lambda interactive=False: calls.append(
+            ("workbuddy", interactive))
+        self.app.update_icon_color = lambda: None
+        self.app.query_day_stats = lambda days=0: {"total": 0}
+        self.app.check_token_milestone = lambda total: None
+        self.app.maybe_auto_backup = lambda: None
+        self.app.maybe_generate_weekly_report = lambda: None
+        self.app.maybe_check_updates_silently = lambda: None
+        self.app.build_menu = lambda: []
+        self.app.settings.set("refresh_interval", 30)
+
+        # 第一轮 sleep 放行（让循环体跑完），第二轮再中断，避免无限循环
+        rounds = {"n": 0}
+
+        def stop_after_one_round(_seconds):
+            rounds["n"] += 1
+            if rounds["n"] > 1:
+                raise KeyboardInterrupt
+
+        with mock.patch.object(main.time, "sleep", side_effect=stop_after_one_round):
+            try:
+                self.app.update_icon()
+            except KeyboardInterrupt:
+                pass
+
+        self.assertIn(("workbuddy", False), calls)
+        self.assertIn(("trae", False), calls)
 
 
 if __name__ == "__main__":

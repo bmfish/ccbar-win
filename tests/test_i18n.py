@@ -214,7 +214,7 @@ class TestEnglishUi(ui_fixture.TrayFixture):
         labels = [nb.tab(t, "text") for t in nb.tabs()]
         self.assertEqual(labels,
                          [main.L(t) for t in
-                          ("费用", "洞察", "分享", "渠道", "流水", "积分")])
+                          ("费用", "洞察", "分享", "渠道", "流水", "积分", "WorkBuddy")])
         for tab_id in nb.tabs():
             self.assertTrue(nb.nametowidget(tab_id).winfo_children(),
                             "页签 %s 是空的" % nb.tab(tab_id, "text"))

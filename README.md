@@ -71,10 +71,13 @@ pyinstaller --onefile --noconsole --name ccBar --icon ccBar.ico --add-data "ccBa
   - 渠道：近 30 天渠道与应用堆叠、Token 构成、缓存命中率、今日各渠道
   - 流水：**任意日期回看**（‹ / 日期 / › / 今天），按渠道与模型筛选，**导出 CSV**
   - 积分：今日 / 7 天 / 30 天积分、**官方账单余额**、近 30 天积分走势（Trae 口径）
+  - **WorkBuddy**（Windows 独有）：今日 / 7 天 / 30 天 / 历史总积分、按客户端（CodeBuddyIDE / WorkBuddy）
+    拆分、模型排行、近 30 天积分走势 —— 该源**独立存表**，其余页签一律不含它的数据
 - **周报**：每周一自动生成上周用量周报 PNG 到 `~/Documents/CCBar 周报/`，
   周一没开机则下次启动/刷新自动补生成（文件存在即幂等），生成后弹系统通知
 - **通知**：用量预警阈值、每累计 N 万 token 里程碑（0 = 关闭，间隔可配）
 - **多数据源**：cc-switch / ZCode / **Trae**，各自可启停、自定义路径；路径保存前即时校验
+  Trae 后台同步间隔可在设置里自定义（60 ~ 7200 秒，**默认 10 分钟**）
 - **主题**：6 套内置配色（默认 / 卡哇伊 01 / 海蓝 / 翠绿 / 星空紫 / CRT 终端），
   JSON 主题包导入 / 导出 / 重命名 / 删除，与 macOS 版主题包互通
 - **双语界面**：中文 / English / 跟随系统
@@ -89,10 +92,11 @@ ccbar 自带统计库（`~/.ccbar/ccbar.db`），对外部源库**全程只读**
 
 ```
 自建库（主连接）
- ├── usage_log   统一明细表（昨天及更早的历史 + Trae 全部会话快照）
- ├── daily_agg   每日聚合缓存（区间/总量/按月查询直接读它，补账时窗口重算）
- ├── meta        各源同步水位 / Trae 登录态与积分账单
- └── usage_all   临时视图 = 自家历史 + 各源"今日"实时数据
+ ├── usage_log         统一明细表（昨天及更早的历史 + Trae 全部会话快照）
+ ├── daily_agg         每日聚合缓存（区间/总量/按月查询直接读它，补账时窗口重算）
+ ├── workbuddy_usage   WorkBuddy 独立明细表（**刻意不进 usage_log**，只在洞察中心那页可见）
+ ├── meta              各源同步水位 / Trae 登录态与积分账单 / WorkBuddy 凭据
+ └── usage_all         临时视图 = 自家历史 + 各源"今日"实时数据
       ├── ATTACH ~/.cc-switch/cc-switch.db   (只读)
       └── ATTACH ~/.zcode/cli/db/db.sqlite   (只读)
 ```
@@ -107,6 +111,7 @@ ccbar 自带统计库（`~/.ccbar/ccbar.db`），对外部源库**全程只读**
 | cc-switch | input + output + 缓存读 + 缓存创建（全量，费用按 cc-switch 记录的单价折算） | 启用 |
 | ZCode | input + output（与 ZCode 官方统计一致，可直接对账；官方未计费，可用默认单价估算） | 关闭，设置中勾选 |
 | Trae | 净输入（input = 总量 − 缓存命中）+ output；积分为官方计费口径 | 关闭，需填 sessionid |
+| WorkBuddy | **仅积分**（接口只给 `credit`，无 token / 无金额）：请求数 + 积分 + 模型 + 客户端；独立存表，只在洞察中心有独立页签 | 关闭，需粘贴 Cookie |
 
 新增数据源：实现 `stats_store.py` 里的 `SourceAdapter` 并注册到 `SOURCE_REGISTRY` 即可
 （同步、视图、设置界面自动生效）。
@@ -116,12 +121,15 @@ ccbar 自带统计库（`~/.ccbar/ccbar.db`），对外部源库**全程只读**
 - cc-switch：`~/.cc-switch/cc-switch.db`（可在设置中修改）
 - ZCode：`~/.zcode/cli/db/db.sqlite`（可在设置中修改，默认未启用）
 - Trae：无本地库，走 `https://api.trae.cn` 官方接口（需在设置里粘贴 sessionid）
+- WorkBuddy：无本地库，走 `https://www.codebuddy.cn` 的 `get-user-request-usage` 接口
+  （凭据是整条 Cookie，设置页支持直接粘贴整条 `Copy as cURL` 命令自动提取 `session`；
+  若服务端在响应里回写新的 `session`，会就地保存并用于下次同步）
 
 自动识别失败时在设置中手动指定。所有源库都以 `mode=ro` 只读挂载。
 
 ## 设置存储
 
-`~/.ccbar/settings.json`（JSON，21+ 个键）。老版本的 `~/.ccbar/settings.txt`
+`~/.ccbar/settings.json`（JSON，25+ 个键）。老版本的 `~/.ccbar/settings.txt`
 会在首次启动时自动迁移（含 GBK/中文路径），迁移只跑一次。
 
 ## 开发与测试

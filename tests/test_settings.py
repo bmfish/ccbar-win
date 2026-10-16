@@ -70,6 +70,10 @@ class TestDefaults(SettingsTestCase):
         self.assertEqual(s.get("custom_themes"), [])
         self.assertEqual(s.get("insights_last_page"), "费用")
         self.assertEqual(s.get("trae_sessionid"), "")
+        self.assertEqual(s.get("trae_bg_interval"), 600, "Trae 后台同步默认 10 分钟")
+        self.assertFalse(s.get("workbuddy_enabled"))
+        self.assertEqual(s.get("workbuddy_cookie"), "")
+        self.assertEqual(s.get("workbuddy_bg_interval"), 600, "WorkBuddy 后台默认 10 分钟")
         self.assertFalse(os.path.exists(self.json_path()))
 
     def test_required_keys_all_present(self):
@@ -79,11 +83,27 @@ class TestDefaults(SettingsTestCase):
                     "trae_sessionid", "led_red_threshold", "monthly_budget_usd",
                     "default_token_price", "auto_weekly_report", "launch_at_login",
                     "app_language", "theme", "custom_themes", "insights_last_page",
-                    "last_auto_backup_date", "last_update_check_date")
+                    "last_auto_backup_date", "last_update_check_date",
+                    "trae_bg_interval", "workbuddy_enabled", "workbuddy_cookie",
+                    "workbuddy_bg_interval")
         s = Settings(self.tmp)
         for key in required:
             self.assertIn(key, DEFAULTS, f"DEFAULTS 缺少 {key}")
             self.assertEqual(s.get(key), DEFAULTS[key])
+
+    def test_interval_defaults_match_the_source_modules(self):
+        """默认值与边界不各写一份：HTTP 源以 http_common / trae_sync 的常量为准"""
+        import http_common
+        import trae_sync
+        import workbuddy_sync
+
+        self.assertEqual(DEFAULTS["trae_bg_interval"], trae_sync.BG_MIN_INTERVAL)
+        self.assertEqual(DEFAULTS["trae_bg_interval"], 600)
+        self.assertEqual(DEFAULTS["workbuddy_bg_interval"], workbuddy_sync.BG_MIN_INTERVAL)
+        self.assertEqual(DEFAULTS["workbuddy_bg_interval"], 600)
+        self.assertEqual(http_common.DEFAULT_BG_INTERVAL, 600)
+        self.assertEqual(trae_sync.clamp_bg_interval(90), 90)
+        self.assertEqual(workbuddy_sync.clamp_bg_interval(90), 90)
 
     def test_mutable_defaults_are_not_shared(self):
         """custom_themes 这类 list 默认值必须深拷贝，实例之间互不污染"""
@@ -281,10 +301,12 @@ class TestValidation(SettingsTestCase):
         ("led_red_threshold", "红色门槛（≥ 0 的整数，万，0=不变红）"),
         ("monthly_budget_usd", "月度预算（≥ 0 的数字，$，0=关闭）"),
         ("default_token_price", "默认单价（≥ 0 的数字，$/M tokens，0=关闭）"),
+        ("trae_bg_interval", "Trae 同步间隔（60 ~ 7200 秒）"),
+        ("workbuddy_bg_interval", "WorkBuddy 同步间隔（60 ~ 7200 秒）"),
     ]
 
     def test_validate_reports_all_invalid_in_order(self):
-        """6 个字段全非法 → 按 macOS 版顺序给出全部中文标签"""
+        """7 个字段全非法 → 按 macOS 版顺序给出全部中文标签"""
         s = Settings(self.tmp)
         errors = s.validate({
             "refresh_interval": "abc",
@@ -293,6 +315,8 @@ class TestValidation(SettingsTestCase):
             "led_red_threshold": -5,
             "monthly_budget_usd": "-1",
             "default_token_price": "x",
+            "trae_bg_interval": "30",
+            "workbuddy_bg_interval": "0",
         })
         self.assertEqual(errors, [label for _, label in self.LABELS])
 
@@ -307,6 +331,10 @@ class TestValidation(SettingsTestCase):
             ("led_red_threshold", -1), ("led_red_threshold", None),
             ("monthly_budget_usd", -0.1), ("monthly_budget_usd", "abc"),
             ("default_token_price", -1), ("default_token_price", "abc"),
+            ("trae_bg_interval", 59), ("trae_bg_interval", 7201),
+            ("trae_bg_interval", "五分钟"), ("trae_bg_interval", None),
+            ("workbuddy_bg_interval", 59), ("workbuddy_bg_interval", 7201),
+            ("workbuddy_bg_interval", "x"), ("workbuddy_bg_interval", None),
         ]
         s = Settings(self.tmp)
         for key, value in cases:
@@ -326,6 +354,10 @@ class TestValidation(SettingsTestCase):
         self.assertEqual(s.validate({"default_token_price": "0"}), [])
         self.assertEqual(s.validate({"monthly_budget_usd": ""}), [])   # 空输入按 0（同 macOS）
         self.assertEqual(s.validate({"default_token_price": None}), [])
+        self.assertEqual(s.validate({"trae_bg_interval": 60}), [])
+        self.assertEqual(s.validate({"trae_bg_interval": "7200"}), [])
+        self.assertEqual(s.validate({"workbuddy_bg_interval": 60}), [])
+        self.assertEqual(s.validate({"workbuddy_bg_interval": "7200"}), [])
         self.assertEqual(s.validate({}), [])
         self.assertEqual(s.validate(None), [])
 
@@ -408,6 +440,7 @@ class TestReset(SettingsTestCase):
         self.assertEqual(s.get("default_token_price"), 0.0)
         self.assertTrue(s.get("auto_weekly_report"))
         self.assertEqual(s.get("notify_interval"), 1000)
+        self.assertEqual(s.get("trae_bg_interval"), DEFAULTS["trae_bg_interval"])
         self.assertEqual(s.get("theme"), "默认主题")
         # 重置结果已落盘
         self.assertEqual(Settings(self.tmp).get("refresh_interval"), 30)

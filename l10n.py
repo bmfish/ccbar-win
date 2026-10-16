@@ -379,6 +379,7 @@ L10N_EN = {
     "预计本月消耗": "Projected This Month",
     "默认单价": "Default Price",
     "默认单价（≥ 0 的数字，$/M tokens，0=关闭）": "Default price (≥ 0, $/M tokens, 0=off)",
+    "Trae 同步间隔（60 ~ 7200 秒）": "Trae sync interval (60 – 7200 s)",
     "🎉 用量里程碑": "🎉 Usage Milestone",
 }
 
@@ -395,6 +396,8 @@ L10N_EN.update({
     "费用估算": "Cost estimate",
     "刷新间隔 (秒):": "Refresh interval (s):",
     "范围 5 - 3000": "range 5 - 3000",
+    "后台同步间隔 (秒):": "Background sync (s):",
+    "范围 %d - %d": "range %d - %d",
     "预警阈值 (万):": "Warning threshold (x10k):",
     "超过此值将弹出通知提醒": "Notify when exceeded",
     "通知间隔 (万):": "Milestone interval (x10k):",
@@ -533,6 +536,32 @@ L10N_EN.update({
     "已用预算 %.0f%%": "%.0f%% of budget used",
     "日均 %.0f 分钟 · 最长 %.0f 分钟": "avg %.0f min · longest %.0f min",
     "重开窗口后生效": "Applies to newly opened windows",
+    # ---- WorkBuddy（独立 HTTP 源，只在洞察中心有一个页签）----
+    "粘贴 codebuddy.cn 的 Cookie（也可直接粘贴整条 curl 命令，只需 session）":
+        "Paste the codebuddy.cn cookie (a full curl command works too; only session is needed)",
+    "从剪贴板导入": "Import from Clipboard",
+    "清空": "Clear",
+    "无法导入": "Import failed",
+    "剪贴板里没有可识别的 Cookie（缺 session）":
+        "No usable cookie on the clipboard (session missing)",
+    "登录已过期，请重新粘贴 Cookie": "Cookie expired — paste a fresh one",
+    "历史总积分": "All-time Credits",
+    "今日请求 %d · 历史请求 %d": "%d requests today · %d all time",
+    " · 首次 %s": " · since %s",
+    " · 上次同步 %s": " · synced %s",
+    " · 有效期至 %s": " · valid until %s",
+    " · 有效期未知": " · expiry unknown",
+    "按客户端（近 30 天）": "By Client (30 days)",
+    "%d 次请求": "%d requests",
+    "模型排行（近 30 天）": "Top Models (30 days)",
+    "接入 WorkBuddy 并产生用量后展示积分消耗":
+        "Credits appear once WorkBuddy is connected and used",
+    "WorkBuddy 数据独立统计，不计入费用 / 渠道 / 流水 / 积分等页面":
+        "WorkBuddy is tracked separately — not included in Cost / Channels / Timeline / Credits",
+    "WorkBuddy 数据独立统计，只出现在洞察中心":
+        "WorkBuddy is tracked separately and appears only in Insights",
+    "WorkBuddy 同步失败:": "WorkBuddy sync failed: ",
+    "WorkBuddy 同步间隔（60 ~ 7200 秒）": "WorkBuddy sync interval (60 – 7200 s)",
 })
 
 # MARK: - 批次 4（i18n 全覆盖）补充：把 main.py 里新包裹的字面量补齐英文

@@ -523,9 +523,34 @@ class TestNightSilent(unittest.TestCase):
     def test_constants_match_macos(self):
         self.assertEqual((ts.FIRST_FETCH_DAYS, ts.PAGE_LOOKBACK_DAYS), (90, 2))
         self.assertEqual((ts.PAGE_SIZE, ts.MAX_PAGES), (20, 50))
-        self.assertEqual((ts.BG_MIN_INTERVAL, ts.INTERACTIVE_MIN_INTERVAL), (900, 60))
+        self.assertEqual((ts.BG_MIN_INTERVAL, ts.INTERACTIVE_MIN_INTERVAL), (600, 60))
         self.assertEqual((ts.ENT_MIN_INTERVAL, ts.NIGHT_SILENT_UNTIL_HOUR), (3600, 9))
         self.assertEqual(ts.API_BASE, "https://api.trae.cn")
+
+
+# ---- 后台同步间隔（可在设置里配）----
+
+
+class TestBackgroundInterval(unittest.TestCase):
+    def test_default_is_ten_minutes(self):
+        """默认 10 分钟；可调区间 1 分钟 ~ 2 小时"""
+        self.assertEqual(ts.BG_MIN_INTERVAL, 600)
+        self.assertEqual((ts.BG_INTERVAL_MIN, ts.BG_INTERVAL_MAX), (60, 7200))
+
+    def test_clamp_accepts_custom_seconds(self):
+        self.assertEqual(ts.clamp_bg_interval(120), 120)
+        self.assertEqual(ts.clamp_bg_interval("120"), 120, "Entry 里的字符串也要认")
+
+    def test_clamp_pins_to_bounds(self):
+        self.assertEqual(ts.clamp_bg_interval(1), ts.BG_INTERVAL_MIN)
+        self.assertEqual(ts.clamp_bg_interval(59), ts.BG_INTERVAL_MIN)
+        self.assertEqual(ts.clamp_bg_interval(7201), ts.BG_INTERVAL_MAX)
+
+    def test_clamp_falls_back_on_junk(self):
+        self.assertEqual(ts.clamp_bg_interval(None), ts.BG_MIN_INTERVAL)
+        self.assertEqual(ts.clamp_bg_interval("abc"), ts.BG_MIN_INTERVAL)
+        self.assertEqual(ts.clamp_bg_interval("", default=180), 180,
+                         "调用方给定默认值时按它回落")
 
 
 if __name__ == "__main__":

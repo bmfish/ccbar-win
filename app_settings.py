@@ -18,6 +18,13 @@ import locale
 import os
 from pathlib import Path
 
+# HTTP 源后台同步间隔的默认与边界以 http_common 为准（纯 stdlib 模块，导入无副作用）；
+# 取不到时退回同值字面量，坏环境也不影响设置存取
+try:
+    from http_common import BG_INTERVAL_MIN, BG_INTERVAL_MAX, DEFAULT_BG_INTERVAL
+except Exception:  # pragma: no cover - http_common 缺失的极端场景
+    BG_INTERVAL_MIN, BG_INTERVAL_MAX, DEFAULT_BG_INTERVAL = 60, 7200, 600
+
 # 家目录下的设置目录与新旧文件名
 CONFIG_DIR = Path.home() / ".ccbar"
 FILE_NAME = "settings.json"
@@ -53,6 +60,11 @@ DEFAULTS = {
     "zcode_path": DEFAULT_PATHS["zcode"],
     "trae_enabled": False,
     "trae_sessionid": "",                 # Trae 的 passport sessionid cookie
+    "trae_bg_interval": DEFAULT_BG_INTERVAL,       # Trae 后台同步间隔（秒），默认 10 分钟
+    # WorkBuddy 是 HTTP 源但**独立存放**：只出现在洞察中心的独立页签
+    "workbuddy_enabled": False,
+    "workbuddy_cookie": "",               # 整条 Cookie（session / session_2）
+    "workbuddy_bg_interval": DEFAULT_BG_INTERVAL,  # 后台同步间隔（秒）
     "led_red_threshold": 100,             # 闪电 LED 红色门槛（万），0=不变红
     "monthly_budget_usd": 0.0,            # 月度预算（$），0=关闭
     "default_token_price": 0.0,           # 未计费渠道默认单价（$/M tokens），0=关闭
@@ -211,6 +223,16 @@ def validate_updates(updates):
         v = _as_float(u["default_token_price"], empty_zero=True)
         if v is None or v < 0:
             errors.append("默认单价（≥ 0 的数字，$/M tokens，0=关闭）")
+    if "trae_bg_interval" in u:
+        v = _as_int(u["trae_bg_interval"])
+        if v is None or not BG_INTERVAL_MIN <= v <= BG_INTERVAL_MAX:
+            errors.append("Trae 同步间隔（%d ~ %d 秒）"
+                          % (BG_INTERVAL_MIN, BG_INTERVAL_MAX))
+    if "workbuddy_bg_interval" in u:
+        v = _as_int(u["workbuddy_bg_interval"])
+        if v is None or not BG_INTERVAL_MIN <= v <= BG_INTERVAL_MAX:
+            errors.append("WorkBuddy 同步间隔（%d ~ %d 秒）"
+                          % (BG_INTERVAL_MIN, BG_INTERVAL_MAX))
     return errors
 
 

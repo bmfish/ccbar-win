@@ -42,6 +42,8 @@ from update_check import fetch_latest_version, is_newer_version, RELEASES_URL
 import app_settings
 import autostart
 import l10n
+import trae_sync
+import workbuddy_sync
 from l10n import L          # 界面文案统一走 L(中文原文)；当前语言由 l10n 维护
 import share_card
 import themes
@@ -832,10 +834,14 @@ class CcBarTray:
             if adapter is None:
                 continue
             configs.append((adapter, enabled, path or adapter.default_path))
-        # Trae 走 HTTP 同步，单独把开关与登录态交给统计库
+        # Trae / WorkBuddy 走 HTTP 同步，单独把开关、凭据与后台间隔交给统计库
         self.store.rebuild(configs,
                            trae_enabled=bool(self.settings.get("trae_enabled")),
-                           trae_sessionid=self.settings.get("trae_sessionid") or "")
+                           trae_sessionid=self.settings.get("trae_sessionid") or "",
+                           trae_bg_interval=self.settings.get("trae_bg_interval"),
+                           workbuddy_enabled=bool(self.settings.get("workbuddy_enabled")),
+                           workbuddy_cookie=self.settings.get("workbuddy_cookie") or "",
+                           workbuddy_bg_interval=self.settings.get("workbuddy_bg_interval"))
         self.store.sync_if_needed()
 
     def maybe_generate_weekly_report(self):
@@ -2492,8 +2498,10 @@ class CcBarTray:
 
     @_on_gui
     def show_insights(self, icon=None, item=None, initial_page=None):
-        """洞察中心：费用 / 洞察 / 分享 / 渠道 / 流水 / 积分 六页（与 macOS 版同口径）
+        """洞察中心：费用 / 洞察 / 分享 / 渠道 / 流水 / 积分 + WorkBuddy 七页。
 
+        前六页与 macOS 版同口径；WorkBuddy 是 Windows 独有的独立源页签，
+        数据来自独立表，绝不混进其他页。
         initial_page 覆盖页签记忆（面板「流水」按钮直达流水页）。
         """
         import tkinter as tk
@@ -2527,6 +2535,24 @@ class CcBarTray:
             credits_ent = store.trae_ent_summary()
         except Exception:
             credits_ent = None
+        # WorkBuddy 页：独立表，只在这里出现（先触发一次交互档同步，数字才新鲜）
+        self.sync_workbuddy(interactive=True)
+        try:
+            wb_today = store.workbuddy_credit_sum(0)
+            wb7 = store.workbuddy_credit_sum(7)
+            wb30 = store.workbuddy_credit_sum(30)
+            wb_total_credit, wb_total_reqs, wb_first_epoch = store.workbuddy_total()
+            wb_daily = store.workbuddy_credit_daily(30)
+            wb_clients = store.workbuddy_client_breakdown(30)
+            wb_models = store.workbuddy_model_breakdown(30, limit=10)
+            wb_today_reqs = store.workbuddy_today_requests()
+            wb_synced_at = store.workbuddy_synced_at()
+            wb_status = store.source_status.get("workbuddy", "") or ""
+        except Exception as e:
+            logger.warning("WorkBuddy insights failed: %s", e)
+            wb_today = wb7 = wb30 = wb_total_credit = 0.0
+            wb_total_reqs = wb_today_reqs = wb_first_epoch = wb_synced_at = 0
+            wb_daily, wb_clients, wb_models, wb_status = [], [], [], ""
         # 月度预算（设置里 > 0 才出面）；未计费渠道按默认单价（$/M tokens）估算
         budget = float(self.settings.get("monthly_budget_usd") or 0)
         price = float(self.settings.get("default_token_price") or 0)
@@ -3357,6 +3383,102 @@ class CcBarTray:
                  wraplength=690).pack(fill=tk.X, padx=16, pady=(14, 8))
         cred_wheel(cred_page)
 
+        # ============ WorkBuddy（独立页签，不与其他页面共享口径）============
+        f_wb = tab(L("WorkBuddy"))
+        wb_page, wb_wheel = scroll_page(f_wb)
+
+        wb_row_cards = tk.Frame(wb_page, bg=Design.BACKGROUND)
+        wb_row_cards.pack(fill=tk.X, padx=10, pady=(8, 0))
+        for i, (title, value) in enumerate([(L("今日积分"), wb_today),
+                                            (L("近 7 天"), wb7),
+                                            (L("近 30 天"), wb30),
+                                            (L("历史总积分"), wb_total_credit)]):
+            card, body = rounded_card(wb_row_cards, padx=16, pady=12)
+            card.grid(row=0, column=i, sticky="nsew", padx=6, pady=4)
+            wb_row_cards.grid_columnconfigure(i, weight=1)
+            tk.Label(body, text=title, fg=semantic_color("secondary"), bg=Design.CARD_FILL,
+                     font=Design.FONT_UI, anchor='w').pack(fill=tk.X)
+            tk.Label(body, text=format_credits(value), fg=Design.BIG_NUMBER,
+                     bg=Design.CARD_FILL, font=Design.FONT_INSIGHT_VALUE,
+                     anchor='w').pack(fill=tk.X)
+
+        # 明细口径说明：请求数 / 首次接入 / 上次同步（都是本页专属，不进其他页）
+        detail_line = L("今日请求 %d · 历史请求 %d") % (wb_today_reqs, wb_total_reqs)
+        if wb_first_epoch:
+            detail_line += L(" · 首次 %s") % time.strftime(
+                "%Y-%m-%d", time.localtime(wb_first_epoch))
+        if wb_synced_at:
+            detail_line += L(" · 上次同步 %s") % time.strftime(
+                "%H:%M", time.localtime(wb_synced_at))
+        tk.Label(wb_page, text=detail_line, fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
+                 font=Design.FONT_UI_SMALL, anchor='w').pack(fill=tk.X, padx=16, pady=(8, 0))
+
+        section(wb_page, L("按客户端（近 30 天）"))
+        if not wb_clients:
+            muted(wb_page, L("接入 WorkBuddy 并产生用量后展示积分消耗"))
+        else:
+            client_max = max(c[1] for c in wb_clients) or 1.0
+            for name, credit, reqs in wb_clients:
+                line = tk.Frame(wb_page, bg=Design.BACKGROUND)
+                line.pack(fill=tk.X, padx=16, pady=2)
+                tk.Label(line, text=name, fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+                         font=Design.FONT_UI, width=16, anchor='w').pack(side=tk.LEFT)
+                tk.Label(line, text=format_credits(credit), fg=Design.DATA,
+                         bg=Design.BACKGROUND, font=Design.FONT_MONO_SMALL,
+                         width=12, anchor='e').pack(side=tk.LEFT)
+                tk.Label(line, text=L("%d 次请求") % reqs, fg=Design.TEXT_MUTED,
+                         bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL,
+                         anchor='w').pack(side=tk.LEFT, padx=(12, 0))
+                bar = tk.Canvas(line, height=Design.BAR_HEIGHT, bg=Design.BACKGROUND,
+                                highlightthickness=0, width=180)
+                bar.pack(side=tk.RIGHT)
+
+                def _draw_client(event, c=bar, ratio=min(credit / client_max, 1.0)):
+                    c.delete("all")
+                    r = Design.BAR_HEIGHT / 2
+                    ChartCanvas.round_rect(c, 0, 0, max(event.width, 1), Design.BAR_HEIGHT,
+                                           r, fill=Design.BTN_BG)
+                    if ratio > 0:
+                        ChartCanvas.round_rect(c, 0, 0, max(event.width * ratio, 2),
+                                               Design.BAR_HEIGHT, r,
+                                               fill=blend(Design.BRAND, Design.CARD_FILL, 0.75))
+
+                bar.bind("<Configure>", _draw_client)
+
+        section(wb_page, L("模型排行（近 30 天）"))
+        if not wb_models:
+            muted(wb_page, L("暂无数据"))
+        else:
+            for name, credit, reqs in wb_models:
+                line = tk.Frame(wb_page, bg=Design.BACKGROUND)
+                line.pack(fill=tk.X, padx=16, pady=2)
+                tk.Label(line, text=name, fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+                         font=Design.FONT_UI, anchor='w').pack(side=tk.LEFT)
+                tk.Label(line, text=L("%d 次请求") % reqs, fg=Design.TEXT_MUTED,
+                         bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL,
+                         anchor='w').pack(side=tk.LEFT, padx=(12, 0))
+                tk.Label(line, text=format_credits(credit), fg=Design.DATA,
+                         bg=Design.BACKGROUND, font=Design.FONT_MONO_SMALL).pack(side=tk.RIGHT)
+
+        section(wb_page, L("近 30 天积分走势"))
+        if wb30 <= 0 or not wb_daily:
+            muted(wb_page, L("接入 WorkBuddy 并产生用量后展示积分消耗"))
+        else:
+            wb_palette = model_colors(max(len(wb_daily), 1))
+            wb_series = [(d[5:], {d: v}) for d, v in wb_daily]
+            wb_colors = {d: wb_palette[i % len(wb_palette)]
+                         for i, (d, _v) in enumerate(wb_daily)}
+            png_label(wb_page, self._bar_chart_png(wb_series, wb_colors,
+                                                   value_fmt=format_credits))
+
+        hint = L("WorkBuddy 数据独立统计，不计入费用 / 渠道 / 流水 / 积分等页面")
+        if wb_status:
+            hint = L(wb_status) + " · " + hint
+        tk.Label(wb_page, text=hint, fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
+                 font=Design.FONT_UI_SMALL, anchor='w', justify=tk.LEFT,
+                 wraplength=690).pack(fill=tk.X, padx=16, pady=(14, 8))
+        wb_wheel(wb_page)
+
         # ============ 页签记忆 ============
         titles = [nb.tab(t, "text") for t in nb.tabs()]
         last_page = initial_page or self.settings.get("insights_last_page") or L("费用")
@@ -3699,6 +3821,94 @@ class CcBarTray:
                  bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL,
                  anchor='w').pack(fill=tk.X, pady=(2, 0))
 
+        # 后台拉取频率（默认 10 分钟；label_width 对齐上面的 Trae 勾选列）
+        trae_interval_entry = field_row(
+            L("后台同步间隔 (秒):"),
+            L("范围 %d - %d") % (trae_sync.BG_INTERVAL_MIN, trae_sync.BG_INTERVAL_MAX),
+            label_width=10)
+        trae_interval_entry.insert(0, str(self.settings.get(
+            "trae_bg_interval", trae_sync.BG_MIN_INTERVAL)))
+
+        # ------------------------------------------------------------ WorkBuddy（独立源）
+        # 与上面数据源刻意分开：它的数据只出现在洞察中心的独立页签，不混进任何其他页面
+        section("WorkBuddy")
+        wb_row = tk.Frame(inner, bg=Design.BACKGROUND)
+        wb_row.pack(fill=tk.X, padx=24, pady=(8, 0))
+        wb_head = tk.Frame(wb_row, bg=Design.BACKGROUND)
+        wb_head.pack(fill=tk.X)
+
+        wb_var = tk.BooleanVar(value=self.settings.get("workbuddy_enabled", False))
+        tk.Checkbutton(wb_head, variable=wb_var, bg=Design.BACKGROUND,
+                       fg=Design.TEXT_PRIMARY, activebackground=Design.BACKGROUND,
+                       activeforeground=Design.TEXT_PRIMARY, selectcolor=Design.CARD_FILL,
+                       bd=0, highlightthickness=0,
+                       cursor="hand2").pack(side=tk.LEFT)
+        tk.Label(wb_head, text="WorkBuddy", fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+                 font=Design.FONT_UI, width=10, anchor='w').pack(side=tk.LEFT)
+
+        # 凭据是一整条 Cookie（可达数 KB），单行 Entry 不实用，用 2 行多行框
+        wb_text = tk.Text(wb_head, height=2, bg=Design.CARD_FILL, fg=Design.TEXT_PRIMARY,
+                          insertbackground=Design.TEXT_PRIMARY, relief="flat", wrap=tk.CHAR,
+                          font=Design.FONT_MONO_SMALL, highlightthickness=1,
+                          highlightbackground=Design.CARD_BORDER, highlightcolor=Design.BRAND)
+        wb_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        wb_text.insert("1.0", self.settings.get("workbuddy_cookie") or "")
+
+        tk.Label(wb_row,
+                 text=L("粘贴 codebuddy.cn 的 Cookie（也可直接粘贴整条 curl 命令，只需 session）"),
+                 fg=Design.TEXT_MUTED, bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL,
+                 anchor='w').pack(fill=tk.X, pady=(2, 0))
+
+        wb_btn_row = tk.Frame(wb_row, bg=Design.BACKGROUND)
+        wb_btn_row.pack(fill=tk.X, pady=(4, 0))
+
+        def wb_import_clipboard():
+            """从剪贴板导入：整条 Cookie 或整条 curl 命令都能识别"""
+            try:
+                raw = root.clipboard_get()
+            except Exception:
+                raw = ""
+            normalized = workbuddy_sync.normalize_cookie(raw)
+            if not normalized:
+                messagebox.showerror(L("无法导入"),
+                                     L("剪贴板里没有可识别的 Cookie（缺 session）"))
+                return
+            wb_text.delete("1.0", tk.END)
+            wb_text.insert("1.0", normalized)
+
+        def wb_clear():
+            wb_text.delete("1.0", tk.END)
+
+        small_btn(wb_btn_row, L("从剪贴板导入"), wb_import_clipboard).pack(side=tk.LEFT)
+        small_btn(wb_btn_row, L("清空"), wb_clear).pack(side=tk.LEFT, padx=(6, 0))
+
+        # 状态行：数据层的中文原文（未启用/已连接/登录已过期…），显示时才过 L
+        try:
+            wb_status_text = L(self.store.source_status.get("workbuddy", "") or "")
+            wb_cookie_now = self.store.workbuddy_live_cookie()
+        except Exception:
+            wb_status_text, wb_cookie_now = "", ""
+        wb_expiry = workbuddy_sync.cookie_expiry(wb_cookie_now)
+        if wb_expiry:
+            wb_status_text += L(" · 有效期至 %s") % time.strftime(
+                "%Y-%m-%d %H:%M", time.localtime(wb_expiry))
+        elif wb_cookie_now:
+            wb_status_text += L(" · 有效期未知")
+        tk.Label(wb_row, text=wb_status_text, fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
+                 font=Design.FONT_UI_SMALL, anchor='w').pack(fill=tk.X, pady=(2, 0))
+
+        wb_interval_entry = field_row(
+            L("后台同步间隔 (秒):"),
+            L("范围 %d - %d") % (workbuddy_sync.BG_INTERVAL_MIN,
+                                 workbuddy_sync.BG_INTERVAL_MAX),
+            label_width=10)
+        wb_interval_entry.insert(0, str(self.settings.get(
+            "workbuddy_bg_interval", workbuddy_sync.BG_MIN_INTERVAL)))
+
+        tk.Label(wb_row, text=L("WorkBuddy 数据独立统计，只出现在洞察中心"),
+                 fg=Design.TEXT_MUTED, bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL,
+                 anchor='w').pack(fill=tk.X, pady=(6, 0))
+
         # ------------------------------------------------------------ 提醒与费用
         section(L("提醒"))
         warning_entry = field_row(L("预警阈值 (万):"), L("超过此值将弹出通知提醒"))
@@ -3819,6 +4029,14 @@ class CcBarTray:
             refresh_theme_menu()
             trae_var.set(False)
             trae_entry.delete(0, tk.END)
+            trae_interval_entry.delete(0, tk.END)
+            trae_interval_entry.insert(
+                0, str(app_settings.DEFAULTS["trae_bg_interval"]))
+            wb_var.set(False)
+            wb_text.delete("1.0", tk.END)
+            wb_interval_entry.delete(0, tk.END)
+            wb_interval_entry.insert(
+                0, str(app_settings.DEFAULTS["workbuddy_bg_interval"]))
 
         def collect():
             updates = {
@@ -3842,9 +4060,16 @@ class CcBarTray:
                 updates[enable_key] = source_vars[adapter.id].get()
                 path_value = source_entries[adapter.id].get().strip()
                 updates[path_key] = path_value or adapter.default_path
-            # Trae 是 HTTP 源：开关 + 登录凭据（settings.validate/apply 一并处理）
+            # Trae 是 HTTP 源：开关 + 登录凭据 + 后台同步间隔（validate/apply 一并处理）
             updates["trae_enabled"] = trae_var.get()
             updates["trae_sessionid"] = trae_entry.get().strip()
+            updates["trae_bg_interval"] = trae_interval_entry.get()
+            # WorkBuddy 同理；粘贴的内容统一归一化成 "session=…; session_2=…"
+            wb_raw = wb_text.get("1.0", tk.END)
+            updates["workbuddy_enabled"] = wb_var.get()
+            updates["workbuddy_cookie"] = (workbuddy_sync.normalize_cookie(wb_raw)
+                                           or wb_raw.strip())
+            updates["workbuddy_bg_interval"] = wb_interval_entry.get()
             return updates
 
         def save():
@@ -3963,8 +4188,10 @@ class CcBarTray:
                 time.sleep(self.settings["refresh_interval"])
                 # 懒惰补账：历史（昨天及更早）落后就同步进自建库
                 self.store.sync_if_needed()
-                # Trae 用量（HTTP 源）：后台节流 15 分钟一次，0-9 点静默
+                # Trae 用量（HTTP 源）：后台按设置间隔节流（默认 10 分钟），0-9 点静默
                 self.sync_trae(interactive=False)
+                # WorkBuddy（独立表）：同样按自己的间隔节流，0-9 点静默
+                self.sync_workbuddy(interactive=False)
                 # 按用量更新图标颜色
                 self.update_icon_color()
                 # 检查里程碑（每1000万token冒泡通知）
@@ -3992,8 +4219,10 @@ class CcBarTray:
         sync = getattr(self.store, "sync_trae_if_needed", None)
         if sync is None or not self.settings.get("trae_enabled"):
             return
-        # 登录态可能在设置里改过，先同步进统计库
+        # 登录态与后台间隔可能在设置里改过，先同步进统计库
         self.store.trae_sessionid = self.settings.get("trae_sessionid") or ""
+        self.store.trae_bg_interval = trae_sync.clamp_bg_interval(
+            self.settings.get("trae_bg_interval"))
 
         def worker():
             try:
@@ -4001,6 +4230,26 @@ class CcBarTray:
             except Exception as e:
                 print(L("Trae 同步失败:"), e)
                 logger.warning("Trae sync failed: %s", e)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def sync_workbuddy(self, interactive=False):
+        """跑一次 WorkBuddy 同步（独立表，不参与主界面；同样放后台线程）"""
+        sync = getattr(self.store, "sync_workbuddy_if_needed", None)
+        if sync is None or not self.settings.get("workbuddy_enabled"):
+            return
+        # 凭据与后台间隔可能在设置里改过，先同步进统计库
+        self.store.workbuddy_cookie = workbuddy_sync.normalize_cookie(
+            self.settings.get("workbuddy_cookie") or "")
+        self.store.workbuddy_bg_interval = workbuddy_sync.clamp_bg_interval(
+            self.settings.get("workbuddy_bg_interval"))
+
+        def worker():
+            try:
+                sync(interactive=interactive)
+            except Exception as e:
+                print(L("WorkBuddy 同步失败:"), e)
+                logger.warning("WorkBuddy sync failed: %s", e)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -4046,10 +4295,11 @@ class CcBarTray:
         # 初始化自建统计库并 ATTACH 各数据源（首次自动全量回填）
         self.connect_store()
 
-        # 启动时补一次日常维护：周一没开机的话在这里补出周报；Trae 也拉一次
+        # 启动时补一次日常维护：周一没开机的话在这里补出周报；Trae / WorkBuddy 各拉一次
         self.maybe_auto_backup()
         self.maybe_generate_weekly_report()
         self.sync_trae(interactive=False)
+        self.sync_workbuddy(interactive=False)
 
         # 创建图标：启动即静息灰（mac 同款，下一次刷新有增量才亮绿/红）
         initial_color = Design.LED_IDLE

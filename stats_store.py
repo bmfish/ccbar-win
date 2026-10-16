@@ -25,6 +25,24 @@ from pathlib import Path
 
 import trae_sync
 from trae_sync import TraeAuth, TraeResult
+import workbuddy_sync
+from workbuddy_sync import WorkBuddyResult
+
+# WorkBuddy 独立明细表：**刻意不进 usage_log**。
+# usage_all 视图第一段就是 usage_log 全表，写进去会污染面板/费用/渠道/流水等所有页面；
+# 而本源的定位是「只在洞察中心有一个独立页签」，所以从存储层就分开。
+WORKBUDDY_DDL = """
+CREATE TABLE IF NOT EXISTS workbuddy_usage (
+    request_id TEXT PRIMARY KEY,
+    client TEXT,
+    model TEXT,
+    credit REAL NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+)
+"""
+
+WORKBUDDY_INDEX_DDL = (
+    "CREATE INDEX IF NOT EXISTS idx_workbuddy_created ON workbuddy_usage(created_at)")
 
 DAILY_AGG_DDL = """
 CREATE TABLE IF NOT EXISTS daily_agg (
@@ -228,7 +246,13 @@ class StatsStore:
         # Trae 是 HTTP 源（不走 ATTACH）：rebuild 时把启用状态与凭据快照进来
         self.trae_enabled = False
         self.trae_sessionid = ""
+        self.trae_bg_interval = trae_sync.BG_MIN_INTERVAL   # 后台节流间隔（秒）
         self._last_trae_sync_at = 0.0   # 上次 Trae 同步时刻（in-memory，重启无妨）
+        # WorkBuddy 也是 HTTP 源，但独立存表、独立节流（不参与其他任何页面）
+        self.workbuddy_enabled = False
+        self.workbuddy_cookie = ""
+        self.workbuddy_bg_interval = workbuddy_sync.BG_MIN_INTERVAL
+        self._last_workbuddy_sync_at = 0.0
         # 每源连接诊断（设置页展示）：已连接 / 未启用 / 具体失败原因
         self.source_status = {}
         # 是否有任一可用数据源（SQLite ATTACH 或 Trae HTTP）。
@@ -243,17 +267,29 @@ class StatsStore:
 
     # ------------------------------------------------------------ 连接管理
 
-    def rebuild(self, configs, trae_enabled=False, trae_sessionid=""):
+    def rebuild(self, configs, trae_enabled=False, trae_sessionid="",
+                trae_bg_interval=None, workbuddy_enabled=False,
+                workbuddy_cookie="", workbuddy_bg_interval=None):
         """（重）建连接并 ATTACH 各启用源。
 
         configs: [(adapter, enabled, path), ...]
         trae_enabled / trae_sessionid: Trae 是 HTTP 源不走 ATTACH，只登记启用状态与
         passport 凭据。Trae-only 安装（无任何 SQLite 源）同样要能查数。
+        trae_bg_interval: Trae 后台同步间隔（秒）；None/非法回落到 trae_sync 默认。
+        workbuddy_enabled / workbuddy_cookie: WorkBuddy 同样是 HTTP 源，凭据是整条
+        Cookie；它的明细进独立表，**不参与** usage_all 与其他页面。
+        workbuddy_bg_interval: WorkBuddy 后台同步间隔（秒）。
         """
         with self._lock:
             self._close()
             self.trae_enabled = bool(trae_enabled)
             self.trae_sessionid = (trae_sessionid or "").strip()
+            self.trae_bg_interval = trae_sync.clamp_bg_interval(trae_bg_interval)
+            self.workbuddy_enabled = bool(workbuddy_enabled)
+            self.workbuddy_cookie = workbuddy_sync.normalize_cookie(
+                workbuddy_cookie) or (workbuddy_cookie or "").strip()
+            self.workbuddy_bg_interval = workbuddy_sync.clamp_bg_interval(
+                workbuddy_bg_interval)
             try:
                 # uri=True 使 ATTACH 支持 file:...?mode=ro 只读挂载
                 self.conn = sqlite3.connect(self.store_path(), uri=True,
@@ -297,6 +333,9 @@ class StatsStore:
                     """)
                     self.conn.execute(
                         "INSERT OR REPLACE INTO meta (key, value) VALUES ('daily_agg_full', '1')")
+                # WorkBuddy 独立明细表（不进 usage_log / daily_agg / usage_all）
+                self.conn.execute(WORKBUDDY_DDL)
+                self.conn.execute(WORKBUDDY_INDEX_DDL)
                 self.conn.commit()
             except sqlite3.Error as e:
                 print(f"初始化统计库失败: {e}")
@@ -323,7 +362,16 @@ class StatsStore:
                 self.source_status["trae"] = "未配置登录"
             else:
                 self.source_status["trae"] = "连接中…"
+            # WorkBuddy（HTTP 源，独立表）：凭据是整条 Cookie；启用但没粘凭据时同理
+            if not self.workbuddy_enabled:
+                self.source_status["workbuddy"] = "未启用"
+            elif not self.workbuddy_cookie:
+                self.source_status["workbuddy"] = "未配置登录"
+            else:
+                self.source_status["workbuddy"] = "连接中…"
 
+            # 注意：WorkBuddy **不算**可用数据源——它的数据不参与 usage_all，
+            # 算进去会让主界面从"请检查数据源"变成一张空图表。
             self.has_active_source = bool(self.attached) or self.trae_enabled
 
             self._rebuild_view()
@@ -394,6 +442,8 @@ class StatsStore:
         self.has_active_source = False
         self.trae_enabled = False
         self.trae_sessionid = ""
+        self.workbuddy_enabled = False
+        self.workbuddy_cookie = ""
 
     # ------------------------------------------------------------ 懒惰补账
 
@@ -511,7 +561,7 @@ class StatsStore:
     def sync_trae_if_needed(self, now=None, interactive=False):
         """按需同步 Trae 用量（HTTP 源）。返回 TraeResult 或 None（被守卫拦下）。
 
-        interactive=True 是用户点开弹窗的主动刷新，间隔更短（60s vs 900s）。
+        interactive=True 是用户点开弹窗的主动刷新，间隔更短（60s vs trae_bg_interval）。
         夜间静默（0–9 点本地时间）直接返回且**不占**节流窗口：凌晨会话由 9 点后
         第一次同步的"水位 - 2 天"窗口覆盖，不丢数。
         """
@@ -532,7 +582,7 @@ class StatsStore:
                 self.source_status["trae"] = "未配置登录"
                 return None   # 没有凭据就不发 HTTP
             interval = (trae_sync.INTERACTIVE_MIN_INTERVAL if interactive
-                        else trae_sync.BG_MIN_INTERVAL)
+                        else trae_sync.clamp_bg_interval(self.trae_bg_interval))
             if now_epoch - self._last_trae_sync_at < interval:
                 return None   # 节流窗口内
 
@@ -661,6 +711,198 @@ class StatsStore:
             return (float(parts[0]), float(parts[1]))
         except ValueError:
             return None
+
+    # ------------------------------------------------------------ WorkBuddy（HTTP 源，独立表）
+    # 明细进 workbuddy_usage，**不进 usage_log / daily_agg / usage_all**：
+    # 所以这里全部查询只读自己的表，其他页面天然看不到它。
+
+    def sync_workbuddy_if_needed(self, now=None, interactive=False):
+        """按需同步 WorkBuddy 用量。返回 WorkBuddyResult 或 None（被守卫拦下）。
+
+        interactive=True 是用户打开洞察中心 WorkBuddy 页的主动刷新（60s 档）。
+        夜间静默只拦后台定时器，且不占节流窗口（由 9 点后的回看窗口覆盖）。
+        """
+        now_epoch = self._now_epoch(now)
+        now_dt = datetime.fromtimestamp(now_epoch)
+
+        with self._lock:
+            if self.conn is None:
+                return None
+            if not self.workbuddy_enabled:
+                self.source_status["workbuddy"] = "未启用"
+                return None
+            if not interactive and workbuddy_sync.is_night_silent(now_dt):
+                return None
+            if not self.workbuddy_cookie:
+                self.source_status["workbuddy"] = "未配置登录"
+                return None
+            interval = (workbuddy_sync.INTERACTIVE_MIN_INTERVAL if interactive
+                        else workbuddy_sync.clamp_bg_interval(self.workbuddy_bg_interval))
+            if now_epoch - self._last_workbuddy_sync_at < interval:
+                return None
+
+            # 拉取窗口：水位 -2 天回看；首次 30 天（逐天切片，见 workbuddy_sync）
+            water = self._meta_get("workbuddy_synced_day")
+            from_epoch = self.local_midnight(workbuddy_sync.FIRST_FETCH_DAYS, now=now_dt)
+            if water:
+                try:
+                    back = (datetime.strptime(water, "%Y-%m-%d")
+                            - timedelta(days=workbuddy_sync.PAGE_LOOKBACK_DAYS))
+                    from_epoch = self.local_midnight(0, now=back)
+                except ValueError:
+                    pass   # 水位坏了当首次全量
+            to_epoch = int(now_epoch)
+            # 服务端回写过的新凭据优先（滑动续期），否则用设置里粘贴的
+            cookie = self._meta_get("workbuddy_cookie_live") or self.workbuddy_cookie
+
+        # ---- 网络（锁外）----
+        try:
+            result = workbuddy_sync.run(cookie, from_epoch, to_epoch, now=now_epoch)
+        except Exception as e:
+            result = WorkBuddyResult("failed", message=str(e))
+
+        # ---- 入库 + 状态（锁内）。节流时间戳在所有出口都推进，防弹窗反复开关打爆接口
+        with self._lock:
+            self._last_workbuddy_sync_at = now_epoch
+            if self.conn is None:
+                return result
+            if result.new_cookie:
+                self._meta_set("workbuddy_cookie_live", result.new_cookie)
+            if result.status == "ok":
+                self.upsert_workbuddy_rows(result.rows, commit=False)
+                self._meta_set("workbuddy_synced_day", now_dt.strftime("%Y-%m-%d"))
+                if not result.truncated:
+                    self._meta_set("workbuddy_synced_at", int(now_epoch))
+                self.source_status["workbuddy"] = "已连接"
+            elif result.status == "auth_expired":
+                self.source_status["workbuddy"] = "登录已过期，请重新粘贴 Cookie"
+            elif result.status == "not_configured":
+                self.source_status["workbuddy"] = result.message or "未配置登录"
+            else:
+                print(f"WorkBuddy 同步失败: {result.message}")
+                self.source_status["workbuddy"] = "同步失败：" + (result.message or "")
+            self.conn.commit()
+        return result
+
+    def upsert_workbuddy_rows(self, rows, commit=True):
+        """WorkBuddy 明细入库（独立表，request_id 主键）。
+
+        请求是不可变流水，理论上 INSERT OR IGNORE 就够；这里用 UPSERT 覆盖，
+        给服务端事后修正 credit 留余地，且同样幂等。调用方持锁。
+        """
+        if self.conn is None or not rows:
+            return 0
+        sql = """
+        INSERT INTO workbuddy_usage (request_id, client, model, credit, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(request_id) DO UPDATE SET
+            client=excluded.client,
+            model=excluded.model,
+            credit=excluded.credit,
+            created_at=excluded.created_at
+        """
+        written = 0
+        try:
+            try:
+                self.conn.execute("BEGIN IMMEDIATE")
+            except sqlite3.Error:
+                pass   # Python 驱动可能已隐式开启事务，直接复用
+            for row in rows:
+                self.conn.execute(sql, (row.request_id, row.client, row.model,
+                                        row.credit, row.epoch))
+                written += 1
+            if commit:
+                self.conn.commit()
+        except sqlite3.Error as e:
+            print(f"WorkBuddy 行入库失败: {e}")
+            try:
+                self.conn.rollback()
+            except sqlite3.Error:
+                pass
+            return 0
+        return written
+
+    def workbuddy_live_cookie(self):
+        """当前实际生效的 Cookie：优先服务端回写的 live 值，其次设置里粘贴的"""
+        with self._lock:
+            return self._meta_get("workbuddy_cookie_live") or self.workbuddy_cookie
+
+    def workbuddy_synced_at(self):
+        """上次成功同步时刻（epoch；从未同步为 0）"""
+        return int(self._meta_float("workbuddy_synced_at", 0.0))
+
+    def _workbuddy_rows(self, sql, params=()):
+        """只读 workbuddy_usage 的查询入口（不走 usage_all / has_active_source）"""
+        with self._lock:
+            if self.conn is None:
+                return []
+            try:
+                return self.conn.execute(sql, params).fetchall()
+            except sqlite3.Error as e:
+                print(f"WorkBuddy 查询失败: {e}")
+                return []
+
+    def workbuddy_has_data(self):
+        row = self._workbuddy_rows("SELECT COUNT(request_id) FROM workbuddy_usage")
+        return bool(row and row[0][0])
+
+    def workbuddy_credit_sum(self, days=0):
+        """近 N 天（含今天）积分合计，0 = 今日（口径与积分页一致）"""
+        row = self._workbuddy_rows(
+            "SELECT COALESCE(SUM(credit), 0) FROM workbuddy_usage WHERE created_at >= ?",
+            (self.local_midnight(days),))
+        return float(row[0][0]) if row else 0.0
+
+    def workbuddy_total(self):
+        """历史总量 → (总积分, 请求数, 最早 epoch)；空表返回 (0.0, 0, 0)"""
+        row = self._workbuddy_rows(
+            "SELECT COALESCE(SUM(credit), 0), COUNT(request_id), COALESCE(MIN(created_at), 0)"
+            " FROM workbuddy_usage")
+        if not row:
+            return (0.0, 0, 0)
+        return (float(row[0][0] or 0), int(row[0][1] or 0), int(row[0][2] or 0))
+
+    def workbuddy_today_requests(self):
+        row = self._workbuddy_rows(
+            "SELECT COUNT(request_id) FROM workbuddy_usage WHERE created_at >= ?",
+            (self.local_midnight(0),))
+        return int(row[0][0]) if row else 0
+
+    def workbuddy_credit_daily(self, days=30):
+        """近 N 天每日积分 [(date, credit)]，日期升序（只返回有数据的天）。
+
+        刻意不用 SQL 的 'localtime'：那依赖进程时区设置，跨时区会偏移一天；
+        边界 epoch 在 Python 侧算好再传进来。
+        """
+        rows = self._workbuddy_rows(
+            "SELECT created_at, credit FROM workbuddy_usage"
+            " WHERE created_at >= ? AND created_at < ?",
+            (self.local_midnight(days), self.local_midnight(-1)))
+        buckets = {}
+        for epoch, credit in rows:
+            day = datetime.fromtimestamp(epoch).strftime("%Y-%m-%d")
+            buckets[day] = buckets.get(day, 0.0) + float(credit or 0)
+        return sorted(buckets.items())
+
+    def workbuddy_client_breakdown(self, days=30):
+        """按客户端（CodeBuddyIDE / WorkBuddy）→ [(client, credit, requests)] 积分降序"""
+        rows = self._workbuddy_rows("""
+            SELECT COALESCE(NULLIF(client, ''), '未知客户端'),
+                   COALESCE(SUM(credit), 0), COUNT(request_id)
+            FROM workbuddy_usage WHERE created_at >= ?
+            GROUP BY 1 ORDER BY 2 DESC""",
+            (self.local_midnight(days),))
+        return [(r[0], float(r[1]), int(r[2])) for r in rows]
+
+    def workbuddy_model_breakdown(self, days=30, limit=10):
+        """按模型 → [(model, credit, requests)] 积分降序，最多 limit 条"""
+        rows = self._workbuddy_rows("""
+            SELECT COALESCE(NULLIF(model, ''), 'unknown'),
+                   COALESCE(SUM(credit), 0), COUNT(request_id)
+            FROM workbuddy_usage WHERE created_at >= ?
+            GROUP BY 1 ORDER BY 2 DESC LIMIT ?""",
+            (self.local_midnight(days), int(limit)))
+        return [(r[0], float(r[1]), int(r[2])) for r in rows]
 
     # ------------------------------------------------------------ 查询
 
@@ -1361,6 +1603,8 @@ class StatsStore:
             return "ZCode"
         if source == "trae":
             return "Trae"
+        if source == "workbuddy":
+            return "WorkBuddy"
         if source in ("cc-switch", "cc-switch-rollup"):
             return "cc-switch"
         return source

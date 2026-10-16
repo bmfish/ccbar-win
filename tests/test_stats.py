@@ -15,9 +15,26 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import trae_sync  # noqa: E402
+import workbuddy_sync  # noqa: E402
 from stats_store import (StatsStore, CCSwitchAdapter, ZCodeAdapter, DAILY_AGG_DDL,
-                         USAGE_LOG_DDL, _local_epoch, validate_db)  # noqa: E402
+                        USAGE_LOG_DDL, _local_epoch, validate_db)  # noqa: E402
 from trae_sync import TraeAuth, TraeResult, TraeRow  # noqa: E402
+from workbuddy_sync import WorkBuddyResult, WorkBuddyRow  # noqa: E402
+
+
+class _FakeWorkBuddyRunner:
+    """假的 workbuddy_sync.run：记录调用参数、按脚本返回结果，测试全程不碰网络"""
+
+    def __init__(self, results=None):
+        self.calls = []
+        self.results = list(results or [])
+
+    def __call__(self, cookie, from_epoch, to_epoch, send=None, now=None):
+        self.calls.append({"cookie": cookie, "from_epoch": from_epoch,
+                           "to_epoch": to_epoch, "now": now})
+        if self.results:
+            return self.results.pop(0)
+        return WorkBuddyResult("ok", rows=[])
 
 
 class _FakeTraeRunner:
@@ -1019,23 +1036,52 @@ class TestStatsStore(unittest.TestCase):
         self.assertEqual(len(fake.calls), 1, "9 点整起恢复同步")
 
     def test_trae_throttle_background_and_interactive(self):
-        """后台 900s / 交互式 60s 节流（失败也占窗口，见下个用例）"""
+        """后台按 trae_bg_interval（默认 600s）节流 / 交互式 60s（失败也占窗口，见下个用例）"""
         self._trae_store()
+        self.assertEqual(self.store.trae_bg_interval, trae_sync.BG_MIN_INTERVAL)
         fake = _FakeTraeRunner()
         t0 = self._at(hour=10)
         with mock.patch.object(trae_sync, "run", fake):
             self.assertIsNotNone(self.store.sync_trae_if_needed(now=t0))
-            self.store.sync_trae_if_needed(now=t0 + timedelta(seconds=899))
-            self.assertEqual(len(fake.calls), 1, "900s 内不再请求")
-            self.store.sync_trae_if_needed(now=t0 + timedelta(seconds=900))
-            self.assertEqual(len(fake.calls), 2, "满 900s 放行")
+            self.store.sync_trae_if_needed(now=t0 + timedelta(seconds=599))
+            self.assertEqual(len(fake.calls), 1, "600s 内不再请求")
+            self.store.sync_trae_if_needed(now=t0 + timedelta(seconds=600))
+            self.assertEqual(len(fake.calls), 2, "满 600s 放行")
 
-            self.store.sync_trae_if_needed(now=t0 + timedelta(seconds=959), interactive=True)
+            self.store.sync_trae_if_needed(now=t0 + timedelta(seconds=659), interactive=True)
             self.assertEqual(len(fake.calls), 2, "交互式也要满 60s")
-            self.store.sync_trae_if_needed(now=t0 + timedelta(seconds=960), interactive=True)
+            self.store.sync_trae_if_needed(now=t0 + timedelta(seconds=660), interactive=True)
             self.assertEqual(len(fake.calls), 3)
-            self.store.sync_trae_if_needed(now=t0 + timedelta(seconds=1860))
+            self.store.sync_trae_if_needed(now=t0 + timedelta(seconds=1260))
             self.assertEqual(len(fake.calls), 4, "交互式刷新后后台按新时间戳算")
+
+    def test_trae_bg_interval_is_configurable(self):
+        """后台间隔可在设置里自定义（默认 10 分钟）；越界值被夹到合法区间"""
+        self.store.rebuild([], trae_enabled=True, trae_sessionid="sid-1",
+                           trae_bg_interval=120)
+        self.assertEqual(self.store.trae_bg_interval, 120)
+
+        fake = _FakeTraeRunner()
+        t0 = self._at(hour=10)
+        with mock.patch.object(trae_sync, "run", fake):
+            self.store.sync_trae_if_needed(now=t0)
+            self.store.sync_trae_if_needed(now=t0 + timedelta(seconds=119))
+            self.assertEqual(len(fake.calls), 1, "120s 内不放行")
+            self.store.sync_trae_if_needed(now=t0 + timedelta(seconds=120))
+            self.assertEqual(len(fake.calls), 2, "自定义间隔到点放行")
+
+        self.store.rebuild([], trae_enabled=True, trae_sessionid="sid-1",
+                           trae_bg_interval=5)
+        self.assertEqual(self.store.trae_bg_interval, trae_sync.BG_INTERVAL_MIN,
+                         "低于下限夹到 60s")
+        self.store.rebuild([], trae_enabled=True, trae_sessionid="sid-1",
+                           trae_bg_interval=99999)
+        self.assertEqual(self.store.trae_bg_interval, trae_sync.BG_INTERVAL_MAX,
+                         "高于上限夹到 7200s")
+        self.store.rebuild([], trae_enabled=True, trae_sessionid="sid-1",
+                           trae_bg_interval="abc")
+        self.assertEqual(self.store.trae_bg_interval, trae_sync.BG_MIN_INTERVAL,
+                         "坏值回落默认 10 分钟")
 
     def test_trae_failure_advances_throttle_and_persists_auth(self):
         """失败/过期也推进节流；换签结果落 meta 并在下次同步被复用"""
@@ -1287,5 +1333,343 @@ class TestStatsStore(unittest.TestCase):
                                       today="2026-03-02")
         self.assertEqual(os.path.basename(auto), "ccbar-auto-2026-03-02.db")
         self.assertFalse(self.store.conn.in_transaction)
+
+
+# ============================================================
+# WorkBuddy：独立表 + 独立节流（与 usage_log / usage_all 完全隔离）
+# ============================================================
+
+
+class TestWorkBuddyStore(unittest.TestCase):
+    """本源的核心契约：明细进 workbuddy_usage，绝不污染其他页面"""
+
+    COOKIE = "session=sess|1792744353|sig; session_2=second"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="ccbar-wb-test-")
+        self.source_path = os.path.join(self.tmp, "cc-switch.db")
+        self.store = StatsStore()
+        self._orig_store_path = StatsStore.store_path
+        StatsStore.store_path = staticmethod(
+            lambda: os.path.join(self.tmp, "ccbar.db"))
+
+    def tearDown(self):
+        StatsStore.store_path = self._orig_store_path
+        self.store._close()
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    # ------------------------------------------------------------ 夹具
+
+    def _make_fixture_source(self):
+        conn = sqlite3.connect(self.source_path)
+        conn.executescript("""
+        CREATE TABLE proxy_request_logs (
+            request_id TEXT PRIMARY KEY, app_type TEXT, model TEXT,
+            input_tokens INTEGER, output_tokens INTEGER,
+            cache_read_tokens INTEGER, cache_creation_tokens INTEGER,
+            total_cost_usd REAL, created_at INTEGER
+        );
+        CREATE TABLE usage_daily_rollups (
+            date TEXT, provider_id TEXT, model TEXT, request_model TEXT,
+            pricing_model TEXT, app_type TEXT, input_tokens INTEGER,
+            output_tokens INTEGER, cache_read_tokens INTEGER,
+            cache_creation_tokens INTEGER, total_cost_usd REAL, request_count INTEGER
+        );
+        """)
+        conn.commit()
+        conn.close()
+
+    def _insert_row(self, rid, created_at, inp, out):
+        conn = sqlite3.connect(self.source_path)
+        conn.execute(
+            "INSERT INTO proxy_request_logs VALUES (?, 'claude', 'test-model', ?, ?, 0, 0, 0.5, ?)",
+            (rid, inp, out, created_at))
+        conn.commit()
+        conn.close()
+
+    def _rebuild(self, workbuddy=True, cookie=None, interval=None, with_source=True):
+        configs = [(CCSwitchAdapter(), True, self.source_path)] if with_source else []
+        self.store.rebuild(
+            configs,
+            workbuddy_enabled=workbuddy,
+            workbuddy_cookie=self.COOKIE if cookie is None else cookie,
+            workbuddy_bg_interval=interval)
+
+    @staticmethod
+    def _at(hour=10, day_offset=0):
+        d = (datetime.now() + timedelta(days=day_offset)).replace(
+            hour=hour, minute=0, second=0, microsecond=0)
+        return d
+
+    def _scalar(self, sql, params=()):
+        return self.store.conn.execute(sql, params).fetchone()[0]
+
+    # ------------------------------------------------------------ 隔离（核心契约）
+
+    def test_workbuddy_never_leaks_into_other_pages(self):
+        """写入 WorkBuddy 后：usage_log / usage_all / 积分与渠道口径全都不受影响"""
+        self._make_fixture_source()
+        self._insert_row("req-A", local_midnight(1) + 3600, 1000, 2000)
+        self._rebuild()
+        self.store.sync_if_needed()
+
+        baseline_all = self._scalar("SELECT COUNT(*) FROM usage_all")
+        baseline_log = self._scalar("SELECT COUNT(*) FROM usage_log")
+        baseline_credits = self.store.query_today_credits()
+        baseline_tokens = self.store.query_daily_tokens(2)
+        baseline_channels = self.store.query_source_breakdown()
+
+        epoch = int(self._at().timestamp())
+        self.store.upsert_workbuddy_rows([
+            WorkBuddyRow("wb-1", "CodeBuddyIDE", "deepseek-v4.1-flash", 3.54, epoch),
+            WorkBuddyRow("wb-2", "WorkBuddy", "minimax-m3", 43.11, epoch + 60),
+        ])
+
+        self.assertEqual(self._scalar("SELECT COUNT(*) FROM workbuddy_usage"), 2)
+        self.assertEqual(
+            self._scalar("SELECT COUNT(*) FROM usage_log WHERE source='workbuddy'"), 0,
+            "绝不写进 usage_log")
+        self.assertEqual(self._scalar("SELECT COUNT(*) FROM usage_log"), baseline_log)
+        self.assertEqual(self._scalar("SELECT COUNT(*) FROM usage_all"), baseline_all,
+                         "usage_all 视图不因 WorkBuddy 变化")
+        self.assertEqual(self.store.query_today_credits(), baseline_credits,
+                         "Trae 积分口径不受影响")
+        self.assertEqual(self.store.query_daily_tokens(2), baseline_tokens)
+        self.assertEqual(self.store.query_source_breakdown(), baseline_channels,
+                         "渠道分布不受影响")
+        self.assertNotIn("workbuddy", [row[0] for row in (baseline_channels or [])])
+
+    def test_workbuddy_alone_is_not_an_active_source(self):
+        """只启用 WorkBuddy：主界面仍是「无数据源」，但它自己的查询可用"""
+        self._rebuild(with_source=False)
+        self.assertFalse(self.store.has_active_source)
+        self.assertIsNone(self.store.query_all("SELECT * FROM usage_all"))
+
+        self.store.upsert_workbuddy_rows(
+            [WorkBuddyRow("wb-1", "CodeBuddyIDE", "m", 5.0,
+                          int(self._at().timestamp()))])
+        self.assertIsNone(self.store.query_all("SELECT * FROM usage_all"),
+                          "主界面查询依旧返回 None（不是空列表）")
+        self.assertEqual(self.store.workbuddy_credit_sum(0), 5.0)
+        self.assertTrue(self.store.workbuddy_has_data())
+
+    # ------------------------------------------------------------ 入库
+
+    def test_upsert_is_idempotent_and_overwrites(self):
+        self._rebuild(with_source=False)
+        epoch = int(self._at().timestamp())
+        self.assertEqual(self.store.upsert_workbuddy_rows(
+            [WorkBuddyRow("wb-1", "CodeBuddyIDE", "m", 1.0, epoch)]), 1)
+        self.assertEqual(self.store.upsert_workbuddy_rows(
+            [WorkBuddyRow("wb-1", "CodeBuddyIDE", "m", 9.0, epoch + 60)]), 1)
+
+        rows = self.store.conn.execute(
+            "SELECT request_id, credit, created_at FROM workbuddy_usage").fetchall()
+        self.assertEqual(rows, [("wb-1", 9.0, epoch + 60)], "同一 requestId 覆盖不新增")
+        self.assertEqual(self.store.upsert_workbuddy_rows([]), 0, "空列表不写库")
+
+    def test_upsert_without_connection(self):
+        self.assertEqual(StatsStore().upsert_workbuddy_rows(
+            [WorkBuddyRow("x", "c", "m", 1.0, 1)]), 0)
+
+    def test_table_survives_rebuild(self):
+        """反复 rebuild（设置里改开关）不能把已入库的独立表清掉"""
+        self._rebuild(with_source=False)
+        self.store.upsert_workbuddy_rows(
+            [WorkBuddyRow("wb-1", "c", "m", 1.0, int(self._at().timestamp()))])
+        self._rebuild(with_source=False, workbuddy=False)
+        self._rebuild(with_source=False)
+        self.assertEqual(self.store.workbuddy_credit_sum(0), 1.0)
+
+    # ------------------------------------------------------------ 查询口径
+
+    def test_query_breakdowns(self):
+        self._rebuild(with_source=False)
+        today = int(self._at(hour=9).timestamp())
+        yday = int(self._at(hour=9, day_offset=-1).timestamp())
+        old = int(self._at(hour=9, day_offset=-40).timestamp())
+        self.store.upsert_workbuddy_rows([
+            WorkBuddyRow("a", "CodeBuddyIDE", "deepseek", 1.5, today),
+            WorkBuddyRow("b", "CodeBuddyIDE", "minimax", 4.0, today + 60),
+            WorkBuddyRow("c", "WorkBuddy", "deepseek", 2.0, yday),
+            WorkBuddyRow("d", "CodeBuddyIDE", "deepseek", 100.0, old),
+        ])
+
+        self.assertAlmostEqual(self.store.workbuddy_credit_sum(0), 5.5, places=6)
+        self.assertAlmostEqual(self.store.workbuddy_credit_sum(7), 7.5, places=6)
+        self.assertEqual(self.store.workbuddy_today_requests(), 2)
+
+        total_credit, total_reqs, first_epoch = self.store.workbuddy_total()
+        self.assertAlmostEqual(total_credit, 107.5, places=6)
+        self.assertEqual(total_reqs, 4)
+        self.assertEqual(first_epoch, old)
+
+        clients = self.store.workbuddy_client_breakdown(30)
+        self.assertEqual([c[0] for c in clients], ["CodeBuddyIDE", "WorkBuddy"],
+                         "按积分降序")
+        self.assertAlmostEqual(clients[0][1], 5.5, places=6)
+        self.assertEqual(clients[0][2], 2)
+
+        self.assertEqual(self.store.workbuddy_model_breakdown(30, limit=1),
+                         [("minimax", 4.0, 1)], "limit 生效且按积分降序")
+
+        daily = dict(self.store.workbuddy_credit_daily(30))
+        self.assertAlmostEqual(daily[datetime.now().strftime("%Y-%m-%d")], 5.5, places=6)
+        self.assertAlmostEqual(
+            daily[(datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")], 2.0,
+            places=6)
+        self.assertNotIn((datetime.now() - timedelta(days=40)).strftime("%Y-%m-%d"),
+                         daily, "窗口外的不进走势")
+
+    def test_empty_queries(self):
+        self._rebuild(with_source=False)
+        self.assertEqual(self.store.workbuddy_total(), (0.0, 0, 0))
+        self.assertEqual(self.store.workbuddy_credit_daily(30), [])
+        self.assertEqual(self.store.workbuddy_client_breakdown(30), [])
+        self.assertEqual(self.store.workbuddy_model_breakdown(30), [])
+        self.assertEqual(self.store.workbuddy_credit_sum(0), 0.0)
+        self.assertEqual(self.store.workbuddy_today_requests(), 0)
+        self.assertFalse(self.store.workbuddy_has_data())
+        self.assertEqual(self.store.workbuddy_synced_at(), 0)
+
+    # ------------------------------------------------------------ 同步
+
+    def test_sync_stores_rows_meta_and_status(self):
+        self._rebuild(with_source=False)
+        t0 = self._at()
+        fake = _FakeWorkBuddyRunner([WorkBuddyResult(
+            "ok", rows=[WorkBuddyRow("wb-1", "CodeBuddyIDE", "m", 2.5,
+                                     int(t0.timestamp()))],
+            requests=1, days=1)])
+        with mock.patch.object(workbuddy_sync, "run", fake):
+            result = self.store.sync_workbuddy_if_needed(now=t0)
+
+        self.assertTrue(result.is_ok)
+        self.assertEqual(self.store.source_status["workbuddy"], "已连接")
+        self.assertAlmostEqual(self.store.workbuddy_credit_sum(0), 2.5, places=6)
+        self.assertEqual(self.store.workbuddy_synced_at(), int(t0.timestamp()))
+        self.assertEqual(self.store._meta_get("workbuddy_synced_day"),
+                         t0.strftime("%Y-%m-%d"))
+
+    def test_first_window_is_backfill_then_lookback(self):
+        """首次拉 30 天；有水位后按「水位 -2 天」回看"""
+        self._rebuild(with_source=False)
+        fake = _FakeWorkBuddyRunner()
+        t0 = self._at()
+        with mock.patch.object(workbuddy_sync, "run", fake):
+            self.store.sync_workbuddy_if_needed(now=t0)
+            self.store.sync_workbuddy_if_needed(now=t0 + timedelta(minutes=11))
+
+        self.assertEqual(fake.calls[0]["from_epoch"],
+                         self.store.local_midnight(workbuddy_sync.FIRST_FETCH_DAYS,
+                                                   now=t0))
+        expected = int((t0 - timedelta(days=workbuddy_sync.PAGE_LOOKBACK_DAYS))
+                       .replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+        self.assertEqual(fake.calls[1]["from_epoch"], expected)
+        self.assertEqual(fake.calls[1]["to_epoch"],
+                         int((t0 + timedelta(minutes=11)).timestamp()))
+
+    def test_throttle_background_interactive_and_custom(self):
+        self._rebuild(with_source=False, interval=120)
+        self.assertEqual(self.store.workbuddy_bg_interval, 120)
+        fake = _FakeWorkBuddyRunner()
+        t0 = self._at()
+        with mock.patch.object(workbuddy_sync, "run", fake):
+            self.store.sync_workbuddy_if_needed(now=t0)
+            self.store.sync_workbuddy_if_needed(now=t0 + timedelta(seconds=119))
+            self.assertEqual(len(fake.calls), 1, "自定义 120s 内不放行")
+            self.store.sync_workbuddy_if_needed(now=t0 + timedelta(seconds=120))
+            self.assertEqual(len(fake.calls), 2)
+            self.store.sync_workbuddy_if_needed(now=t0 + timedelta(seconds=179),
+                                                interactive=True)
+            self.assertEqual(len(fake.calls), 2, "交互式也要满 60s")
+            self.store.sync_workbuddy_if_needed(now=t0 + timedelta(seconds=180),
+                                                interactive=True)
+            self.assertEqual(len(fake.calls), 3)
+
+    def test_default_interval_is_ten_minutes(self):
+        self._rebuild(with_source=False)
+        self.assertEqual(self.store.workbuddy_bg_interval,
+                         workbuddy_sync.BG_MIN_INTERVAL)
+        self.assertEqual(self.store.workbuddy_bg_interval, 600)
+
+    def test_night_silent_skips_and_keeps_window(self):
+        self._rebuild(with_source=False)
+        fake = _FakeWorkBuddyRunner()
+        night = self._at(hour=3)
+        with mock.patch.object(workbuddy_sync, "run", fake):
+            self.assertIsNone(self.store.sync_workbuddy_if_needed(now=night))
+        self.assertEqual(fake.calls, [], "0-9 点后台不发请求")
+        self.assertEqual(self.store._last_workbuddy_sync_at, 0.0, "静默不占节流窗口")
+
+        with mock.patch.object(workbuddy_sync, "run", fake):
+            self.assertIsNotNone(
+                self.store.sync_workbuddy_if_needed(now=self._at(hour=9)))
+        self.assertEqual(len(fake.calls), 1, "9 点起恢复")
+
+    def test_disabled_or_missing_cookie(self):
+        self._rebuild(workbuddy=False)
+        runner = _FakeWorkBuddyRunner()
+        with mock.patch.object(workbuddy_sync, "run", runner):
+            self.assertIsNone(self.store.sync_workbuddy_if_needed(now=self._at()))
+        self.assertEqual(runner.calls, [], "未启用不发请求")
+        self.assertEqual(self.store.source_status["workbuddy"], "未启用")
+
+        self._rebuild(cookie="")
+        runner = _FakeWorkBuddyRunner()
+        with mock.patch.object(workbuddy_sync, "run", runner):
+            self.assertIsNone(self.store.sync_workbuddy_if_needed(now=self._at()))
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(self.store.source_status["workbuddy"], "未配置登录")
+
+    def test_auth_expired_sets_status_and_advances_throttle(self):
+        self._rebuild(with_source=False)
+        fake = _FakeWorkBuddyRunner([WorkBuddyResult("auth_expired", message="过期")])
+        t0 = self._at()
+        with mock.patch.object(workbuddy_sync, "run", fake):
+            self.store.sync_workbuddy_if_needed(now=t0)
+            self.assertEqual(self.store.source_status["workbuddy"],
+                             "登录已过期，请重新粘贴 Cookie")
+            self.assertEqual(self.store._last_workbuddy_sync_at, t0.timestamp())
+            self.store.sync_workbuddy_if_needed(now=t0 + timedelta(seconds=30))
+            self.assertEqual(len(fake.calls), 1, "失败也占节流窗口")
+
+    def test_run_exception_is_swallowed(self):
+        self._rebuild(with_source=False)
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("网络炸了")
+
+        with mock.patch.object(workbuddy_sync, "run", boom):
+            result = self.store.sync_workbuddy_if_needed(now=self._at())
+        self.assertEqual(result.status, "failed")
+        self.assertIn("网络炸了", self.store.source_status["workbuddy"])
+
+    def test_live_cookie_persisted_and_reused(self):
+        """服务端回写的新凭据落 meta，下次同步要用新值（滑动续期）"""
+        self._rebuild(with_source=False)
+        renewed = "session=fresh|1792744353|sig; session_2=second"
+        fake = _FakeWorkBuddyRunner([WorkBuddyResult("ok", new_cookie=renewed)])
+        t0 = self._at()
+        with mock.patch.object(workbuddy_sync, "run", fake):
+            self.store.sync_workbuddy_if_needed(now=t0)
+            self.assertEqual(fake.calls[0]["cookie"], self.COOKIE)
+            self.store.sync_workbuddy_if_needed(now=t0 + timedelta(minutes=11))
+
+        self.assertEqual(fake.calls[1]["cookie"], renewed, "第二次用回写的新凭据")
+        self.assertEqual(self.store.workbuddy_live_cookie(), renewed)
+
+    def test_cookie_normalized_on_rebuild(self):
+        """粘贴整条 curl 或带无关 cookie 的串，rebuild 时就归一化成 session 两项"""
+        self.store.rebuild([], workbuddy_enabled=True,
+                           workbuddy_cookie="other=1; session=sv; junk=2")
+        self.assertEqual(self.store.workbuddy_cookie, "session=sv")
+        self.store.rebuild([], workbuddy_enabled=True,
+                           workbuddy_cookie="curl 'https://x' -b 'session=cv; a=1'")
+        self.assertEqual(self.store.workbuddy_cookie, "session=cv")
+
+    def test_display_name(self):
+        self.assertEqual(self.store.source_display_name("workbuddy"), "WorkBuddy")
 
 
