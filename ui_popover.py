@@ -336,23 +336,41 @@ class PopoverWindow:
         month_ratio = None
         if total and total.get("total"):
             month_ratio = (month or {}).get("total", 0) / total["total"]
+        credits = self._window_credits()
 
         self._trend_card(grid, 0, 0, L("昨日"), yesterday, prev_day,
                          series=self._series_for_day(1),
+                         credits=credits.get("day"),
                          command=self._open(self.app.show_hourly_detail_yesterday))
         self._trend_card(grid, 0, 1, L("近7天"), week, prev_week,
                          series=self._daily_series(7),
+                         credits=credits.get("week"),
                          command=self._open(self.app.show_weekly_detail))
         self._trend_card(grid, 1, 0, L("近30天"), month, prev_month,
                          series=self._daily_series(30),
+                         credits=credits.get("month"),
                          command=self._open(self.app.show_monthly_detail))
         self._trend_card(grid, 1, 1, L("历史总量"), total, None,
                          ratio=month_ratio,
+                         credits=credits.get("total"),
                          command=self._open(self.app.show_all_time_detail))
 
+    def _window_credits(self):
+        """四个窗口的积分消耗（拿不到就返回空，卡片不显示积分行）"""
+        try:
+            store = self.app.store
+            return {
+                "day": store.query_credits_day(1),
+                "week": store.query_credits_sum(7),
+                "month": store.query_credits_sum(30),
+                "total": store.query_credits_total(),
+            }
+        except Exception:
+            return {}
+
     def _trend_card(self, grid, row, col, title, stats, prev=None,
-                    series=None, ratio=None, command=None):
-        """单张趋势卡：标题 + 数值 + 同比 + 26px 的迷你可视化"""
+                    series=None, ratio=None, credits=None, command=None):
+        """单张趋势卡：标题 + 数值 + 积分小字 + 同比 + 26px 的迷你可视化"""
         import tkinter as tk
 
         value = int((stats or {}).get("total", 0) or 0)
@@ -377,6 +395,15 @@ class PopoverWindow:
         tk.Label(body, text=Design.fmt_tokens(value) if stats else "-",
                  fg=Design.TEXT_PRIMARY, bg=Design.CARD_FILL,
                  font=Design.FONT_VALUE, anchor='w').pack(fill=tk.X, pady=(2, 0))
+
+        try:
+            credits = float(credits or 0)
+        except (TypeError, ValueError):
+            credits = 0.0
+        if credits > 0:
+            tk.Label(body, text=L("%s 积分") % format_credits(credits),
+                     fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                     font=Design.FONT_UI_TINY, anchor='w').pack(fill=tk.X)
 
         visual = tk.Canvas(body, height=26, bg=Design.CARD_FILL,
                            highlightthickness=0)

@@ -1268,6 +1268,19 @@ class StatsStore:
             (self.window_start(days),))
         return float(row[0]) if row else 0.0
 
+    def query_credits_day(self, days_ago=0):
+        """某一天的积分消耗（0=今天，1=昨天），口径同每小时统计"""
+        row = self.query_one(
+            "SELECT COALESCE(SUM(credits), 0) FROM usage_all "
+            "WHERE created_at >= ? AND created_at < ?",
+            (self.local_midnight(days_ago), self.local_midnight(days_ago - 1)))
+        return float(row[0]) if row else 0.0
+
+    def query_credits_total(self):
+        """历史累计积分消耗（明细求和，daily_agg 不含积分列）"""
+        row = self.query_one("SELECT COALESCE(SUM(credits), 0) FROM usage_all")
+        return float(row[0]) if row else 0.0
+
     def query_credits_daily(self, days):
         """近 N 天（含今天）每日积分曲线 [(date, credits)]，日期升序（可能含空洞）"""
         rows = self.query_all("""
