@@ -1290,6 +1290,11 @@ class StatsStore:
             (self.window_start(days), self.local_midnight(-1)))
         return [(r[0], float(r[1])) for r in rows] if rows else []
 
+    def query_first_usage_epoch(self):
+        """最早一条明细的时间戳（洞察「全部」范围起点；无数据返回 None）"""
+        row = self.query_one("SELECT MIN(created_at) FROM usage_all")
+        return row[0] if row and row[0] else None
+
     def query_model_history(self):
         """模型编年史：[(model, 首用 epoch, 末用 epoch, 总 token)]，按首用时间升序"""
         with self._lock:

@@ -122,6 +122,11 @@ class InsightsWindowsMixin:
             channel_totals[src] = channel_totals.get(src, 0) + tok
         top_channels = sorted(channel_totals.items(), key=lambda kv: kv[1], reverse=True)
 
+        # 洞察页「全部」范围：最多回溯 730 天的逐日 token + 首用时间 + 近 30 天时段分布
+        ins_daily = store.query_daily_tokens(730)
+        ins_first = store.query_first_usage_epoch()
+        peak_hour_map = store.query_hour_histogram(30)
+
         return (cost_today, cost7, cost30, cost_daily, cost_models, streak,
                 this_week, last_week, peak, top, mtd, elapsed, dim, projected,
                 total_all, channels, apps, comp, today_timeline, credits_today,
@@ -130,7 +135,7 @@ class InsightsWindowsMixin:
                 wb_clients, wb_models, wb_today_reqs, wb_synced_at, wb_status,
                 budget, price, cost_mtd, mtd_elapsed, month_days, daily_budget,
                 est, tokens91, weekday_totals, session_count, session_avg,
-                session_longest, top_channels)
+                session_longest, top_channels, ins_daily, ins_first, peak_hour_map)
 
     @_on_gui
     def _render_insights(self, data, initial_page=None):
@@ -148,12 +153,12 @@ class InsightsWindowsMixin:
          wb_clients, wb_models, wb_today_reqs, wb_synced_at, wb_status,
          budget, price, cost_mtd, mtd_elapsed, month_days, daily_budget,
          est, tokens91, weekday_totals, session_count, session_avg,
-         session_longest, top_channels) = data
+         session_longest, top_channels, ins_daily, ins_first, peak_hour_map) = data
 
         root = tk.Toplevel(self._ui_root)
         root.title(L("洞察中心"))
-        root.geometry(center_geometry("760x600"))
-        root.minsize(700, 480)
+        root.geometry(center_geometry("920x660"))
+        root.minsize(840, 540)
         root.configure(bg=Design.BACKGROUND)
 
         style = ttk.Style(root)
@@ -327,9 +332,30 @@ class InsightsWindowsMixin:
                  wraplength=690).pack(fill=tk.X, padx=16, pady=(14, 8))
         cost_wheel(cost_page)
 
-        # ============ 洞察 ============
+        # ============ 洞察（使用通查） ============
         f_ins = tab(L("洞察"))
         ins_page, ins_wheel = scroll_page(f_ins)
+
+        INS_GREEN = Design.SUCCESS
+        raw_by_date = {d: t for d, t in (ins_daily or [])}
+        day_zero = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+        def zero_filled(days):
+            """近 days 天（含今天）逐日 token，缺失日补 0，日期升序"""
+            return [((day_zero - timedelta(days=i)).strftime("%Y-%m-%d"),
+                     raw_by_date.get((day_zero - timedelta(days=i)).strftime("%Y-%m-%d"), 0))
+                    for i in range(days - 1, -1, -1)]
+
+        # 「全部」范围起点：首条明细那天，最多回溯 730 天（与 mac dayTokensAll 一致）
+        span_days = 1
+        if ins_first:
+            try:
+                first_day = datetime.fromtimestamp(int(ins_first)).replace(
+                    hour=0, minute=0, second=0, microsecond=0)
+                span_days = (day_zero - first_day).days + 1
+            except (ValueError, OSError, OverflowError):
+                span_days = 1
+        span_days = min(max(span_days, 1), 730)
 
         def export_long_image():
             """导出长图：把各页要点汇总成一张 PNG（mac「导出长图」）"""
@@ -362,247 +388,466 @@ class InsightsWindowsMixin:
                 return
             messagebox.showinfo(L("导出完成"), L("已保存到：\n%s") % path)
 
-        tools = tk.Frame(ins_page, bg=Design.BACKGROUND)
-        tools.pack(fill=tk.X, padx=16, pady=(8, 0))
-        btn(tools, L("导出长图"), export_long_image).pack(side=tk.RIGHT)
+        # ---- 页头：标题 + 数据截至 + 右上「7 天 / 30 天 / 90 天 / 全部」切换 ----
+        head = tk.Frame(ins_page, bg=Design.BACKGROUND)
+        head.pack(fill=tk.X, padx=18, pady=(10, 2))
+        hleft = tk.Frame(head, bg=Design.BACKGROUND)
+        hleft.pack(side=tk.LEFT)
+        tk.Label(hleft, text=L("使用通查"), fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+                 font=("Microsoft YaHei UI", 16, "bold"), anchor='w').pack(anchor='w')
+        tk.Label(hleft, text=L("数据截至 %s") % datetime.now().strftime("%m-%d %H:%M"),
+                 fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
+                 font=Design.FONT_UI_SMALL, anchor='w').pack(anchor='w')
 
-        grid = tk.Frame(ins_page, bg=Design.BACKGROUND)
-        grid.pack(fill=tk.X, padx=10, pady=(6, 0))
-        for c in range(2):
-            grid.grid_columnconfigure(c, weight=1)
-        delta_txt = ""
-        if last_week > 0:
-            delta_txt = f"{(this_week - last_week) / last_week * 100:+.0f}%"
-        delta_badge = None
-        if delta_txt:
-            pct = (this_week - last_week) / last_week * 100
-            if abs(pct) < 0.5:
-                delta_badge = ("±0%", Design.TEXT_MUTED)
-            elif pct > 0:
-                delta_badge = (delta_txt, Design.WARNING)
-            else:
-                delta_badge = (delta_txt, Design.SUCCESS)
-        peak_h = peak[0] if peak else "-"
-        peak_v = self.fmt_tokens(peak[1]) if peak else "-"
-        hour_rows = store.query_one("""
-            SELECT ((created_at + ?) % 86400) / 3600 AS h, SUM(input_tokens+output_tokens+cache_read_tokens+cache_creation_tokens)
-            FROM usage_all WHERE created_at >= ? AND created_at < ? GROUP BY h ORDER BY 2 DESC LIMIT 1""",
-            (int(datetime.now().utcoffset().total_seconds()) if datetime.now().utcoffset() else 28800,
-             store.local_midnight(30), store.local_midnight(-1)))
-        peak_hour_txt = f"{hour_rows[0]:02d}:00 – {(hour_rows[0] + 1) % 24:02d}:00" if hour_rows else "-"
-        cards = [
-            (L("🔥 连续使用"), L("%d 天") % streak, "", None),
-            (L("今日会话"), L("%d 个") % session_count,
-             L("平均 %d 分钟 · 最长 %d 分钟") % (session_avg, session_longest), None),
-            (L("本周用量"), self.fmt_tokens(this_week), "", delta_badge),
-            (L("日均用量（近 30 天）"),
-             self.fmt_tokens((self.query_day_stats(30) or {"total": 0})["total"] // 30), "", None),
-            (L("历史总量"), self.fmt_tokens(total_all), "", None),
-            (L("单日峰值（近 30 天）"), peak_v, peak_h, None),
-            (L("最活跃时段（近 30 天）"), peak_hour_txt, "", None),
-            (L("使用量最大的模型（近 30 天）"), self.fmt_tokens(top[1]) if top else "-",
-             top[0] if top else "", None),
-            (L("预计本月消耗"), self.fmt_tokens(projected),
-             L("按当前速率 · 本月已用 ") + self.fmt_tokens(mtd), None),
-        ]
-        for i, (t, v, sub, badge) in enumerate(cards):
-            self._insight_card(grid, i // 2, i % 2, t, v, sub, badge=badge)
+        hright = tk.Frame(head, bg=Design.BACKGROUND)
+        hright.pack(side=tk.RIGHT)
+        btn(hright, L("导出长图"), export_long_image).pack(side=tk.RIGHT, padx=(8, 0))
+        pill_card, pill_body = rounded_card(hright, padx=4, pady=4, radius=14)
+        pill_card.pack(side=tk.RIGHT)
+        range_state = {"key": "30"}
+        seg_btns = {}
+        seg_specs = [("7", L("7 天")), ("30", L("30 天")),
+                     ("90", L("90 天")), ("all", L("全部"))]
+        for key, label in seg_specs:
+            b = tk.Button(pill_body, text=label, bd=0, relief=tk.FLAT, cursor="hand2",
+                          bg=Design.CARD_FILL, fg=Design.TEXT_SECONDARY,
+                          activebackground=Design.BTN_BG_HOVER,
+                          activeforeground=Design.TEXT_PRIMARY,
+                          font=Design.FONT_UI_SMALL, padx=10, pady=2,
+                          command=lambda k=key: (range_state.update(key=k), render_range()))
+            b.pack(side=tk.LEFT)
+            seg_btns[key] = b
 
-        # 星期分布（近 90 天）
-        section(ins_page, L("星期分布（近 90 天）"))
-        weekday_labels = [L("周一"), L("周二"), L("周三"), L("周四"), L("周五"), L("周六"), L("周日")]
-        if not any(weekday_totals):
-            muted(ins_page, L("暂无数据"))
-        else:
-            wd_series = [(weekday_labels[i], {weekday_labels[i]: weekday_totals[i]})
-                         for i in range(7)]
-            wd_colors = {weekday_labels[i]: Design.MODEL_COLORS[i % len(Design.MODEL_COLORS)]
-                         for i in range(7)}
-            png_label(ins_page, self._bar_chart_png(wd_series, wd_colors))
-
-        # 近 90 天用量热力图（7 行 × 周数，首列按起始日 weekday 补位）
-        section(ins_page, L("近 90 天用量热力图"))
-        start_day = (datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-                     - timedelta(days=90))
-        pad = start_day.weekday()
-        by_date = {}
-        for date_text, token in tokens91:
-            by_date[date_text] = token
-        cells = [("", -1)] * pad
-        for i in range(91):
-            key = (start_day + timedelta(days=i)).strftime("%Y-%m-%d")
-            cells.append((key, by_date.get(key, 0)))
-        max_token = max((t for _, t in cells), default=0) or 1
-        weeks = (len(cells) + 6) // 7
-        cell_size, gap = 15, 3
-        left = 22
-        canvas_w = max(left + weeks * (cell_size + gap) + 6, 120)
-        rows_h = 7 * (cell_size + gap) + 8
-
-        heat_card, heat_body = rounded_card(ins_page, padx=12, pady=10)
-        heat_card.pack(fill=tk.X, padx=16, pady=(4, 6))
-        heat = tk.Canvas(heat_body, bg=Design.CARD_FILL, highlightthickness=0,
-                         width=canvas_w, height=rows_h)
-        heat.pack(fill=tk.X)
-        tip = tk.Label(heat, text="", bg=Design.BTN_BG, fg=Design.TEXT_PRIMARY,
-                       font=Design.FONT_UI_TINY, padx=6, pady=2)
-
-        def on_leave(_event=None):
-            tip.place_forget()
-
-        def make_enter(date_text, token, cx, cy):
-            def enter(_event=None):
-                tip.configure(text="%s · %s" % (date_text, self.fmt_tokens(token)))
-                tip.place(x=min(cx + 12, max(canvas_w - 160, 12)), y=max(cy - 26, 2))
-            return enter
-
-        # 星期轴：只标周一/三/五，和 GitHub 热力图一样不挤
-        for row, name in ((0, L("一")), (2, L("三")), (4, L("五"))):
-            heat.create_text(6, 4 + row * (cell_size + gap) + cell_size / 2,
-                             text=name, fill=Design.TEXT_MUTED,
-                             font=Design.FONT_UI_TINY, anchor='w')
-
-        for idx, (date_text, token) in enumerate(cells):
-            row, col = idx % 7, idx // 7
-            x1 = left + col * (cell_size + gap)
-            y1 = 4 + row * (cell_size + gap)
-            if token < 0:
-                color = blend("#FFFFFF", Design.CARD_FILL, 0.03)      # 首周补位格
-            elif token == 0:
-                color = blend("#FFFFFF", Design.CARD_FILL, 0.07)      # 无用量
-            else:
-                # 主题品牌色由浅到浓，比固定红绿阶更贴合当前主题
-                ratio = min(token / max_token, 1.0)
-                color = blend(Design.BRAND, Design.CARD_FILL, 0.18 + 0.72 * ratio)
-            tag = "cell%d" % idx
-            ChartCanvas.round_rect(heat, x1, y1, x1 + cell_size, y1 + cell_size, 4,
-                                   fill=color, outline="", tags=tag)
-            if date_text:
-                heat.tag_bind(tag, "<Enter>", make_enter(date_text, token, x1, y1))
-                heat.tag_bind(tag, "<Leave>", on_leave)
-
-        # 模型编年史（默认前 10 行，可展开/收起；模型治理菜单）
-        section(ins_page, L("模型编年史"))
-        chron_wrap = tk.Frame(ins_page, bg=Design.BACKGROUND)
-        chron_wrap.pack(fill=tk.X, padx=16, pady=(4, 4))
+        body = tk.Frame(ins_page, bg=Design.BACKGROUND)
+        body.pack(fill=tk.X, padx=10, pady=(2, 10))
         chron_state = {"expanded": False}
-        # 编年史是全表 GROUP BY，一次打开只查一次；合并后再强制刷新
         chron_cache = {}
 
-        def chronicle_rows(force=False):
-            if force or "rows" not in chron_cache:
-                chron_cache["rows"] = store.query_model_history() or []
-            return chron_cache["rows"]
+        def flat_canvas(parent, height=6, fill=INS_GREEN, ratio=0.0):
+            """胶囊进度条（本月已用比例）"""
+            c = tk.Canvas(parent, height=height, bg=Design.CARD_FILL, highlightthickness=0)
+            c.pack(fill=tk.X, pady=(6, 4))
+            r = height / 2
 
-        def auto_merge_models():
-            from tkinter import messagebox
-            groups, changed = store.auto_merge_models()
-            render_chronicle(force=True)
-            if groups == 0:
-                messagebox.showinfo(L("没有需要合并的模型"), L("大小写、厂商前缀不同的同名模型都已一致"))
+            def draw(event, cv=c, fr=ratio):
+                cv.delete("all")
+                w = max(event.width, 1)
+                ChartCanvas.round_rect(cv, 0, 0, w, height, r, fill=Design.BTN_BG)
+                if fr > 0:
+                    ChartCanvas.round_rect(cv, 0, 0, max(w * min(fr, 1.0), 2), height, r,
+                                           fill=fill)
+
+            c.bind("<Configure>", draw)
+            return c
+
+        def metric_card(parent, col, title, value, sub):
+            card, cb = rounded_card(parent, padx=14, pady=12)
+            card.grid(row=0, column=col, sticky="nsew", padx=6, pady=4)
+            tk.Label(cb, text=title, fg=Design.TEXT_SECONDARY, bg=Design.CARD_FILL,
+                     font=Design.FONT_UI, anchor='w').pack(fill=tk.X)
+            tk.Label(cb, text=value, fg=Design.TEXT_PRIMARY, bg=Design.CARD_FILL,
+                     font=Design.FONT_INSIGHT_VALUE, anchor='w').pack(fill=tk.X, pady=(2, 0))
+            tk.Label(cb, text=sub, fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                     font=Design.FONT_UI_SMALL, anchor='w').pack(fill=tk.X)
+
+        def render_range():
+            for w in body.winfo_children():
+                w.destroy()
+            key = range_state["key"]
+            for k, b in seg_btns.items():
+                sel = (k == key)
+                b.configure(bg=blend(INS_GREEN, Design.CARD_FILL, 0.22) if sel
+                            else Design.CARD_FILL,
+                            fg=INS_GREEN if sel else Design.TEXT_SECONDARY)
+            if key == "all":
+                days = span_days
+                title = L("全部用量")
             else:
-                messagebox.showinfo(L("合并完成"), L("已合并 %d 组 · 改写 %d 行明细") % (groups, changed))
+                days = int(key)
+                title = L("近 %d 天用量") % days
 
-        def manual_merge_models():
-            from tkinter import messagebox
-            names = [m for m, _f, _l, _t in chronicle_rows()]
-            if len(names) < 2:
-                messagebox.showinfo(L("手动合并模型"), L("模型不足两个，无需合并"))
-                return
-            dlg = tk.Toplevel(root)
-            dlg.title(L("手动合并模型"))
-            dlg.configure(bg=Design.BACKGROUND)
-            dlg.geometry("470x230")
-            dlg.transient(root)
-            tk.Label(dlg, text=L("手动合并模型"), fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
-                     font=("Microsoft YaHei UI", 11, "bold")).pack(anchor='w', padx=18, pady=(16, 8))
-            from_var = tk.StringVar(value=names[0])
-            to_var = tk.StringVar(value=names[0])
-            for label, var in ((L("从"), from_var), (L("合并到"), to_var)):
-                row = tk.Frame(dlg, bg=Design.BACKGROUND)
-                row.pack(fill=tk.X, padx=18, pady=3)
-                tk.Label(row, text=label, fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
-                         width=6, anchor='w', font=Design.FONT_UI).pack(side=tk.LEFT)
-                ttk.Combobox(row, textvariable=var, values=names, state="readonly",
-                             width=32, style="Insights.TCombobox").pack(side=tk.LEFT)
-            tk.Label(dlg, text=L("「从」模型的所有明细行会并入「到」模型，操作不可撤销"),
+            series = zero_filled(days)
+            total = sum(v for _, v in series)
+            daily_avg = total // max(days, 1)
+            peak_idx = max(range(len(series)), key=lambda i: series[i][1]) if series else 0
+            peak_day, peak_v = series[peak_idx] if series else ("-", 0)
+            prev_total = None
+            if key != "all":
+                prev_total = sum(
+                    raw_by_date.get((day_zero - timedelta(days=i)).strftime("%Y-%m-%d"), 0)
+                    for i in range(days, days * 2))
+
+            # ---- Hero：范围总量 + 环比 + 面积走势 + 日均/峰值/历史总量 ----
+            hero_row = tk.Frame(body, bg=Design.BACKGROUND)
+            hero_row.pack(fill=tk.X)
+            hero_row.grid_columnconfigure(0, weight=3)
+            hero_row.grid_columnconfigure(1, weight=1)
+            hero, hero_body = rounded_card(hero_row, padx=16, pady=14)
+            hero.grid(row=0, column=0, sticky="nsew", padx=(6, 6), pady=4)
+            pred, pred_body = rounded_card(hero_row, padx=16, pady=14)
+            pred.grid(row=0, column=1, sticky="nsew", padx=(0, 6), pady=4)
+
+            hrow = tk.Frame(hero_body, bg=Design.CARD_FILL)
+            hrow.pack(fill=tk.X)
+            tk.Label(hrow, text=title, fg=Design.TEXT_SECONDARY, bg=Design.CARD_FILL,
+                     font=Design.FONT_UI, anchor='w').pack(side=tk.LEFT)
+            if prev_total:
+                pct = (total - prev_total) / prev_total * 100
+                if abs(pct) < 0.5:
+                    badge_txt, badge_color = "±0%", Design.TEXT_MUTED
+                elif pct > 0:
+                    badge_txt, badge_color = "▲ %.0f%%" % pct, Design.WARNING
+                else:
+                    badge_txt, badge_color = "▼ %.0f%%" % -pct, Design.SUCCESS
+                tk.Label(hrow, text=badge_txt, fg=badge_color, bg=Design.CARD_FILL,
+                         font=Design.FONT_UI_SMALL).pack(side=tk.RIGHT)
+
+            vrow = tk.Frame(hero_body, bg=Design.CARD_FILL)
+            vrow.pack(fill=tk.X, pady=(2, 0))
+            tk.Label(vrow, text=self.fmt_tokens(total), fg=INS_GREEN, bg=Design.CARD_FILL,
+                     font=("Microsoft YaHei UI", 26, "bold")).pack(side=tk.LEFT)
+            tk.Label(vrow, text=L("单位 tokens"), fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                     font=Design.FONT_UI_SMALL).pack(side=tk.LEFT, padx=(6, 0), pady=(10, 0))
+
+            chart_pts = [(d[5:] if days <= 90 else d[2:], v) for d, v in series]
+            hero_img = self._area_chart_png(chart_pts, INS_GREEN, width=560, height=128)
+            photo = ImageTk.PhotoImage(hero_img)
+            lbl = tk.Label(hero_body, image=photo, bg=Design.CARD_FILL, bd=0)
+            lbl.image = photo
+            lbl.pack(fill=tk.X, pady=(6, 2))
+
+            stats_row = tk.Frame(hero_body, bg=Design.CARD_FILL)
+            stats_row.pack(fill=tk.X, pady=(4, 0))
+            for i in range(3):
+                stats_row.grid_columnconfigure(i, weight=1, uniform="hero")
+            for i, (lab, val, sub) in enumerate([
+                    (L("日均"), self.fmt_tokens(daily_avg), L("近 %d 天") % days),
+                    (L("单日峰值"), self.fmt_tokens(peak_v), peak_day),
+                    (L("历史总量"), self.fmt_tokens(total_all), L("全部时间"))]):
+                col = tk.Frame(stats_row, bg=Design.CARD_FILL)
+                col.grid(row=0, column=i, sticky="w", padx=(0, 10))
+                tk.Label(col, text=lab, fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                         font=Design.FONT_UI_TINY, anchor='w').pack(anchor='w')
+                tk.Label(col, text=val, fg=Design.TEXT_PRIMARY, bg=Design.CARD_FILL,
+                         font=Design.FONT_MONO_SMALL, anchor='w').pack(anchor='w')
+                tk.Label(col, text=sub, fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                         font=Design.FONT_UI_TINY, anchor='w').pack(anchor='w')
+
+            # ---- 右侧：预计本月消耗 ----
+            tk.Label(pred_body, text=L("预计本月消耗"), fg=Design.TEXT_SECONDARY,
+                     bg=Design.CARD_FILL, font=Design.FONT_UI, anchor='w').pack(fill=tk.X)
+            tk.Label(pred_body, text=self.fmt_tokens(projected), fg=INS_GREEN,
+                     bg=Design.CARD_FILL, font=Design.FONT_INSIGHT_VALUE,
+                     anchor='w').pack(fill=tk.X, pady=(2, 0))
+            ratio = (mtd / projected) if projected else 0.0
+            flat_canvas(pred_body, height=6, ratio=ratio)
+            prow = tk.Frame(pred_body, bg=Design.CARD_FILL)
+            prow.pack(fill=tk.X)
+            tk.Label(prow, text=L("本月已用 ") + self.fmt_tokens(mtd),
+                     fg=Design.TEXT_SECONDARY, bg=Design.CARD_FILL,
+                     font=Design.FONT_MONO_TINY).pack(side=tk.LEFT)
+            tk.Label(prow, text="%.0f%%" % (ratio * 100), fg=Design.TEXT_MUTED,
+                     bg=Design.CARD_FILL, font=Design.FONT_MONO_TINY).pack(side=tk.RIGHT)
+            tk.Label(pred_body, text=L("按当前速率 · 本月 %d 天") % month_days,
+                     fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                     font=Design.FONT_UI_TINY, anchor='w').pack(fill=tk.X, pady=(4, 0))
+
+            # ---- 四张指标卡：连续使用 / 今日会话 / 最活跃时段 / 主力模型 ----
+            cards_row = tk.Frame(body, bg=Design.BACKGROUND)
+            cards_row.pack(fill=tk.X, pady=(4, 0))
+            for i in range(4):
+                cards_row.grid_columnconfigure(i, weight=1, uniform="ins")
+
+            hour_txt = "-"
+            if peak_hour_map:
+                h = max(peak_hour_map.items(), key=lambda kv: kv[1])[0]
+                hour_txt = "%02d:00 – %02d:00" % (h, (h + 1) % 24)
+            last30 = zero_filled(30)
+            total30 = sum(v for _, v in last30) or 1
+            top_share = (top[1] / total30 * 100) if top else 0.0
+            metric_card(cards_row, 0, L("连续使用"), L("%d 天") % streak, L("当前连续"))
+            metric_card(cards_row, 1, L("今日会话"), L("%d 个") % session_count,
+                        L("平均 %d 分钟 · 最长 %d 分钟") % (session_avg, session_longest))
+            metric_card(cards_row, 2, L("最活跃时段"), hour_txt, L("近 30 天"))
+            metric_card(cards_row, 3, L("主力模型"),
+                        self.fmt_tokens(top[1]) if top else "-",
+                        (L("占 %.0f%%") % top_share) if top else L("暂无数据"))
+
+            # ---- 星期分布 ----
+            wd_sum = [0] * 7
+            wd_cnt = [0] * 7
+            for i in range(91):
+                d = day_zero - timedelta(days=i)
+                key_d = d.strftime("%Y-%m-%d")
+                wd_sum[d.weekday()] += raw_by_date.get(key_d, 0)
+                wd_cnt[d.weekday()] += 1
+            wd_avg = [wd_sum[i] / max(wd_cnt[i], 1) for i in range(7)]
+            wd_labels = [L("周一"), L("周二"), L("周三"), L("周四"), L("周五"),
+                         L("周六"), L("周日")]
+            wd_overall = int(sum(wd_avg) / 7) if any(wd_cnt) else 0
+            workday_avg = int(sum(wd_avg[:5]) / 5)
+            weekend_avg = int(sum(wd_avg[5:]) / 2)
+
+            wsec = tk.Frame(body, bg=Design.BACKGROUND)
+            wsec.pack(fill=tk.X, padx=6, pady=(10, 0))
+            tk.Label(wsec, text=L("星期分布"), fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+                     font=Design.FONT_CARD_TITLE, anchor='w').pack(side=tk.LEFT)
+            tk.Label(wsec, text=(L("近 90 天均值") + " " + self.fmt_tokens(wd_overall) + L("/天")),
                      fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
-                     font=Design.FONT_UI_SMALL).pack(anchor='w', padx=18, pady=(8, 0))
-            btns = tk.Frame(dlg, bg=Design.BACKGROUND)
-            btns.pack(fill=tk.X, padx=18, pady=14)
+                     font=Design.FONT_UI_SMALL).pack(side=tk.RIGHT)
 
-            def do_merge():
-                frm, to = from_var.get(), to_var.get()
-                if not frm or frm == to:
+            wcard, wbody = rounded_card(body, padx=14, pady=10)
+            wcard.pack(fill=tk.X, padx=16, pady=(4, 0))
+            if not any(wd_sum):
+                tk.Label(wbody, text=L("暂无数据"), fg=Design.TEXT_MUTED,
+                         bg=Design.CARD_FILL, font=Design.FONT_UI_SMALL).pack(anchor='w')
+            else:
+                wd_series = [(wd_labels[i], {wd_labels[i]: int(wd_avg[i])}) for i in range(7)]
+                wd_colors = {}
+                for i in range(7):
+                    wd_colors[wd_labels[i]] = INS_GREEN if i < 5 else blend(INS_GREEN, Design.CARD_FILL, 0.45)
+                wimg = self._bar_chart_png(wd_series, wd_colors, width=680, height=132)
+                wphoto = ImageTk.PhotoImage(wimg)
+                wlbl = tk.Label(wbody, image=wphoto, bg=Design.CARD_FILL, bd=0)
+                wlbl.image = wphoto
+                wlbl.pack(fill=tk.X)
+                wfoot = tk.Frame(wbody, bg=Design.CARD_FILL)
+                wfoot.pack(fill=tk.X, pady=(4, 0))
+                tk.Label(wfoot, text=L("工作日日均") + " " + self.fmt_tokens(workday_avg),
+                         fg=Design.TEXT_SECONDARY, bg=Design.CARD_FILL,
+                         font=Design.FONT_MONO_TINY).pack(side=tk.LEFT)
+                tk.Label(wfoot, text=L("周末日均") + " " + self.fmt_tokens(weekend_avg),
+                         fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                         font=Design.FONT_MONO_TINY).pack(side=tk.RIGHT)
+
+            # ---- 近 90 天热力图（绿色色阶） ----
+            hsec = tk.Frame(body, bg=Design.BACKGROUND)
+            hsec.pack(fill=tk.X, padx=6, pady=(10, 0))
+            tk.Label(hsec, text=L("近 90 天用量热力图"), fg=Design.TEXT_PRIMARY,
+                     bg=Design.BACKGROUND, font=Design.FONT_CARD_TITLE, anchor='w').pack(side=tk.LEFT)
+            lg = tk.Canvas(hsec, width=92, height=14, bg=Design.BACKGROUND, highlightthickness=0)
+            lg.pack(side=tk.RIGHT)
+            lg.create_text(0, 7, text=L("少"), fill=Design.TEXT_MUTED,
+                           font=Design.FONT_UI_TINY, anchor='w')
+            for i in range(4):
+                lg.create_rectangle(18 + i * 13, 3, 28 + i * 13, 13, outline="",
+                                    fill=blend(INS_GREEN, Design.CARD_FILL, 0.18 + i * 0.27))
+            lg.create_text(72, 7, text=L("多"), fill=Design.TEXT_MUTED,
+                           font=Design.FONT_UI_TINY, anchor='w')
+
+            heat_card, heat_body = rounded_card(body, padx=14, pady=10)
+            heat_card.pack(fill=tk.X, padx=16, pady=(4, 0))
+            start_day = day_zero - timedelta(days=90)
+            pad = start_day.weekday()
+            cells = [("", -1)] * pad
+            for i in range(91):
+                key_d = (start_day + timedelta(days=i)).strftime("%Y-%m-%d")
+                cells.append((key_d, raw_by_date.get(key_d, 0)))
+            max_token = max((t for _, t in cells), default=0) or 1
+            weeks = (len(cells) + 6) // 7
+            cell_size, gap = 14, 3
+            left_axis = 18
+            canvas_w = max(left_axis + weeks * (cell_size + gap) + 4, 120)
+            rows_h = 7 * (cell_size + gap) + 20
+            heat = tk.Canvas(heat_body, bg=Design.CARD_FILL, highlightthickness=0,
+                             width=canvas_w, height=rows_h)
+            heat.pack(fill=tk.X)
+            tip = tk.Label(heat, text="", bg=Design.BTN_BG, fg=Design.TEXT_PRIMARY,
+                           font=Design.FONT_UI_TINY, padx=6, pady=2)
+
+            def on_leave(_event=None):
+                tip.place_forget()
+
+            def make_enter(date_text, token, cx, cy):
+                def enter(_event=None):
+                    tip.configure(text="%s · %s" % (date_text, self.fmt_tokens(token)))
+                    tip.place(x=min(cx + 12, max(canvas_w - 160, 12)), y=max(cy - 26, 2))
+                return enter
+
+            for row, name in ((0, L("一")), (2, L("三")), (4, L("五"))):
+                heat.create_text(4, 3 + row * (cell_size + gap) + cell_size / 2,
+                                 text=name, fill=Design.TEXT_MUTED,
+                                 font=Design.FONT_UI_TINY, anchor='w')
+            month_seen = set()
+            for idx, (date_text, token) in enumerate(cells):
+                row, col = idx % 7, idx // 7
+                x1 = left_axis + col * (cell_size + gap)
+                y1 = 3 + row * (cell_size + gap)
+                if token < 0:
+                    color = blend("#FFFFFF", Design.CARD_FILL, 0.03)
+                elif token == 0:
+                    color = blend("#FFFFFF", Design.CARD_FILL, 0.07)
+                else:
+                    color = blend(INS_GREEN, Design.CARD_FILL,
+                                  0.12 + 0.83 * min(token / max_token, 1.0))
+                tag = "cell%d" % idx
+                ChartCanvas.round_rect(heat, x1, y1, x1 + cell_size, y1 + cell_size, 3,
+                                       fill=color, outline="", tags=tag)
+                if date_text:
+                    heat.tag_bind(tag, "<Enter>", make_enter(date_text, token, x1, y1))
+                    heat.tag_bind(tag, "<Leave>", on_leave)
+                    if date_text[8:10] == "01":
+                        mk = date_text[:7]
+                        if mk not in month_seen:
+                            month_seen.add(mk)
+                            heat.create_text(x1 + 2, 3 + 7 * (cell_size + gap) + 2,
+                                             text=L("%d 月") % int(date_text[5:7]),
+                                             fill=Design.TEXT_MUTED,
+                                             font=Design.FONT_UI_TINY, anchor='nw')
+
+            # ---- 模型编年史（横向时间条） ----
+
+            def chronicle_rows(force=False):
+                if force or "rows" not in chron_cache:
+                    chron_cache["rows"] = store.query_model_history() or []
+                return chron_cache["rows"]
+
+            def auto_merge_models():
+                from tkinter import messagebox
+                groups, changed = store.auto_merge_models()
+                render_chronicle(force=True)
+                if groups == 0:
+                    messagebox.showinfo(L("没有需要合并的模型"),
+                                        L("大小写、厂商前缀不同的同名模型都已一致"))
+                else:
+                    messagebox.showinfo(L("合并完成"),
+                                        L("已合并 %d 组 · 改写 %d 行明细") % (groups, changed))
+
+            def manual_merge_models():
+                from tkinter import messagebox
+                names = [m for m, _f, _l, _t in chronicle_rows()]
+                if len(names) < 2:
+                    messagebox.showinfo(L("手动合并模型"), L("模型不足两个，无需合并"))
                     return
-                changed = store.merge_model(frm, to)
-                dlg.destroy()
+                from tkinter import simpledialog
+                src = simpledialog.askstring(L("手动合并模型"),
+                                             L("要并入其他模型的名称：\n") + "\n".join(names[:20]),
+                                             parent=root)
+                if not src:
+                    return
+                dst = simpledialog.askstring(L("手动合并模型"), L("合并到（目标模型名）："),
+                                             parent=root)
+                if not dst or dst == src:
+                    return
+                changed = store.merge_model(src, dst)
                 render_chronicle(force=True)
                 messagebox.showinfo(L("合并完成"), L("已改写 %d 行明细") % changed)
 
-            btn(btns, L("取消"), dlg.destroy).pack(side=tk.RIGHT)
-            btn(btns, L("合并"), do_merge, primary=True).pack(side=tk.RIGHT, padx=(0, 8))
+            csec = tk.Frame(body, bg=Design.BACKGROUND)
+            csec.pack(fill=tk.X, padx=6, pady=(10, 0))
+            tk.Label(csec, text=L("模型编年史"), fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+                     font=Design.FONT_CARD_TITLE, anchor='w').pack(side=tk.LEFT)
+            cmeta_lbl = tk.Label(csec, text="", fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
+                                 font=Design.FONT_UI_SMALL)
+            cmeta_lbl.pack(side=tk.LEFT, padx=(8, 0))
 
-        def render_chronicle(force=False):
-            for w in chron_wrap.winfo_children():
-                w.destroy()
-            history = chronicle_rows(force)
-            if not history:
-                muted(chron_wrap, L("暂无数据"))
-                return
-            shown = history if chron_state["expanded"] else history[:10]
-            colors = model_colors()
-            rail_line = blend("#FFFFFF", Design.BACKGROUND, 0.16)
-            for idx, (model, first_epoch, last_epoch, token) in enumerate(shown):
-                row = tk.Frame(chron_wrap, bg=Design.BACKGROUND)
-                row.pack(fill=tk.X, pady=1)
-                # 时间轴：竖线 + 节点，首行从节点起、末行到节点止
-                rail = tk.Canvas(row, width=16, height=24, bg=Design.BACKGROUND,
+            chron_card, chron_body = rounded_card(body, padx=14, pady=10)
+            chron_card.pack(fill=tk.X, padx=16, pady=(4, 0))
+            chron_wrap = tk.Frame(chron_body, bg=Design.CARD_FILL)
+            chron_wrap.pack(fill=tk.X)
+
+            def render_chronicle(force=False):
+                for w in chron_wrap.winfo_children():
+                    w.destroy()
+                history = chronicle_rows(force)
+                cmeta_lbl.configure(
+                    text=(L("共 %d 个 · 按首次使用排序") % len(history)) if history else "")
+                if not history:
+                    tk.Label(chron_wrap, text=L("暂无数据"), fg=Design.TEXT_MUTED,
+                             bg=Design.CARD_FILL, font=Design.FONT_UI_SMALL).pack(anchor='w')
+                    return
+                shown = history if chron_state["expanded"] else history[:12]
+                max_epoch = max(r[2] for r in shown) or 1
+                min_epoch = min((r[1] for r in shown if r[1] > 0), default=max_epoch - 86400 * 30)
+                span = max(max_epoch - min_epoch, 1)
+                colors = model_colors()
+
+                # 顶部月份刻度（用空标签占位，保证与下方时间条对齐）
+                axis_row = tk.Frame(chron_wrap, bg=Design.CARD_FILL)
+                axis_row.pack(fill=tk.X)
+                tk.Label(axis_row, text="", width=18, bg=Design.CARD_FILL,
+                         font=Design.FONT_UI).pack(side=tk.LEFT)
+                axis = tk.Canvas(axis_row, height=16, bg=Design.CARD_FILL,
                                  highlightthickness=0)
-                rail.pack(side=tk.LEFT)
-                top = 12 if idx == 0 else 0
-                bottom = 12 if idx == len(shown) - 1 else 24
-                rail.create_line(8, top, 8, bottom, fill=rail_line, width=1)
-                rail.create_oval(4, 8, 12, 16,
-                                 fill=colors[idx % len(colors)], outline="")
-                tk.Label(row, text=model or "-", fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
-                         font=("Microsoft YaHei UI", 10), anchor='w').pack(side=tk.LEFT)
-                tk.Label(row, text="%s → %s" % (self._short_date(first_epoch),
-                                                self._short_date(last_epoch)),
-                         fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
-                         font=Design.FONT_MONO_TINY).pack(side=tk.LEFT, padx=(8, 0))
-                tk.Label(row, text=self.fmt_tokens(token), fg=Design.DATA, bg=Design.BACKGROUND,
+                axis.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+                tk.Label(axis_row, text="", width=10, bg=Design.CARD_FILL,
                          font=Design.FONT_MONO_SMALL).pack(side=tk.RIGHT)
 
-            def toggle():
-                chron_state["expanded"] = not chron_state["expanded"]
-                render_chronicle()
+                def draw_axis(event, cv=axis):
+                    cv.delete("all")
+                    w = max(event.width, 1)
+                    start = datetime.fromtimestamp(min_epoch)
+                    cur = datetime(start.year, start.month, 1)
+                    while True:
+                        marker = cur + timedelta(days=31)
+                        marker = datetime(marker.year, marker.month, 1)
+                        if marker.timestamp() > max_epoch:
+                            break
+                        x = (marker.timestamp() - min_epoch) / span * w
+                        cv.create_text(x, 8, text=marker.strftime("%m 月"),
+                                       fill=Design.TEXT_MUTED, font=Design.FONT_UI_TINY,
+                                       anchor='w')
+                        cur = marker
 
-            if len(history) > 10:
-                tk.Button(chron_wrap,
-                          text=(L("收起") if chron_state["expanded"]
-                                else L("展开全部 %d 个模型") % len(history)),
-                          command=toggle, bg=Design.BACKGROUND, fg=Design.BRAND,
-                          activebackground=Design.BACKGROUND, activeforeground=Design.BRAND,
-                          relief="flat", bd=0, cursor="hand2",
-                          font=Design.FONT_UI_SMALL).pack(anchor='w', pady=(4, 0))
-            menu_row = tk.Frame(chron_wrap, bg=Design.BACKGROUND)
-            menu_row.pack(fill=tk.X, pady=(6, 0))
-            mb = tk.Menubutton(menu_row, text=L("整理模型 ▾"), bg=Design.CARD_FILL,
-                               fg=Design.TEXT_PRIMARY, activebackground=Design.BTN_BG_HOVER,
-                               activeforeground=Design.TEXT_PRIMARY, relief="flat", bd=0,
-                               cursor="hand2", font=Design.FONT_UI_SMALL, padx=10, pady=3)
-            menu = tk.Menu(mb, tearoff=0, bg=Design.CARD_FILL, fg=Design.TEXT_PRIMARY,
-                           activebackground=Design.BRAND, activeforeground=Design.TEXT_PRIMARY,
-                           font=Design.FONT_UI_SMALL)
-            menu.add_command(label=L("自动合并同名模型"), command=auto_merge_models)
-            menu.add_command(label=L("手动合并…"), command=manual_merge_models)
-            mb.configure(menu=menu)
-            mb.pack(side=tk.RIGHT)
-            ins_wheel(chron_wrap)
+                axis.bind("<Configure>", draw_axis)
 
-        render_chronicle()
-        ins_wheel(ins_page)
+                for idx, (model, first_epoch, last_epoch, token) in enumerate(shown):
+                    row = tk.Frame(chron_wrap, bg=Design.CARD_FILL)
+                    row.pack(fill=tk.X, pady=2)
+                    tk.Label(row, text=model or "-", fg=Design.TEXT_PRIMARY,
+                             bg=Design.CARD_FILL, font=Design.FONT_UI, anchor='w',
+                             width=18).pack(side=tk.LEFT)
+                    bar = tk.Canvas(row, height=16, bg=Design.CARD_FILL,
+                                    highlightthickness=0)
+                    bar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+                    tk.Label(row, text=self.fmt_tokens(token), fg=Design.DATA,
+                             bg=Design.CARD_FILL, font=Design.FONT_MONO_SMALL,
+                             anchor='e', width=10).pack(side=tk.RIGHT)
+                    color = colors[idx % len(colors)]
+
+                    def draw_bar(event, cv=bar, f0=first_epoch, f1=last_epoch, c=color):
+                        cv.delete("all")
+                        w = max(event.width, 1)
+                        x0 = (f0 - min_epoch) / span * w
+                        x1 = (f1 - min_epoch) / span * w
+                        cv.create_line(0, 8, w, 8, fill=Design.CARD_BORDER)
+                        ChartCanvas.round_rect(cv, x0, 3, max(x1, x0 + 6), 13, 5,
+                                               fill=c, outline="")
+
+                    bar.bind("<Configure>", draw_bar)
+
+                def toggle():
+                    chron_state["expanded"] = not chron_state["expanded"]
+                    render_chronicle()
+
+                if len(history) > 12:
+                    tk.Button(chron_wrap,
+                              text=(L("收起") if chron_state["expanded"]
+                                    else L("展开其余 %d 个模型") % (len(history) - 12)),
+                              command=toggle, bg=Design.CARD_FILL, fg=Design.BRAND,
+                              activebackground=Design.CARD_FILL, activeforeground=Design.BRAND,
+                              relief="flat", bd=0, cursor="hand2",
+                              font=Design.FONT_UI_SMALL).pack(anchor='w', pady=(4, 0))
+                menu_row = tk.Frame(chron_wrap, bg=Design.CARD_FILL)
+                menu_row.pack(fill=tk.X, pady=(6, 0))
+                mb = tk.Menubutton(menu_row, text=L("整理模型 ▾"), bg=Design.BTN_BG,
+                                   fg=Design.TEXT_PRIMARY, activebackground=Design.BTN_BG_HOVER,
+                                   activeforeground=Design.TEXT_PRIMARY, relief="flat", bd=0,
+                                   cursor="hand2", font=Design.FONT_UI_SMALL, padx=10, pady=3)
+                menu = tk.Menu(mb, tearoff=0, bg=Design.CARD_FILL, fg=Design.TEXT_PRIMARY,
+                               activebackground=Design.BRAND,
+                               activeforeground=Design.TEXT_PRIMARY,
+                               font=Design.FONT_UI_SMALL)
+                menu.add_command(label=L("自动合并同名模型"), command=auto_merge_models)
+                menu.add_command(label=L("手动合并…"), command=manual_merge_models)
+                mb.configure(menu=menu)
+                mb.pack(side=tk.RIGHT)
+                ins_wheel(chron_wrap)
+
+            render_chronicle()
+            ins_wheel(body)
+
+        render_range()
 
         # ============ 分享 ============
         f_share = tab(L("分享"))

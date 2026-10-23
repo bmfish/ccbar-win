@@ -1093,6 +1093,40 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
         return img
 
     @staticmethod
+    def _area_chart_png(points, color, width=520, height=120):
+        """面积走势图（洞察 Hero）：折线 + 半透明填充 + 末点亮点。
+
+        points: [(label, value)]，label 用于首尾日期标注。
+        """
+        from PIL import Image, ImageDraw
+
+        img = Image.new("RGB", (width, height), Design.CARD_FILL)
+        d = ImageDraw.Draw(img)
+        if len(points) < 2:
+            d.text((width // 2, height // 2), L("暂无数据"), fill="#6B6B6B",
+                   anchor="mm", font=CcBarTray._pil_font(13))
+            return img
+        top, bottom = 14, height - 18
+        maxv = max(v for _, v in points) or 1
+        left, right = 8, width - 8
+        step = (right - left) / (len(points) - 1)
+        pts = [(left + i * step, bottom - (v / maxv) * (bottom - top))
+               for i, (_, v) in enumerate(points)]
+        d.polygon(pts + [(right, bottom), (left, bottom)],
+                  fill=blend(color, Design.CARD_FILL, 0.22))
+        d.line(pts, fill=color, width=2)
+        # 末点小圆点（原型图里曲线右端有个亮点）
+        d.ellipse([pts[-1][0] - 2.5, pts[-1][1] - 2.5,
+                   pts[-1][0] + 2.5, pts[-1][1] + 2.5], fill=color)
+        d.text((4, 0), (f"{maxv / 1e8:.2f}亿" if maxv >= 1e8 else f"{maxv / 1e4:.0f}万"),
+               fill="#6B6B6B", font=CcBarTray._pil_font(10))
+        d.text((left, height - 14), points[0][0], fill="#6B6B6B",
+               font=CcBarTray._pil_font(9))
+        d.text((right, height - 14), points[-1][0], fill="#6B6B6B", anchor="ra",
+               font=CcBarTray._pil_font(9))
+        return img
+
+    @staticmethod
     def _line_chart_png(points, color, width=680, height=120, suffix=""):
         """深底折线图。points: [(label, value)]"""
         from PIL import Image, ImageDraw
