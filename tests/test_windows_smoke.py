@@ -724,6 +724,26 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
         self.assertEqual(int(canvas.cget("height")), 42)
         body.destroy()
 
+    def test_trend_cards_cached_per_day(self):
+        """昨日/近7天/近30天/历史总量每天只算一次：再次打开只查今日实时"""
+        calls = []
+        original = self.app.query_day_stats
+
+        def spy(days=0):
+            calls.append(days)
+            return original(days)
+
+        self.app.query_day_stats = spy
+        popover, body = self._build_popover()
+        first = list(calls)
+        body.destroy()
+
+        body2 = tk.Frame(self.root, bg=Design.BACKGROUND)
+        popover._build(body2)
+        self.assertEqual(calls, first + [0],
+                         "第二次打开不应重复查询趋势窗口（应读当天缓存）")
+        body2.destroy()
+
     def test_popover_empty_state_never_raises(self):
         """面板没数据也要建完（全部行隐去，按钮栏仍在）"""
         self.app.query_day_stats = lambda days=0: None

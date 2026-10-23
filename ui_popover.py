@@ -34,6 +34,8 @@ class PopoverWindow:
         self._armed = False
         self._btn_down = False
         self._last_close = 0.0
+        # 昨日/近7天/近30天/历史总量只在当天第一次打开时查库，之后读缓存
+        self._trend_cache = {"date": None, "data": None}
 
     # ---------------- 生命周期 ----------------
 
@@ -219,11 +221,7 @@ class PopoverWindow:
         import tkinter as tk
 
         app = self.app
-        today = app.query_day_stats(0)
-        yesterday = app.query_day_stats(1)
-        week = app.query_day_stats(7)
-        month = app.query_day_stats(30)
-        total = app.query_total_stats()
+        today = app.query_day_stats(0)          # 今日实时，每次打开都查
         models = app.query_model_breakdown()
         work_hours = app.query_work_hours()
 
@@ -238,8 +236,9 @@ class PopoverWindow:
         self._hero_card(parent, today, work_hours)
 
         # 趋势 2×2 迷你卡（昨日 / 近7天 / 近30天 / 历史总量）
-        if any((yesterday, week, month, total)):
-            self._trend_grid(parent, yesterday, week, month, total)
+        trend = self._trend_data()
+        if any((trend["yesterday"], trend["week"], trend["month"], trend["total"])):
+            self._trend_grid(parent, trend)
 
         # 模型分布
         if models:
@@ -261,6 +260,38 @@ class PopoverWindow:
             ("settings", L("设置"), self._on_settings),
             ("quit", L("退出"), self._on_quit),
         ])
+
+    def _trend_data(self):
+        """趋势四卡的数据：每天第一次打开面板时查一次，当天后续直接复用。
+
+        这些窗口含今天，缓存后数字会停在当天首次打开那一刻；今日实时数据
+        仍由 Hero 卡单独查询，不受影响。跨天后自动重算。
+        """
+        day = datetime.now().strftime("%Y-%m-%d")
+        if self._trend_cache["date"] == day and self._trend_cache["data"] is not None:
+            return self._trend_cache["data"]
+
+        app = self.app
+        yesterday = app.query_day_stats(1)
+        week = app.query_day_stats(7)
+        month = app.query_day_stats(30)
+        total = app.query_total_stats()
+        data = {
+            "yesterday": yesterday,
+            "week": week,
+            "month": month,
+            "total": total,
+            "prev_day": app.query_day_stats(2),
+            "prev_week": self._previous_window_total(7, week),
+            "prev_month": self._previous_window_total(30, month),
+            "credits": self._window_credits(),
+            "series_day": self._series_for_day(1),
+            "series_week": self._daily_series(7),
+            "series_month": self._daily_series(30),
+        }
+        self._trend_cache["date"] = day
+        self._trend_cache["data"] = data
+        return data
 
     # ---------------- 今日 Hero 卡 ----------------
 
@@ -321,7 +352,7 @@ class PopoverWindow:
 
     # ---------------- 趋势 2×2 迷你卡 ----------------
 
-    def _trend_grid(self, parent, yesterday, week, month, total):
+    def _trend_grid(self, parent, trend):
         """四个窗口的迷你卡：数值 + 同比徽章 + 迷你曲线（历史卡用占比条）"""
         import tkinter as tk
 
@@ -330,24 +361,23 @@ class PopoverWindow:
         for col in range(2):
             grid.grid_columnconfigure(col, weight=1, uniform="trend")
 
-        prev_day = self.app.query_day_stats(2)
-        prev_week = self._previous_window_total(7, week)
-        prev_month = self._previous_window_total(30, month)
+        yesterday, week = trend["yesterday"], trend["week"]
+        month, total = trend["month"], trend["total"]
         month_ratio = None
         if total and total.get("total"):
             month_ratio = (month or {}).get("total", 0) / total["total"]
-        credits = self._window_credits()
+        credits = trend["credits"]
 
-        self._trend_card(grid, 0, 0, L("昨日"), yesterday, prev_day,
-                         series=self._series_for_day(1),
+        self._trend_card(grid, 0, 0, L("昨日"), yesterday, trend["prev_day"],
+                         series=trend["series_day"],
                          credits=credits.get("day"),
                          command=self._open(self.app.show_hourly_detail_yesterday))
-        self._trend_card(grid, 0, 1, L("近7天"), week, prev_week,
-                         series=self._daily_series(7),
+        self._trend_card(grid, 0, 1, L("近7天"), week, trend["prev_week"],
+                         series=trend["series_week"],
                          credits=credits.get("week"),
                          command=self._open(self.app.show_weekly_detail))
-        self._trend_card(grid, 1, 0, L("近30天"), month, prev_month,
-                         series=self._daily_series(30),
+        self._trend_card(grid, 1, 0, L("近30天"), month, trend["prev_month"],
+                         series=trend["series_month"],
                          credits=credits.get("month"),
                          command=self._open(self.app.show_monthly_detail))
         self._trend_card(grid, 1, 1, L("历史总量"), total, None,
