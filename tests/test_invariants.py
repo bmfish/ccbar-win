@@ -195,11 +195,17 @@ class TestNoDeadSettings(unittest.TestCase):
 
     def test_behavior_keys_are_read_outside_the_settings_window(self):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(root, "main.py"), encoding="utf-8") as f:
-            src = f.read()
-        start = src.index("    def show_settings(self")
-        end = src.index("    @_on_gui\n    def backup_data")
-        outside = src[:start] + src[end:]
+        # UI 已拆分：设置窗口自身的代码要排除，但其余 UI 模块也算"设置页之外"
+        chunks = []
+        for name in ("main.py", "ui_popover.py", "ui_details.py", "ui_insights.py"):
+            with open(os.path.join(root, name), encoding="utf-8") as f:
+                text = f.read()
+            if name == "main.py":
+                start = text.index("    def show_settings(self")
+                end = text.index("    @_on_gui\n    def backup_data")
+                text = text[:start] + text[end:]
+            chunks.append(text)
+        outside = "\n".join(chunks)
 
         import re
         missing = [k for k in sorted(self.BEHAVIOR_KEYS)

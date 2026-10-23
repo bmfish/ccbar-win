@@ -142,19 +142,30 @@ class TrayFixture(unittest.TestCase):
         conn.close()
 
     def _find_notebook(self, widget):
-        """递归找 ttk.Notebook"""
+        """递归找页签容器（ttk.Notebook 或自绘的 PillTabs）"""
         import tkinter.ttk as ttk
+        import ui_tabs
         for child in widget.winfo_children():
-            if isinstance(child, ttk.Notebook):
+            if isinstance(child, (ttk.Notebook, ui_tabs.PillTabs)):
                 return child
             found = self._find_notebook(child)
             if found is not None:
                 return found
         return None
 
-    def _build_insights(self):
-        """绕过 @_on_gui 直接在当前线程建窗口（不泵事件），返回 (窗口, Notebook)"""
-        CcBarTray.show_insights.__wrapped__(self.app)
+    def _run_queued(self, timeout=5):
+        """等后台任务把回调投递进 _ui_queue，然后就地执行（测试线程即 GUI 线程）"""
+        import time
+        deadline = time.time() + timeout
+        while self.app._ui_queue.empty() and time.time() < deadline:
+            time.sleep(0.01)
+        while not self.app._ui_queue.empty():
+            self.app._ui_queue.get_nowait()()
+
+    def _build_insights(self, initial_page=None):
+        """在当前线程建洞察窗口：查询走后台，这里等它完成并执行渲染回调"""
+        CcBarTray.show_insights.__wrapped__(self.app, initial_page=initial_page)
+        self._run_queued()
         toplevels = [w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)]
         title = l10n.L("洞察中心")      # 标题跟着当前语言走
         insights = [w for w in toplevels if w.title() == title]

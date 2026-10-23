@@ -4,6 +4,7 @@ import os
 import sys
 import unittest
 from datetime import datetime
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -337,6 +338,54 @@ class TestConstants(unittest.TestCase):
         rows = [wb.WorkBuddyRow("a", "c", "m", 1.5, 1),
                 wb.WorkBuddyRow("b", "c", "m", 2.25, 2)]
         self.assertAlmostEqual(wb.credit_total(rows), 3.75, places=6)
+
+
+class TestHttpRetry(unittest.TestCase):
+    """传输层重试：一次网络抖动不该浪费整轮同步（也不能把 4xx 当抖动重试）"""
+
+    def test_retries_network_error_then_succeeds(self):
+        calls = []
+
+        def fake_once(url, headers, body, timeout):
+            calls.append(url)
+            if len(calls) == 1:
+                return (0, None, None)
+            return (200, {}, "{}")
+
+        with mock.patch.object(http_common, "_http_post_once", fake_once), \
+                mock.patch.object(http_common.time, "sleep", lambda s: None):
+            status, _headers, _text = http_common.http_post("http://x")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(calls), 2)
+
+    def test_retries_429_and_honours_retry_after(self):
+        sleeps = []
+        calls = []
+
+        def fake_once(url, headers, body, timeout):
+            calls.append(url)
+            if len(calls) == 1:
+                return (429, {"Retry-After": "2"}, "")
+            return (200, {}, "{}")
+
+        with mock.patch.object(http_common, "_http_post_once", fake_once), \
+                mock.patch.object(http_common.time, "sleep", sleeps.append):
+            status, _headers, _text = http_common.http_post("http://x")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(sleeps, [2.0], "应尊重 Retry-After")
+
+    def test_does_not_retry_4xx(self):
+        calls = []
+
+        def fake_once(url, headers, body, timeout):
+            calls.append(url)
+            return (401, {}, "denied")
+
+        with mock.patch.object(http_common, "_http_post_once", fake_once):
+            status, _headers, _text = http_common.http_post("http://x")
+        self.assertEqual(status, 401)
+        self.assertEqual(len(calls), 1, "401 是凭据失效，重试无意义")
 
 
 if __name__ == "__main__":

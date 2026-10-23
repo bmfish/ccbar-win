@@ -8,18 +8,24 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 项目声明支持 3.9+，这里把下界与常用新版本都覆盖上
+        python-version: ['3.9', '3.10', '3.12']
     steps:
     - uses: actions/checkout@v4
 
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.10'
+        python-version: ${{ matrix.python-version }}
 
     # 只装测试真正需要的：pystray / win10toast 是 Windows 独占，Linux 上装不上，
     # 测试里对它们打桩（见 tests/test_charts.py）。
+    # Pillow 与 requirements 保持一致（Pillow 12 不再支持 3.9）
     - name: Install test dependencies
-      run: python -m pip install --upgrade pip Pillow
+      run: python -m pip install --upgrade pip "Pillow>=9,<12"
 
     - name: Run tests
       run: python -m unittest discover -s tests -v

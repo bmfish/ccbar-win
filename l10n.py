@@ -295,6 +295,7 @@ L10N_EN = {
     "没有需要合并的模型": "Nothing to merge",
     "洞察": "Insights",
     "洞察中心": "Insights",
+    "洞察中心加载失败": "Failed to open Insights",
     "流水": "Timeline",
     "测试？什么测试？ 🎲": "Tests? What tests? 🎲",
     "浏览": "Browse",
@@ -354,6 +355,7 @@ L10N_EN = {
     "近 7 天": "7 Days",
     "近 90 天用量热力图": "90-Day Heatmap",
     "近30天": "30 Days",
+    "近30天 %d%%": "30 days · %d%%",
     "近30天用量": "Last 30 Days",
     "近7天": "7 Days",
     "近7天用量": "Last 7 Days",
@@ -463,6 +465,7 @@ L10N_EN.update({
     "🌶️ 未找到数据源，请去设置": "🌶️ No data source, open Settings",
     "去设置": "Open settings",
     "ccBar - 未找到数据": "ccBar - no data",
+    "ccBar - 正在加载数据…": "ccBar - loading data…",
     "🤖 模型分布": "🤖 Models",
     "📈 洞察中心": "📈 Insights",
     "💾 备份数据": "💾 Back up data",
@@ -520,6 +523,9 @@ L10N_EN.update({
     "周五": "Fri",
     "周六": "Sat",
     "周日": "Sun",
+    "一": "Mon",
+    "三": "Wed",
+    "五": "Fri",
     "%d月%d日": "%d/%d",
     "合并失败": "Merge failed",
     "默认主题": "Default",
@@ -605,8 +611,8 @@ L10N_EN.update({
     "ccbar-每小时.csv": "ccbar-hourly.csv",
     "今日 Token 用量已达 %s，超过预警阈值 %d万":
         "Today's tokens reached %s (warning line: %d×10K)",
-    "今日会话  %d 个 · 平均 %d 分钟 · 最长 %d 分钟":
-        "Sessions today  %d · avg %d min · longest %d min",
+    "今日会话 %d 个 · 均 %d 分 · 最长 %d 分":
+        "Sessions %d · avg %d min · max %d min",
     "剪贴板不可用，已保存到临时文件：\n%s":
         "Clipboard unavailable; saved to a temp file:\n%s",
     "导出%s": "Export %s",

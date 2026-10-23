@@ -24,6 +24,7 @@ import ui_fixture  # noqa: E402  （公共夹具：临时统计库 + 建窗助�
 
 import main  # noqa: E402
 import themes  # noqa: E402
+import ui_controls  # noqa: E402
 import weekly_report  # noqa: E402
 from main import CcBarTray, Design, blend, usage_color  # noqa: E402
 
@@ -115,16 +116,28 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
 
     def test_insights_initial_page_overrides_memory(self):
         """面板「流水」按钮直达流水页：initial_page 覆盖页签记忆"""
-        import l10n
         self.app.settings.set("insights_last_page", "分享")
-        CcBarTray.show_insights.__wrapped__(self.app, initial_page="流水")
-        title = l10n.L("洞察中心")
-        wins = [w for w in self.root.winfo_children()
-                if isinstance(w, tk.Toplevel) and w.title() == title]
-        self.assertEqual(len(wins), 1, "洞察中心没建出来")
-        nb = self._find_notebook(wins[0])
+        win, nb = self._build_insights(initial_page="流水")
         self.assertEqual(nb.tab(nb.select(), "text"), "流水")
-        wins[0].destroy()
+        win.destroy()
+
+    def test_windows_are_single_instance(self):
+        """同一窗口连点两次只保留一份（第二次提到最前，不重复建窗）"""
+        self._build_insights()
+        before = len([w for w in self.root.winfo_children()
+                      if isinstance(w, tk.Toplevel)])
+        CcBarTray.show_insights.__wrapped__(self.app)
+        after = len([w for w in self.root.winfo_children()
+                     if isinstance(w, tk.Toplevel)])
+        self.assertEqual(after, before, "洞察中心被重复创建")
+
+        self._build_window(CcBarTray.show_hourly_detail, "每小时用量详情")
+        before = len([w for w in self.root.winfo_children()
+                      if isinstance(w, tk.Toplevel)])
+        CcBarTray.show_hourly_detail.__wrapped__(self.app)
+        after = len([w for w in self.root.winfo_children()
+                     if isinstance(w, tk.Toplevel)])
+        self.assertEqual(after, before, "每小时详情被重复创建")
 
     def test_session_stats_matches_mac(self):
         """会话判定：相邻间隔 > 30 分钟切新会话，时长取会话内末次-首次"""
@@ -577,6 +590,23 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
         app._led_last_total = 1_000
         self.assertNotEqual(tick(2_000_000), red, "门槛为 0 时不该强制红")
 
+    def test_icon_is_made_visible_when_run_setup_runs(self):
+        """自定义 setup 取代了 pystray 的默认 setup，必须自己置 visible=True
+
+        否则 Shell_NotifyIcon 根本不会注册：进程在跑、托盘消息窗口也在，
+        但通知区域看不到图标。
+        """
+        class FakeIcon:
+            def __init__(self):
+                self.visible = False
+                self.menu = None
+                self.title = ""
+
+        self.app.icon = FakeIcon()
+        self.app._on_icon_ready(None)
+        self.assertTrue(self.app.icon.visible, "托盘图标没有被显式设为可见")
+        self.assertIsNotNone(self.app.icon.menu, "托盘菜单应该刷新成真实菜单")
+
     def test_format_credits_matches_mac(self):
         """积分格式化：整数不带小数点，小数两位，≥10 万走两位（mac fmtCredits）"""
         self.assertEqual(main.format_credits(12.0), "12")
@@ -877,8 +907,9 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
         self.assertEqual(len(wb_interval), 2, "Trae 与 WorkBuddy 各有一个间隔输入框")
         wb_interval[-1].delete(0, tk.END)
         wb_interval[-1].insert(0, "120")
-        wb_var = [w for w in self._walk(win) if isinstance(w, tk.Checkbutton)]
-        self.assertGreaterEqual(len(wb_var), 1)
+        switches = [w for w in self._walk(win)
+                    if isinstance(w, ui_controls.ToggleSwitch)]
+        self.assertGreaterEqual(len(switches), 1, "设置页缺少自绘开关")
 
         captured = {}
         original_apply = self.app.settings.apply

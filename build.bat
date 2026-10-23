@@ -7,7 +7,7 @@ REM 前置校验：源文件完整性（历史事故：源文件被清零为 0 �
 REM ============================================================
 echo [1/3] 校验源文件完整性...
 set ERR=0
-for %%f in (main.py ui_kit.py http_common.py trae_sync.py workbuddy_sync.py stats_store.py l10n.py weekly_report.py themes.py share_card.py qr.py autostart.py app_settings.py update_check.py) do (
+for %%f in (main.py ui_popover.py ui_details.py ui_insights.py ui_dispatch.py ui_tabs.py ui_controls.py ui_kit.py http_common.py trae_sync.py workbuddy_sync.py stats_store.py l10n.py weekly_report.py themes.py share_card.py qr.py autostart.py app_settings.py update_check.py) do (
     if not exist "%%f" (
         echo   [FAIL] 缺少源文件: %%f
         set ERR=1
@@ -27,7 +27,7 @@ REM ============================================================
 REM 冒烟测试：核心模块可导入（import 失败 = 启动即崩溃）
 REM ============================================================
 echo [2/3] import 冒烟测试...
-python -c "import main, ui_kit, http_common, trae_sync, workbuddy_sync, stats_store, l10n, themes, qr" 2>nul
+python -c "import main, ui_popover, ui_details, ui_insights, ui_dispatch, ui_tabs, ui_controls, ui_kit, http_common, trae_sync, workbuddy_sync, stats_store, l10n, themes, qr" 2>nul
 if errorlevel 1 (
     echo   [FAIL] 核心模块 import 失败，请检查报错后再打包。
     pause

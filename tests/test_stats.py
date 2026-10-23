@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import trae_sync  # noqa: E402
 import workbuddy_sync  # noqa: E402
+import stats_store  # noqa: E402
 from stats_store import (StatsStore, CCSwitchAdapter, ZCodeAdapter, DAILY_AGG_DDL,
                         USAGE_LOG_DDL, _local_epoch, validate_db)  # noqa: E402
 from trae_sync import TraeAuth, TraeResult, TraeRow  # noqa: E402
@@ -356,6 +357,34 @@ class TestStatsStore(unittest.TestCase):
         self.assertEqual(by_src["cc-switch"], 360)
         self.assertEqual(by_src["zcode"], 3000)
 
+    def test_ccswitch_detail_upsert_follows_source_update(self):
+        """源库明细事后修正：UPSERT 覆盖本地旧值，daily_agg 同步重算"""
+        self._make_fixture_source()
+        epoch = local_midnight(1) + 3600
+        self._insert_row("req-up", epoch, 100, 200)
+        self._rebuild()
+        self.store.sync_if_needed()
+
+        conn = sqlite3.connect(self.source_path)
+        conn.execute("UPDATE proxy_request_logs SET model='fixed-model', "
+                     "output_tokens=999, total_cost_usd=1.25 WHERE request_id='req-up'")
+        conn.commit()
+        conn.close()
+
+        # 退回水位，迫使补账窗口重新覆盖昨天
+        self.store.conn.execute(
+            "UPDATE meta SET value=? WHERE key='synced_day_ccswitch'",
+            ((datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d"),))
+        self.store.conn.commit()
+        self.store.sync_if_needed()
+
+        row = self.store.conn.execute(
+            "SELECT model, output_tokens, total_cost_usd FROM usage_log "
+            "WHERE request_id='req-up'").fetchone()
+        self.assertEqual(row, ("fixed-model", 999, 1.25))
+        self.assertEqual(self.store.query_window_stats(2, 1)["output"], 999,
+                         "daily_agg 必须跟着明细一起修正")
+
     def test_export_import_idempotent(self):
         """导出 → 全新库导入 → 重复导入零新增（幂等）"""
         self._make_fixture_source()
@@ -472,6 +501,21 @@ class TestStatsStore(unittest.TestCase):
         self.assertEqual(rows[-1][0], datetime.now().strftime("%Y-%m-%d"))
         self.assertEqual(rows[-1][1], 300)
         self.assertEqual([d for d, _ in rows], sorted(d for d, _ in rows), "日期必须升序")
+
+    def test_recent_days_window_does_not_include_extra_day(self):
+        """「近 N 天」含今天：7 天窗口必须只含今天到 6 天前，不能把 7 天前算进来"""
+        self._make_fixture_source()
+        self._insert_row("req-d7", local_midnight(7) + 3600, 1000, 2000)
+        self._insert_row("req-d6", local_midnight(6) + 3600, 100, 200)
+        self._rebuild()
+        self.store.sync_if_needed()
+
+        d6 = (datetime.now() - timedelta(days=6)).strftime("%Y-%m-%d")
+        d7 = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        dates = [d for d, _ in self.store.query_daily_tokens(7)]
+        self.assertIn(d6, dates)
+        self.assertNotIn(d7, dates, "7 天窗口不能多算第 8 天")
+        self.assertAlmostEqual(self.store.query_cost(7), 0.5, places=6)
 
     def test_channel_daily_includes_all_today_sources(self):
         """今日渠道分布必须每个启用源各一行（曾用 query_one 只留第一行）"""
@@ -628,7 +672,9 @@ class TestStatsStore(unittest.TestCase):
         self.store.conn.commit()
 
         self.assertEqual(self.store.query_credits_sum(30), 7.0)
-        self.assertEqual(self.store.query_credits_sum(1), 5.0)
+        # days=2 = 昨天 + 今天（今天尚无积分）
+        self.assertEqual(self.store.query_credits_sum(2), 5.0)
+        self.assertEqual(self.store.query_credits_sum(1), 0.0)
         self.assertEqual(self.store.query_credits_daily(30), [
             ((datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d"), 2.0),
             ((datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"), 5.0)])
@@ -669,8 +715,9 @@ class TestStatsStore(unittest.TestCase):
                             inp=100, out=200, cost=0.0)
         self.store.sync_if_needed()
 
-        # days=1 窗口是 [昨天 0 点, 明日 0 点)，含今日；days=0 只看今日
-        self.assertEqual(self.store.query_unmetered_tokens(1), 3300)
+        # days=N 是「近 N 天（含今天）」：days=2 = 昨天 + 今天，days=1/0 只看今日
+        self.assertEqual(self.store.query_unmetered_tokens(2), 3300)
+        self.assertEqual(self.store.query_unmetered_tokens(1), 300)
         self.assertEqual(self.store.query_unmetered_tokens(0), 300)
 
     def test_model_history_norm_and_merge(self):
@@ -788,10 +835,13 @@ class TestStatsStore(unittest.TestCase):
         self._insert_row("req-A", int(today_9.timestamp()), 100, 200)
         self.store.sync_if_needed()
 
-        hist = self.store.query_hour_histogram(1)
+        hist = self.store.query_hour_histogram(2)
         self.assertEqual(hist.get(14), 3000)
         self.assertEqual(hist.get(9), 300)
         self.assertEqual(sum(hist.values()), 3300)
+        # days=1 只看今天
+        only_today = self.store.query_hour_histogram(1)
+        self.assertEqual(sum(only_today.values()), 300)
 
     def test_query_timeline_past_and_today(self):
         """指定日流水走 usage_log；今天/None 走实时视图；最新在前"""
@@ -992,7 +1042,7 @@ class TestStatsStore(unittest.TestCase):
         self.assertEqual(self.store.query_credits_daily(7), [
             ((datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"), 1.5),
             (datetime.now().strftime("%Y-%m-%d"), 3.5)])
-        self.assertAlmostEqual(self.store.query_cost(1), 0.3, places=6)
+        self.assertAlmostEqual(self.store.query_cost(2), 0.3, places=6)
         self.assertEqual(self.store.query_source_breakdown(), [("trae", 1, 30)])
         self.assertEqual(self.store.source_display_name("trae"), "Trae")
 
@@ -1154,6 +1204,42 @@ class TestStatsStore(unittest.TestCase):
             self.store.sync_trae_if_needed(now=t2)
         self.assertEqual(fake.calls[2]["from_epoch"], StatsStore.local_midnight(
             trae_sync.FIRST_FETCH_DAYS, now=t2))
+
+    def test_trae_truncated_window_splits_and_backfills(self):
+        """分页截断：窗口二分重取，新旧会话都能入库，完整后正常推进水位"""
+        self._trae_store()
+        t0 = self._at(hour=10)
+        today_e = int(t0.timestamp()) - 60
+        old_e = int(self._at(hour=9, day_offset=-40).timestamp())
+        fake = _FakeTraeRunner([
+            TraeResult("ok", rows=[TraeRow("s-new", "m", 10, 20, 0, 0, 0.0, 0, today_e)],
+                       truncated=True),
+            TraeResult("ok", rows=[TraeRow("s-old", "m", 30, 40, 0, 0, 0.0, 0, old_e)]),
+            TraeResult("ok", rows=[TraeRow("s-new", "m", 10, 20, 0, 0, 0.0, 0, today_e)]),
+        ])
+        with mock.patch.object(trae_sync, "run", fake):
+            result = self.store.sync_trae_if_needed(now=t0)
+
+        self.assertGreaterEqual(len(fake.calls), 3, "截断后必须再次拉取子窗口")
+        self.assertFalse(result.truncated)
+        ids = {r[0] for r in self.store.conn.execute(
+            "SELECT request_id FROM usage_log WHERE source='trae'").fetchall()}
+        self.assertEqual(ids, {"trae|s-new", "trae|s-old"}, "新旧会话都要补齐且不重复")
+        self.assertEqual(self.store._meta_get("trae_synced_day"),
+                         t0.strftime("%Y-%m-%d"), "补齐后可推进水位")
+
+    def test_trae_still_truncated_keeps_watermark(self):
+        """二分到最小粒度仍截断：不能再推进水位，否则缺口永久丢失"""
+        self._trae_store()
+        t0 = self._at(hour=10)
+        with mock.patch.object(stats_store, "TRAE_SPLIT_MAX_DEPTH", 1):
+            with mock.patch.object(trae_sync, "run",
+                                   lambda *a, **k: TraeResult("ok", rows=[], truncated=True)):
+                self.store.sync_trae_if_needed(now=t0)
+
+        self.assertEqual(self.store._meta_get("trae_synced_day"), "",
+                         "截断时水位必须保持为空，下轮继续补")
+        self.assertEqual(self.store._meta_get("trae_synced_at"), "")
 
     def test_trae_ent_meta_and_summary(self):
         """积分账单：只在真正拉到（1 小时间隔）且 consumed/total 齐全时落 meta"""

@@ -134,7 +134,7 @@ class CCSwitchAdapter(SourceAdapter):
         from_epoch = _local_epoch(from_day)
         today_epoch = _local_epoch(today)
         detail = f"""
-        INSERT OR IGNORE INTO usage_log
+        INSERT INTO usage_log
             (source, request_id, app_type, model, input_tokens, output_tokens,
              cache_read_tokens, cache_creation_tokens, reasoning_tokens, total_cost_usd,
              created_at, request_count)
@@ -144,12 +144,22 @@ class CCSwitchAdapter(SourceAdapter):
             CAST(total_cost_usd AS REAL), created_at, 1
         FROM {alias}.proxy_request_logs
         WHERE created_at >= {from_epoch} AND created_at < {today_epoch}
+        ON CONFLICT(source, request_id) DO UPDATE SET
+            app_type=excluded.app_type,
+            model=excluded.model,
+            input_tokens=excluded.input_tokens,
+            output_tokens=excluded.output_tokens,
+            cache_read_tokens=excluded.cache_read_tokens,
+            cache_creation_tokens=excluded.cache_creation_tokens,
+            total_cost_usd=excluded.total_cost_usd,
+            created_at=excluded.created_at,
+            request_count=excluded.request_count
         """
         # 历史聚合（早于本地已有明细最早一天的）展开成"每天每模型一行"的伪明细，
         # created_at 取"该日期的本地正午"：先按 UTC 零点取 epoch，再补偿本地时区偏移 +12h，
         # 任意时区 date() 都落在原日期（旧写法 UTC 正午在 UTC±13/14 会错一天）
         rollups = f"""
-        INSERT OR IGNORE INTO usage_log
+        INSERT INTO usage_log
             (source, request_id, app_type, model, input_tokens, output_tokens,
              cache_read_tokens, cache_creation_tokens, reasoning_tokens, total_cost_usd,
              created_at, request_count)
@@ -164,6 +174,16 @@ class CCSwitchAdapter(SourceAdapter):
         FROM {alias}.usage_daily_rollups
         WHERE date < (SELECT date(MIN(created_at), 'unixepoch', 'localtime')
                       FROM usage_log WHERE source = 'cc-switch')
+        ON CONFLICT(source, request_id) DO UPDATE SET
+            app_type=excluded.app_type,
+            model=excluded.model,
+            input_tokens=excluded.input_tokens,
+            output_tokens=excluded.output_tokens,
+            cache_read_tokens=excluded.cache_read_tokens,
+            cache_creation_tokens=excluded.cache_creation_tokens,
+            total_cost_usd=excluded.total_cost_usd,
+            created_at=excluded.created_at,
+            request_count=excluded.request_count
         """
         return [detail, rollups]
 
@@ -233,6 +253,50 @@ def adapter_for(source_id):
         if a.id == source_id:
             return a
     return None
+
+
+# ---- Trae 分页截断后的窗口二分（模块级：不碰 StatsStore 状态，纯网络编排）----
+TRAE_SPLIT_MAX_DEPTH = 6          # 最多二分成 2^6 = 64 段
+TRAE_SPLIT_MIN_SECONDS = 24 * 3600  # 最小粒度一天；仍截断说明单日会话超上限
+
+
+def _fetch_trae_window(sessionid, auth, from_epoch, to_epoch, fetch_ent, now, cutoff,
+                       depth=0):
+    """拉取一个窗口；分页截断时把窗口二分递归重取。
+
+    服务端按 usage_time 倒序返回，单窗口最多 MAX_PAGES × PAGE_SIZE 条。首次 90 天
+    回填对活跃用户必然撞上限，只拿得到最新一段；此时二分窗口各自分页，直到不再
+    截断或到达一天的最小粒度，避免旧会话永久缺失。子窗口结果按 request_id 合并，
+    后取（较新窗口）覆盖先取。auth 就地复用，换签不会重复发生。
+    """
+    result = trae_sync.run(sessionid, auth=auth, from_epoch=from_epoch,
+                           to_epoch=to_epoch, fetch_ent=fetch_ent, now=now,
+                           cutoff=cutoff)
+    if result.status != "ok" or not result.truncated:
+        return result
+    if depth >= TRAE_SPLIT_MAX_DEPTH or to_epoch - from_epoch <= TRAE_SPLIT_MIN_SECONDS:
+        return result   # 仍截断：调用方据此不推进水位，下轮继续补
+
+    mid = from_epoch + (to_epoch - from_epoch) // 2
+    older = _fetch_trae_window(sessionid, auth, from_epoch, mid, False, now, cutoff,
+                               depth + 1)
+    if older.status != "ok":
+        return older
+    newer = _fetch_trae_window(sessionid, auth, mid, to_epoch, False, now, cutoff,
+                               depth + 1)
+    if newer.status != "ok":
+        return newer
+
+    rows = {}
+    for row in list(older.rows) + list(newer.rows):
+        rows[row.request_id] = row
+    return TraeResult(
+        "ok", rows=list(rows.values()),
+        consumed=(result.consumed if result.consumed is not None
+                  else (newer.consumed if newer.consumed is not None else older.consumed)),
+        total=(result.total if result.total is not None
+               else (newer.total if newer.total is not None else older.total)),
+        truncated=bool(older.truncated or newer.truncated))
 
 
 class StatsStore:
@@ -306,6 +370,10 @@ class StatsStore:
                 self.conn.execute(USAGE_LOG_DDL)
                 self.conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_usage_created ON usage_log(created_at)")
+                # 模型编年史 / 合并 / 按模型筛选都按 model 过滤或分组，
+                # 有索引可省掉全表临时排序
+                self.conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_usage_model ON usage_log(model)")
                 # v1.8 新增 credits 列（Trae 积分口径，其他源为 0）。老库 ALTER 迁移，列已存在则跳过。
                 cols = [r[1] for r in self.conn.execute(
                     "PRAGMA table_info(usage_log)").fetchall()]
@@ -314,13 +382,19 @@ class StatsStore:
                         "ALTER TABLE usage_log ADD COLUMN credits REAL NOT NULL DEFAULT 0")
                 self.conn.execute(
                     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+                # 已移除的 Trae 每日签到功能会留下 trae_checkin_* 键，启动时清掉
+                self.conn.execute("DELETE FROM meta WHERE key LIKE 'trae_checkin%'")
                 # 每日聚合缓存：区间/总量查询直接读它，不再扫明细。
                 # meta 标记控制升级后一次性全量回填。
                 self.conn.execute(DAILY_AGG_DDL)
                 flag = self.conn.execute(
                     "SELECT value FROM meta WHERE key='daily_agg_full'").fetchone()
                 if not flag:
-                    # daily_agg 只结算完整日（≤昨天）；今天由查询侧实时补
+                    # daily_agg 只结算完整日（≤昨天）；今天由查询侧实时补。
+                    # WHERE 用 epoch 上界而不是 date(...) < date('now')：
+                    # 逐行 localtime 转换没法走 idx_usage_created，全量回填会退化成全表扫。
+                    today_start = int(datetime.now().replace(
+                        hour=0, minute=0, second=0, microsecond=0).timestamp())
                     self.conn.execute("""
                         INSERT OR REPLACE INTO daily_agg
                             (date, source, reqs, input, output, cache_create, cache_read)
@@ -328,9 +402,9 @@ class StatsStore:
                                SUM(request_count), SUM(input_tokens), SUM(output_tokens),
                                SUM(cache_creation_tokens), SUM(cache_read_tokens)
                         FROM usage_log
-                        WHERE date(created_at, 'unixepoch', 'localtime') < date('now', 'localtime')
+                        WHERE created_at < ?
                         GROUP BY 1, 2
-                    """)
+                    """, (today_start,))
                     self.conn.execute(
                         "INSERT OR REPLACE INTO meta (key, value) VALUES ('daily_agg_full', '1')")
                 # WorkBuddy 独立明细表（不进 usage_log / daily_agg / usage_all）
@@ -500,6 +574,8 @@ class StatsStore:
         """
         self.conn.execute(
             "DELETE FROM daily_agg WHERE date >= ? AND date < ?", (from_day, today))
+        # 额外加 epoch 区间：让窗口过滤走 idx_usage_created，date() 只对窗口内行求值，
+        # 不再逐行转换整张明细表（历史越长差距越明显）
         self.conn.execute("""
             INSERT OR REPLACE INTO daily_agg
                 (date, source, reqs, input, output, cache_create, cache_read)
@@ -509,8 +585,9 @@ class StatsStore:
             FROM usage_log
             WHERE date(created_at, 'unixepoch', 'localtime') >= ?
               AND date(created_at, 'unixepoch', 'localtime') < ?
+              AND created_at >= ? AND created_at < ?
             GROUP BY 1, 2
-        """, (from_day, today))
+        """, (from_day, today, _local_epoch(from_day), _local_epoch(today)))
         self.conn.commit()
 
     def _commit_pending(self):
@@ -609,10 +686,8 @@ class StatsStore:
 
         # ---- 网络（锁外）----
         try:
-            result = trae_sync.run(self.trae_sessionid, auth=auth,
-                                   from_epoch=from_epoch, to_epoch=to_epoch,
-                                   fetch_ent=fetch_ent, now=now_epoch,
-                                   cutoff=cutoff)
+            result = _fetch_trae_window(self.trae_sessionid, auth, from_epoch,
+                                        to_epoch, fetch_ent, now_epoch, cutoff)
         except Exception as e:   # 注入的 transport 等异常也不许把界面打挂
             result = TraeResult("failed", message=str(e))
 
@@ -632,11 +707,16 @@ class StatsStore:
                 today = now_dt.strftime("%Y-%m-%d")
                 self._rebuild_daily_agg_window(
                     datetime.fromtimestamp(from_epoch).strftime("%Y-%m-%d"), today)
-                self._meta_set("trae_synced_day", today)
-                # 仅"完整成功"（分页没截断）才推进剪枝基准；截断那轮不推进，
-                # 下次 cutoff 保持旧值 → 翻页更保守，绝不误剪新会话
+                # 仅"完整成功"（分页没截断）才推进水位与剪枝基准：
+                # 截断意味着窗口内还有更旧的会话没拉到，推进水位会让回看窗口变窄，
+                # 缺口永远补不回来。二分重取后仍截断（单日会话超上限）时保留旧水位，
+                # 下轮同步继续从原起点补。
                 if not result.truncated:
+                    self._meta_set("trae_synced_day", today)
                     self._meta_set("trae_synced_at", int(now_epoch))
+                else:
+                    print("[ccBar] Trae 本窗口仍不完整，水位保持 %s" %
+                          (water or "空"))
                 if result.consumed is not None and result.total is not None:
                     self._meta_set("trae_ent", "%s|%s" % (result.consumed, result.total))
                     self._meta_set("trae_ent_at", int(now_epoch))
@@ -770,9 +850,12 @@ class StatsStore:
                 self._meta_set("workbuddy_cookie_live", result.new_cookie)
             if result.status == "ok":
                 self.upsert_workbuddy_rows(result.rows, commit=False)
-                self._meta_set("workbuddy_synced_day", now_dt.strftime("%Y-%m-%d"))
+                # 同 Trae：截断说明窗口内还有没拉完的日期，推进水位会永久跳过多出的部分
                 if not result.truncated:
+                    self._meta_set("workbuddy_synced_day", now_dt.strftime("%Y-%m-%d"))
                     self._meta_set("workbuddy_synced_at", int(now_epoch))
+                else:
+                    print("[ccBar] WorkBuddy 本窗口不完整，水位保持 %s" % (water or "空"))
                 self.source_status["workbuddy"] = "已连接"
             elif result.status == "auth_expired":
                 self.source_status["workbuddy"] = "登录已过期，请重新粘贴 Cookie"
@@ -941,6 +1024,23 @@ class StatsStore:
         day = day - timedelta(days=days_ago)
         return int(day.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
 
+    @staticmethod
+    def window_days(days):
+        """「近 N 天（含今天）」的起点天数：N≤1 都是今天，N=7 → 6 天前。
+
+        之前窗口起点直接用 days，导致所有「近 7 天 / 近 30 天」实际是 8 / 31 天。
+        """
+        return max(int(days) - 1, 0)
+
+    def window_start(self, days):
+        """「近 N 天（含今天）」的起点 epoch（本地零点）"""
+        return self.local_midnight(self.window_days(days))
+
+    def window_start_date(self, days):
+        """「近 N 天（含今天）」的起点日期字符串"""
+        return (datetime.now() - timedelta(days=self.window_days(days))).strftime(
+            "%Y-%m-%d")
+
     # ------------------------------------------------------------ 洞察中心查询
     # 与 macOS 版同款口径：费用类走 usage_all（epoch 区间走索引），
     # 历史 token 类优先 daily_agg，今日实时统一补查。
@@ -950,26 +1050,26 @@ class StatsStore:
         row = self.query_one("""
             SELECT COALESCE(SUM(total_cost_usd), 0) FROM usage_all
             WHERE created_at >= ? AND created_at < ?""",
-            (self.local_midnight(days), self.local_midnight(-1)))
+            (self.window_start(days), self.local_midnight(-1)))
         return row[0] if row else 0.0
 
     def query_cost_daily(self, days):
-        """近 N 天每日费用 [(date, cost)]，日期升序（可能含空洞）"""
+        """近 N 天（含今天）每日费用 [(date, cost)]，日期升序（可能含空洞）"""
         rows = self.query_all("""
             SELECT date(created_at, 'unixepoch', 'localtime'), COALESCE(SUM(total_cost_usd), 0)
             FROM usage_all WHERE created_at >= ? AND created_at < ?
             GROUP BY 1 ORDER BY 1""",
-            (self.local_midnight(days), self.local_midnight(-1)))
+            (self.window_start(days), self.local_midnight(-1)))
         return [(r[0], r[1]) for r in rows] if rows else []
 
     def query_cost_by_model(self, days, limit=8):
-        """近 N 天按模型费用排行 [(model, cost, token)]"""
+        """近 N 天（含今天）按模型费用排行 [(model, cost, token)]"""
         rows = self.query_all("""
             SELECT model, COALESCE(SUM(total_cost_usd), 0),
                    COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens), 0)
             FROM usage_all WHERE created_at >= ? AND created_at < ?
             GROUP BY model ORDER BY 2 DESC LIMIT ?""",
-            (self.local_midnight(days), self.local_midnight(-1), limit))
+            (self.window_start(days), self.local_midnight(-1), limit))
         return [(r[0], r[1], r[2]) for r in rows] if rows else []
 
     def query_streak(self):
@@ -1009,13 +1109,14 @@ class StatsStore:
         return (this_week + (today[0] if today else 0), row[1] if row else 0)
 
     def query_peak_day(self, days):
-        """近 N 天单日峰值（今日实时也参与竞争）→ (date, token) | None"""
+        """近 N 天（含今天）单日峰值（今日实时也参与竞争）→ (date, token) | None"""
         def ds(n):
             return (datetime.now() - timedelta(days=n)).strftime("%Y-%m-%d")
 
         rows = self.query_all("""
             SELECT date, COALESCE(SUM(input+output+cache_create+cache_read), 0) AS t
-            FROM daily_agg WHERE date >= ? GROUP BY date ORDER BY t DESC LIMIT 1""", (ds(days),))
+            FROM daily_agg WHERE date >= ? GROUP BY date ORDER BY t DESC LIMIT 1""",
+            (ds(self.window_days(days)),))
         peak = (rows[0][0], rows[0][1]) if rows else None
         today = self.query_one("""SELECT COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+cache_creation_tokens), 0)
             FROM usage_all WHERE created_at >= ?""", (self.local_midnight(0),))
@@ -1024,20 +1125,20 @@ class StatsStore:
         return peak
 
     def query_top_model(self, days):
-        """近 N 天使用量最大的模型 → (model, token) | None"""
+        """近 N 天（含今天）使用量最大的模型 → (model, token) | None"""
         rows = self.query_all("""
             SELECT model, COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+cache_creation_tokens), 0) AS t
             FROM usage_all WHERE created_at >= ? AND created_at < ?
             GROUP BY model ORDER BY t DESC LIMIT 1""",
-            (self.local_midnight(days), self.local_midnight(-1)))
+            (self.window_start(days), self.local_midnight(-1)))
         return (rows[0][0], rows[0][1]) if rows else None
 
     def query_channel_daily(self, days):
-        """近 N 天渠道每日 token（daily_agg 自带 source 维度），今日实时按源补一行"""
+        """近 N 天（含今天）渠道每日 token（daily_agg 自带 source 维度），今日实时按源补一行"""
         rows = self.query_all("""
             SELECT date, source, COALESCE(SUM(input+output+cache_create+cache_read), 0)
             FROM daily_agg WHERE date >= ? GROUP BY date, source ORDER BY date""",
-            ((datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d"),))
+            (self.window_start_date(days),))
         result = [(r[0], r[1], r[2]) for r in rows] if rows else []
         # 今日实时按源逐个补行：这里必须用 query_all（GROUP BY source 会有多行），
         # 用 query_one 只会留下第一行渠道。
@@ -1052,11 +1153,11 @@ class StatsStore:
         return result
 
     def query_daily_tokens(self, days):
-        """近 N 天每日总 token（跨渠道，含今天实时），日期升序 [(date, token)]"""
+        """近 N 天（含今天）每日总 token（跨渠道，含今天实时），日期升序 [(date, token)]"""
         rows = self.query_all("""
             SELECT date, COALESCE(SUM(input+output+cache_create+cache_read), 0)
             FROM daily_agg WHERE date >= ? GROUP BY date ORDER BY date""",
-            ((datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d"),))
+            (self.window_start_date(days),))
         result = [(r[0], r[1]) for r in rows] if rows else []
         today = self.query_one("""SELECT COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+cache_creation_tokens), 0)
             FROM usage_all WHERE created_at >= ?""", (self.local_midnight(0),))
@@ -1065,14 +1166,14 @@ class StatsStore:
         return result
 
     def query_app_daily(self, days):
-        """近 N 天应用（app_type）每日 token，今日实时细分补一行"""
+        """近 N 天（含今天）应用（app_type）每日 token，今日实时细分补一行"""
         rows = self.query_all("""
             SELECT date(created_at, 'unixepoch', 'localtime'),
                    COALESCE(NULLIF(app_type, ''), 'unknown'),
                    COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+cache_creation_tokens), 0)
             FROM usage_log WHERE created_at >= ? AND created_at < ?
             GROUP BY 1, 2""",
-            (self.local_midnight(days), self.local_midnight(-1)))
+            (self.window_start(days), self.local_midnight(-1)))
         result = [(r[0], r[1], r[2]) for r in rows] if rows else []
         today = self.query_all("""
             SELECT COALESCE(NULLIF(app_type, ''), 'unknown') AS app,
@@ -1086,12 +1187,12 @@ class StatsStore:
         return result
 
     def query_composition_daily(self, days):
-        """近 N 天每日 token 构成（输入/输出/缓存读/缓存创建），含今日，日期升序"""
+        """近 N 天（含今天）每日 token 构成（输入/输出/缓存读/缓存创建），含今日，日期升序"""
         rows = self.query_all("""
             SELECT date, COALESCE(SUM(input),0), COALESCE(SUM(output),0),
                    COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_create),0)
             FROM daily_agg WHERE date >= ? GROUP BY date ORDER BY date""",
-            ((datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d"),))
+            (self.window_start_date(days),))
         result = [(r[0], r[1], r[2], r[3], r[4]) for r in rows] if rows else []
         today = self.query_one("""
             SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
@@ -1150,7 +1251,7 @@ class StatsStore:
             SELECT COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens), 0)
             FROM usage_all
             WHERE created_at >= ? AND created_at < ? AND COALESCE(total_cost_usd, 0) = 0""",
-            (self.local_midnight(days), self.local_midnight(-1)))
+            (self.window_start(days), self.local_midnight(-1)))
         return int(row[0]) if row else 0
 
     def query_today_credits(self):
@@ -1164,16 +1265,16 @@ class StatsStore:
         """近 N 天（含今天）积分消耗，0 天即今日"""
         row = self.query_one(
             "SELECT COALESCE(SUM(credits), 0) FROM usage_all WHERE created_at >= ?",
-            (self.local_midnight(days),))
+            (self.window_start(days),))
         return float(row[0]) if row else 0.0
 
     def query_credits_daily(self, days):
-        """近 N 天每日积分曲线 [(date, credits)]，日期升序（可能含空洞）"""
+        """近 N 天（含今天）每日积分曲线 [(date, credits)]，日期升序（可能含空洞）"""
         rows = self.query_all("""
             SELECT date(created_at, 'unixepoch', 'localtime'), COALESCE(SUM(credits), 0)
             FROM usage_all WHERE created_at >= ? AND created_at < ?
             GROUP BY 1 ORDER BY 1""",
-            (self.local_midnight(days), self.local_midnight(-1)))
+            (self.window_start(days), self.local_midnight(-1)))
         return [(r[0], float(r[1])) for r in rows] if rows else []
 
     def query_model_history(self):
@@ -1367,7 +1468,7 @@ class StatsStore:
         return stats
 
     def query_hour_histogram(self, days):
-        """近 N 天时段分布 {小时: token}（本地时区偏移烘进参数，避免逐行 localtime）"""
+        """近 N 天（含今天）时段分布 {小时: token}（本地时区偏移烘进参数，避免逐行 localtime）"""
         offset = int(datetime.now().astimezone().utcoffset().total_seconds())
         rows = self.query_all("""
             SELECT ((created_at + ?) % 86400) / 3600,
@@ -1375,7 +1476,7 @@ class StatsStore:
             FROM usage_all
             WHERE created_at >= ? AND created_at < ?
             GROUP BY 1""",
-            (offset, self.local_midnight(days), self.local_midnight(-1)))
+            (offset, self.window_start(days), self.local_midnight(-1)))
         return {int(r[0]): r[1] for r in rows} if rows else {}
 
     def query_timeline(self, day=None, limit=800):
@@ -1440,74 +1541,115 @@ class StatsStore:
                              "reasoning_tokens", "total_cost_usd", "created_at", "request_count"]
 
     def export_csv(self, path):
-        """导出 usage_log 全量明细为 CSV（带 BOM，Excel 可开）。成功返回行数，库未开返回 -1"""
-        import csv as _csv
+        """导出 usage_log 全量明细为 CSV（带 BOM，Excel 可开）。成功返回行数，库未开返回 -1
+
+        走独立只读连接并流式写盘：大表不会一次性读进内存，也不占主连接锁，
+        导出期间界面查询照常可用。
+        """
+        if self.conn is None:
+            return -1
         with self._lock:
-            if self.conn is None:
-                return -1
-            rows = self.conn.execute("""
+            self._commit_pending()
+        import csv as _csv
+        try:
+            conn = sqlite3.connect(self.store_path(), uri=True, timeout=5)
+        except sqlite3.Error as e:
+            print(f"导出失败: {e}")
+            return -1
+        try:
+            conn.execute("PRAGMA busy_timeout=5000")
+            cursor = conn.execute("""
                 SELECT source, request_id, app_type, model, input_tokens, output_tokens,
                        cache_read_tokens, cache_creation_tokens, reasoning_tokens,
                        total_cost_usd, credits, created_at, request_count
-                FROM usage_log ORDER BY created_at""").fetchall()
-        with open(path, "w", newline="", encoding="utf-8-sig") as f:
-            w = _csv.writer(f)
-            w.writerow(self.EXPORT_COLUMNS)
-            w.writerows(rows)
-        return len(rows)
+                FROM usage_log ORDER BY created_at""")
+            count = 0
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                w = _csv.writer(f)
+                w.writerow(self.EXPORT_COLUMNS)
+                for row in cursor:
+                    w.writerow(row)
+                    count += 1
+            return count
+        except (sqlite3.Error, OSError) as e:
+            print(f"导出失败: {e}")
+            return -1
+        finally:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
 
     def import_csv(self, path):
         """幂等导入明细 CSV：主键 (source, request_id) 去重，重复/非法行跳过，
         导入后按受影响窗口重建 daily_agg。
 
         兼容 v1.8 的 13 列（含 credits）与旧版 12 列布局（credits 记 0）。
+        文件解析在锁外完成，写库才进临界区——导入几十万行时界面查询不被文件 IO 拖住。
         - Returns: (读取行数, 新增行数, 跳过行数)；表头不符返回 (0, 0, -1)"""
+        if self.conn is None:
+            return (0, 0, 0)
         import csv as _csv
+        parsed = []
+        read = skipped = 0
+        min_day = max_day = None
+        try:
+            with open(path, newline="", encoding="utf-8-sig") as f:
+                reader = _csv.reader(f)
+                header = next(reader, None)
+                if header not in (self.EXPORT_COLUMNS, self.LEGACY_EXPORT_COLUMNS):
+                    return (0, 0, -1)
+                for row in reader:
+                    n = len(row)
+                    if n not in (12, 13):
+                        skipped += 1
+                        continue
+                    try:
+                        src = row[0].strip()
+                        rid = row[1].strip()
+                        app, model = row[2].strip(), row[3].strip()
+                        inp, out, cr, cc, rs = (int(row[4]), int(row[5]), int(row[6]),
+                                                int(row[7]), int(row[8]))
+                        cost = float(row[9])
+                        credits = float(row[10]) if n == 13 else 0.0
+                        epoch, rc = int(row[n - 2]), int(row[n - 1])
+                        if not src or not rid:
+                            raise ValueError
+                    except ValueError:
+                        skipped += 1
+                        continue
+                    read += 1
+                    parsed.append((src, rid, app, model, inp, out, cr, cc, rs,
+                                   cost, credits, epoch, rc))
+                    day = datetime.fromtimestamp(epoch).strftime("%Y-%m-%d")
+                    min_day = day if min_day is None else min(min_day, day)
+                    max_day = day if max_day is None else max(max_day, day)
+        except (OSError, UnicodeDecodeError, OverflowError) as e:
+            print(f"导入失败: {e}")
+            return (0, 0, 0)
+
+        inserted = 0
         with self._lock:
             if self.conn is None:
                 return (0, 0, 0)
             try:
-                with open(path, newline="", encoding="utf-8-sig") as f:
-                    reader = _csv.reader(f)
-                    header = next(reader, None)
-                    if header not in (self.EXPORT_COLUMNS, self.LEGACY_EXPORT_COLUMNS):
-                        return (0, 0, -1)
-                    read = inserted = skipped = 0
-                    min_day = max_day = None
-                    base = self.conn.total_changes
-                    for row in reader:
-                        n = len(row)
-                        if n not in (12, 13):
-                            skipped += 1
-                            continue
-                        try:
-                            src, rid, app, model = row[0].strip(), row[1].strip(), row[2].strip(), row[3].strip()
-                            inp, out, cr, cc, rs = int(row[4]), int(row[5]), int(row[6]), int(row[7]), int(row[8])
-                            cost = float(row[9])
-                            credits = float(row[10]) if n == 13 else 0.0
-                            epoch, rc = int(row[n - 2]), int(row[n - 1])
-                            if not src or not rid:
-                                raise ValueError
-                        except ValueError:
-                            skipped += 1
-                            continue
-                        read += 1
-                        self.conn.execute("""
-                            INSERT OR IGNORE INTO usage_log
-                                (source, request_id, app_type, model, input_tokens, output_tokens,
-                                 cache_read_tokens, cache_creation_tokens, reasoning_tokens, total_cost_usd,
-                                 credits, created_at, request_count)
-                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                            (src, rid, app, model, inp, out, cr, cc, rs, cost, credits, epoch, rc))
-                        day = datetime.fromtimestamp(epoch).strftime("%Y-%m-%d")
-                        min_day = day if min_day is None else min(min_day, day)
-                        max_day = day if max_day is None else max(max_day, day)
-                    inserted = self.conn.total_changes - base
-                    skipped += read - inserted
-                    self.conn.commit()
+                base = self.conn.total_changes
+                self.conn.executemany("""
+                    INSERT OR IGNORE INTO usage_log
+                        (source, request_id, app_type, model, input_tokens, output_tokens,
+                         cache_read_tokens, cache_creation_tokens, reasoning_tokens, total_cost_usd,
+                         credits, created_at, request_count)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""", parsed)
+                inserted = self.conn.total_changes - base
+                skipped += read - inserted
+                self.conn.commit()
             except sqlite3.Error as e:
                 print(f"导入失败: {e}")
-                return (0, 0, 0)
+                try:
+                    self.conn.rollback()
+                except sqlite3.Error:
+                    pass
+                return (read, 0, skipped)
 
         if min_day is not None:
             # 窗口 [from_day, today)：from 回看一天防迟到行，to 多包一天覆盖导入尾日
@@ -1517,23 +1659,42 @@ class StatsStore:
                 self._rebuild_daily_agg_window(margin, end)
         return (read, inserted, skipped)
 
+    def _vacuum_into(self, path):
+        """用独立的只读连接把已提交快照 VACUUM INTO 出去。
+
+        不走主连接：WAL 下读快照与写入互不阻塞，备份期间界面查询不再被主锁挡住。
+        目标必须不存在（SQLite 语义）；失败返回 False。
+        """
+        try:
+            conn = sqlite3.connect(self.store_path(), uri=True, timeout=5)
+        except sqlite3.Error as e:
+            print(f"备份失败: {e}")
+            return False
+        try:
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("VACUUM INTO ?", (path,))
+            return True
+        except sqlite3.Error as e:
+            print(f"备份失败: {e}")
+            return False
+        finally:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
     def backup(self, path):
         """VACUUM INTO 一键备份统计库（用量历史是长期资产）。
 
         与 macOS 版语义一致：目标必须是未存在的空路径，成功返回 True。
-        备份前防御性提交残留写事务：用户按"备份"不该因维护工作留下的
-        未提交事务而失败（VACUUM 不允许在事务内执行）。
+        备份前防御性提交残留写事务（用户按"备份"不该因维护工作留下的
+        未提交事务而失败）；真正的 VACUUM 走独立连接，不长时间持锁。
         """
+        if self.conn is None:
+            return False
         with self._lock:
-            if self.conn is None:
-                return False
-            try:
-                self._commit_pending()
-                self.conn.execute("VACUUM INTO ?", (path,))
-                return True
-            except sqlite3.Error as e:
-                print(f"备份失败: {e}")
-                return False
+            self._commit_pending()
+        return self._vacuum_into(path)
 
     def auto_backup(self, directory, keep=7, today=None):
         """每日自动备份到 directory（VACUUM INTO，滚动保留最近 keep 份）。
@@ -1549,9 +1710,8 @@ class StatsStore:
         else:
             stamp = str(today)
 
-        with self._lock:
-            if self.conn is None:
-                return None
+        if self.conn is None:
+            return None
         try:
             os.makedirs(directory, exist_ok=True)
         except OSError as e:
@@ -1563,14 +1723,9 @@ class StatsStore:
             return None   # 当天已备份，幂等跳过
 
         with self._lock:
-            if self.conn is None:
-                return None
-            try:
-                self._commit_pending()   # 残留写事务会让 VACUUM INTO 失败
-                self.conn.execute("VACUUM INTO ?", (target,))
-            except sqlite3.Error as e:
-                print(f"自动备份失败: {e}")
-                return None
+            self._commit_pending()   # 残留写事务必须收口，快照才完整
+        if not self._vacuum_into(target):
+            return None
 
         self._prune_auto_backups(directory, keep)
         return target

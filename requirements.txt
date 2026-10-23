@@ -1,4 +1,6 @@
-pystray>=0.19.0
-Pillow>=9.0.0
-win10toast>=0.9
-pyperclip>=1.8.0
+# 运行时依赖（锁大版本，保证打包可复现）
+# Pillow 12 需要 Python >= 3.10，项目承诺 3.9+，因此封顶 11.x
+pystray>=0.19.0,<0.20
+Pillow>=9.0.0,<12
+win10toast==0.9
+pyperclip>=1.8.0,<2

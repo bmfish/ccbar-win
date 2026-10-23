@@ -20,6 +20,10 @@ BG_INTERVAL_MAX = 7200         # 后台间隔可配上限（秒）
 NIGHT_SILENT_UNTIL_HOUR = 9    # 0–9 点后台静默
 
 DEFAULT_TIMEOUT = 20           # 单次请求超时（秒）
+RETRY_ATTEMPTS = 2             # 网络错误 / 429 / 5xx 的重试次数
+RETRY_BASE_DELAY = 0.6         # 首次重试等待（秒），之后翻倍
+MAX_RETRY_DELAY = 5.0          # 单次重试等待上限（Retry-After 也夹到这里）
+RETRY_STATUSES = (429, 500, 502, 503, 504)
 
 
 # ============================================================
@@ -247,12 +251,26 @@ def extract_set_cookie(headers):
 # 传输（stdlib，同步；可注入假实现用于单测）
 # ============================================================
 
-def http_post(url, headers=None, body=None, timeout=DEFAULT_TIMEOUT):
-    """POST → (status, headers_dict, text)。
+def _header_value(headers, name):
+    """响应头大小写不敏感取值（urllib 返回的键大小写不固定）"""
+    for key, value in (headers or {}).items():
+        if str(key).lower() == name.lower():
+            return value
+    return None
 
-    网络 / 超时异常回落 (0, None, None)；HTTP 非 2xx 也把状态码与响应体带回来
-    （网关 401 返回 HTML 时，调用方靠状态码判定凭据过期，不能当断网）。
-    """
+
+def _retry_delay(attempt, headers):
+    """重试等待：优先服务端 Retry-After（秒），否则指数退避，统一夹在 5 秒内"""
+    try:
+        retry_after = float(_header_value(headers, "Retry-After"))
+    except (TypeError, ValueError):
+        retry_after = None
+    if retry_after is not None:
+        return min(max(retry_after, 0.0), MAX_RETRY_DELAY)
+    return min(RETRY_BASE_DELAY * (2 ** attempt), MAX_RETRY_DELAY)
+
+
+def _http_post_once(url, headers, body, timeout):
     req = urllib.request.Request(url, data=(body or "").encode("utf-8"), method="POST")
     for key, value in (headers or {}).items():
         req.add_header(key, value)
@@ -270,3 +288,24 @@ def http_post(url, headers=None, body=None, timeout=DEFAULT_TIMEOUT):
         return (e.code, headers_out, raw.decode("utf-8", "replace"))
     except Exception:
         return (0, None, None)
+
+
+def http_post(url, headers=None, body=None, timeout=DEFAULT_TIMEOUT,
+              retries=RETRY_ATTEMPTS):
+    """POST → (status, headers_dict, text)。
+
+    网络 / 超时异常回落 (0, None, None)；HTTP 非 2xx 也把状态码与响应体带回来
+    （网关 401 返回 HTML 时，调用方靠状态码判定凭据过期，不能当断网）。
+    网络错误、429 与 5xx 自动重试（指数退避，尊重 Retry-After），避免一次抖动
+    就浪费掉一整轮同步节流窗口。
+    """
+    result = (0, None, None)
+    for attempt in range(retries + 1):
+        result = _http_post_once(url, headers, body, timeout)
+        status, resp_headers, _text = result
+        if status != 0 and status not in RETRY_STATUSES:
+            return result
+        if attempt >= retries:
+            return result
+        time.sleep(_retry_delay(attempt, resp_headers))
+    return result

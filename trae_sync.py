@@ -19,9 +19,9 @@ import base64
 import json
 import sys
 import time
-import urllib.error
-import urllib.request
 from datetime import datetime
+
+import http_common
 
 # Windows 控制台默认 cp1252，中文 print 会抛 UnicodeEncodeError，统一 UTF-8
 try:
@@ -324,30 +324,15 @@ class TraeResult:
 def http_post(url, cookie=None, auth=None, body=None, timeout=15):
     """默认同步 POST 实现：返回 (status, headers, text)。
 
-    网络/超时等异常回落 (0, None, None)；HTTP 非 2xx 也把状态码与响应体带回来
-    （Login 靠状态码判定，不能把 4xx 当断网）。
+    传输复用 http_common：网络抖动 / 429 / 5xx 会自动退避重试。
+    非 2xx 也把状态码与响应体带回来（Login 靠状态码判定，不能把 4xx 当断网）。
     """
-    req = urllib.request.Request(url, data=(body or "").encode("utf-8"), method="POST")
-    req.add_header("Content-Type", "application/json")
+    headers = {"Content-Type": "application/json"}
     if cookie:
-        req.add_header("Cookie", cookie)
+        headers["Cookie"] = cookie
     if auth:
-        req.add_header("Authorization", auth)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read()
-            status = getattr(resp, "status", None) or resp.getcode()
-            headers = dict(resp.headers.items())
-            return (status, headers, raw.decode("utf-8", "replace"))
-    except urllib.error.HTTPError as e:
-        try:
-            raw = e.read()
-        except Exception:
-            raw = b""
-        headers = dict(e.headers.items()) if e.headers else None
-        return (e.code, headers, raw.decode("utf-8", "replace"))
-    except Exception:
-        return (0, None, None)
+        headers["Authorization"] = auth
+    return http_common.http_post(url, headers=headers, body=body, timeout=timeout)
 
 
 # ---- 换签链 ----

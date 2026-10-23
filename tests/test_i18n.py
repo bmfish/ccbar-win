@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import l10n  # noqa: E402
 import ui_fixture  # noqa: E402  （公共夹具：装好 win_stubs 并真建 tk 窗口）
+import ui_tabs  # noqa: E402
 import weekly_report  # noqa: E402
 from ui_fixture import main  # noqa: E402
 
@@ -40,7 +41,11 @@ CJK = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]")
 
 
 class TestMainStringsAreWrapped(unittest.TestCase):
-    """main.py 里的中文字面量必须全部包在 L() 里（静态扫描，不需要显示环境）"""
+    """所有 UI 模块里的中文字面量必须全部包在 L() 里（静态扫描，不需要显示环境）"""
+
+    # UI 已拆分：扫描面覆盖 main 与各窗口/控件模块，避免移动代码后漏检
+    FILES = ("main.py", "ui_popover.py", "ui_details.py", "ui_insights.py",
+             "ui_tabs.py", "ui_controls.py")
 
     # 允许清单（≤ 12 条，每条都要写清"为什么不翻译"）。当前为空：
     # 语言下拉的 "中文" 一项来自 l10n.language_display_name（main.py 里没有字面量），
@@ -49,13 +54,23 @@ class TestMainStringsAreWrapped(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        with open(os.path.join(ROOT, "main.py"), encoding="utf-8") as f:
-            cls.source = f.read()
-        cls.tree = ast.parse(cls.source)
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        cls.sources = {}
+        for name in cls.FILES:
+            with open(os.path.join(root, name), encoding="utf-8") as f:
+                cls.sources[name] = f.read()
+        cls.trees = {name: ast.parse(src) for name, src in cls.sources.items()}
 
     def _unwrapped_cjk_literals(self):
-        """{中文原文: [行号, ...]}：docstring 之外、且没有被 L(...) 包住的字面量"""
-        tree = self.tree
+        """{中文原文: ["文件名:行号", ...]}：docstring 之外、且没有被 L(...) 包住的字面量"""
+        found = {}
+        for name, tree in self.trees.items():
+            for text, lines in self._file_unwrapped(tree).items():
+                found.setdefault(text, []).extend("%s:%d" % (name, n) for n in lines)
+        return found
+
+    @staticmethod
+    def _file_unwrapped(tree):
         docstrings = set()
         for node in ast.walk(tree):
             if isinstance(node, (ast.Module, ast.FunctionDef,
@@ -90,7 +105,7 @@ class TestMainStringsAreWrapped(unittest.TestCase):
         unwrapped = self._unwrapped_cjk_literals()
         self.assertEqual(
             sorted(unwrapped), sorted(self.ALLOWED_UNWRAPPED),
-            "main.py 里有没包 L() 的中文界面串：%s"
+            "UI 模块里有没包 L() 的中文界面串：%s"
             % {k: v for k, v in sorted(unwrapped.items())})
 
     def test_allow_list_is_small_and_documented(self):
@@ -165,6 +180,8 @@ class TestEnglishUi(ui_fixture.TrayFixture):
                 if widget.type(item) == "text":
                     out.append(widget.itemcget(item, "text"))
         if isinstance(widget, ttk.Notebook):
+            out.extend(widget.tab(t, "text") for t in widget.tabs())
+        elif isinstance(widget, ui_tabs.PillTabs):
             out.extend(widget.tab(t, "text") for t in widget.tabs())
         if isinstance(widget, ttk.Treeview):
             out.extend(widget.heading(c, "text") for c in widget["columns"])

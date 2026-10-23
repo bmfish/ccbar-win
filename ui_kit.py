@@ -298,6 +298,13 @@ class ChartCanvas:
         n = len(values)
         available_h = height - label_height - padding * 2
 
+        # 横向参考线（25/50/75/100%），先画在底层，柱子压在上面
+        grid = blend("#FFFFFF", Design.BACKGROUND, 0.06)
+        for frac in (0.25, 0.5, 0.75, 1.0):
+            gy = padding + available_h * (1 - frac)
+            canvas.create_line(padding, gy, width - padding, gy,
+                               fill=grid, dash=(2, 4))
+
         # 计算柱宽（留出间隙）
         slot = (width - padding * 2) / n
         bar_w = max(4, slot - 4)
@@ -328,14 +335,19 @@ class ChartCanvas:
 
     @staticmethod
     def draw_sparkline(canvas, values, width, height, use_gradient=True,
-                       hue_offset=0.0, padding=6, highlight_index=None):
+                       hue_offset=0.0, padding=6, highlight_index=None,
+                       background=None):
         """绘制渐变折线图（带渐变填充）
 
         highlight_index 指定的数据点加一圈警示色标记（峰值点，mac LineTrendChart 同款）。
+        background 是面积填充的混合底色：卡片里画线要传卡片填充色，
+        否则深色背景色会在卡片上糊出一块方角。
         """
         canvas.delete("all")
         if len(values) < 2:
             return
+
+        bg = background or Design.BACKGROUND
 
         max_val = max(values)
         min_val = min(values)
@@ -356,7 +368,7 @@ class ChartCanvas:
             alpha = 0.22
             c = (gradient_color(Design.GRADIENT, i / max(n - 1, 1), hue_offset)
                  if use_gradient else Design.BRAND)
-            fill_color = blend(c, Design.BACKGROUND, alpha * 0.5)
+            fill_color = blend(c, bg, alpha * 0.5)
             canvas.create_polygon(
                 points[i][0], points[i][1],
                 points[i + 1][0], points[i + 1][1],
