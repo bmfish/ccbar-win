@@ -38,8 +38,9 @@ except Exception:  # pragma: no cover - 没有 tkinter 的构建
 class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
     """洞察中心必须完整建出全部页签"""
 
-    # 页序与 macOS 版一致；Windows 独有 WorkBuddy 排在倒数第二，最底部是设置入口
-    EXPECTED_TABS = ["费用", "洞察", "分享", "渠道", "流水", "积分", "WorkBuddy", "设置"]
+    # 页序：洞察 / 流水 / 积分 / 渠道 / 费用 / 分享，
+    # Windows 独有 WorkBuddy 排在倒数第二，最底部是设置入口
+    EXPECTED_TABS = ["洞察", "流水", "积分", "渠道", "费用", "分享", "WorkBuddy", "设置"]
 
     # ------------------------------------------------------------ 用例
 
@@ -67,7 +68,7 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
         _win, nb = self._build_insights()
         self.assertEqual([nb.tab(t, "text") for t in nb.tabs()], self.EXPECTED_TABS)
 
-        texts = self._texts(nb.nametowidget(nb.tabs()[0]))
+        texts = self._texts(self._tab_frame(nb, "费用"))
         self.assertTrue(any(t.startswith("额度 $100.00") for t in texts),
                         f"费用页缺少额度：{texts}")
         self.assertTrue(any("已用 " in t for t in texts), "缺少预算进度副行")
@@ -77,13 +78,13 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
     def test_cost_page_has_richer_content(self):
         """费用页在 batch 2b 之后内容变多（卡片/走势/排行/性价比/脚注）"""
         _win, nb = self._build_insights()
-        self.assertGreaterEqual(len(self._texts(nb.nametowidget(nb.tabs()[0]))), 12,
+        self.assertGreaterEqual(len(self._texts(self._tab_frame(nb, "费用"))), 12,
                                 "费用页内容比 batch 2a 少")
 
     def test_insights_page_new_sections(self):
         """洞察页新增：今日会话 / 星期分布 / 热力图 / 模型编年史 / 导出长图"""
         _win, nb = self._build_insights()
-        texts = self._texts(nb.nametowidget(nb.tabs()[1]))
+        texts = self._texts(self._tab_frame(nb, "洞察"))
         for expect in ("今日会话", "星期分布", "近 90 天用量热力图",
                        "模型编年史", "导出长图"):
             self.assertTrue(any(expect in t for t in texts), f"洞察页缺少 {expect}")
@@ -110,7 +111,7 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
     def test_timeline_page_has_day_nav_and_csv_export(self):
         """流水页新增：任意日期回看 + 导出 CSV"""
         _win, nb = self._build_insights()
-        texts = self._texts(nb.nametowidget(nb.tabs()[4]))
+        texts = self._texts(self._tab_frame(nb, "流水"))
         for expect in ("‹ 前一天", "后一天 ›", "今天", "导出 CSV"):
             self.assertTrue(any(expect in t for t in texts), f"流水页缺少 {expect}")
 

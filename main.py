@@ -1383,9 +1383,9 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
 
         nav = PillTabs(root, vertical=True)
         nav.pack(side=tk.LEFT, fill=tk.Y, padx=(4, 0), pady=(8, 12))
-        NAV_PAGES = [L("费用"), L("洞察"), L("分享"), L("渠道"),
-                     L("流水"), L("积分"), L("WorkBuddy"), L("设置")]
-        NAV_ICONS = ["◷", "∿", "⇧", "▤", "≡", "⚡", "◈", "⚙"]
+        NAV_PAGES = [L("洞察"), L("流水"), L("积分"), L("渠道"),
+                     L("费用"), L("分享"), L("WorkBuddy"), L("设置")]
+        NAV_ICONS = ["∿", "≡", "⚡", "▤", "◷", "⇧", "◈", "⚙"]
         for name, icon in zip(NAV_PAGES, NAV_ICONS):
             nav.add(tk.Frame(nav, bg=Design.BACKGROUND), text=name, icon=icon)
 

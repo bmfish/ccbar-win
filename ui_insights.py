@@ -200,7 +200,7 @@ class InsightsWindowsMixin:
         nb = PillTabs(root, vertical=True)
         nb.pack(fill=tk.BOTH, expand=True, padx=(4, 12), pady=(8, 12))
 
-        # 左侧导航图标（与 macOS 版页序一致：费用/洞察/分享/渠道/流水/积分，
+        # 左侧导航图标（页序：洞察/流水/积分/渠道/费用/分享，
         # 之后是 Windows 独有的 WorkBuddy，最底部是设置入口）
         TAB_ICONS = {
             L("费用"): "◷",
@@ -323,8 +323,14 @@ class InsightsWindowsMixin:
 
         money = lambda v: f"${v:.2f}"
 
+        # 先按导航顺序登记页签：洞察 → 流水 → 积分 → 渠道 → 费用 → 分享
+        # → WorkBuddy → 设置。页面内容仍按下方代码区块顺序往里填，互不影响。
+        page_frame = {t: tab(t) for t in (
+            L("洞察"), L("流水"), L("积分"), L("渠道"),
+            L("费用"), L("分享"), L("WorkBuddy"), L("设置"))}
+
         # ============ 费用 ============
-        f_cost = tab(L("费用"))
+        f_cost = page_frame[L("费用")]
         cost_page, cost_wheel = scroll_page(f_cost)
         cost_body = tk.Frame(cost_page, bg=Design.BACKGROUND)
         cost_body.pack(fill=tk.X)
@@ -548,7 +554,7 @@ class InsightsWindowsMixin:
         cost_wheel(cost_page)
 
         # ============ 洞察（使用通查） ============
-        f_ins = tab(L("洞察"))
+        f_ins = page_frame[L("洞察")]
         ins_page, ins_wheel = scroll_page(f_ins)
 
         INS_GREEN = Design.SUCCESS
@@ -1100,7 +1106,7 @@ class InsightsWindowsMixin:
         render_range()
 
         # ============ 分享 ============
-        f_share = tab(L("分享"))
+        f_share = page_frame[L("分享")]
         share_page, share_wheel = scroll_page(f_share)
 
         share_head = tk.Frame(share_page, bg=Design.BACKGROUND)
@@ -1197,7 +1203,7 @@ class InsightsWindowsMixin:
         share_wheel(share_page)
 
         # ============ 渠道 ============
-        f_ch = tab(L("渠道"))
+        f_ch = page_frame[L("渠道")]
         ch_page, ch_wheel = scroll_page(f_ch)
         ch_body = tk.Frame(ch_page, bg=Design.BACKGROUND)
         ch_body.pack(fill=tk.X)
@@ -1467,7 +1473,7 @@ class InsightsWindowsMixin:
         ch_wheel(ch_page)
 
         # ============ 流水 ============
-        f_tl = tab(L("流水"))
+        f_tl = page_frame[L("流水")]
 
         tl_head = tk.Frame(f_tl, bg=Design.BACKGROUND)
         tl_head.pack(fill=tk.X, padx=18, pady=(10, 2))
@@ -1669,8 +1675,7 @@ class InsightsWindowsMixin:
         refresh_day()
 
         # ============ 积分 ============
-        # 顺序与 mac InsightsPage 枚举一致：费用 / 洞察 / 分享 / 渠道 / 流水 / 积分
-        f_cred = tab(L("积分"))
+        f_cred = page_frame[L("积分")]
         cred_page, cred_wheel = scroll_page(f_cred)
         cred_body = tk.Frame(cred_page, bg=Design.BACKGROUND)
         cred_body.pack(fill=tk.X)
@@ -1929,7 +1934,7 @@ class InsightsWindowsMixin:
         cred_wheel(cred_page)
 
         # ============ WorkBuddy（独立页签，不与其他页面共享口径）============
-        f_wb = tab(L("WorkBuddy"))
+        f_wb = page_frame[L("WorkBuddy")]
         wb_page, wb_wheel = scroll_page(f_wb)
 
         wb_row_cards = tk.Frame(wb_page, bg=Design.BACKGROUND)
@@ -2024,9 +2029,8 @@ class InsightsWindowsMixin:
                  wraplength=690).pack(fill=tk.X, padx=16, pady=(14, 8))
         wb_wheel(wb_page)
 
-        # 导航最底部「设置」：不是一个真页，选中后切到设置窗口
-        # （设置窗口的导航栏也是同一顺序，点其他页再切回洞察中心）
-        tab(L("设置"))
+        # 导航最底部「设置」只是入口页（已在上方 page_frame 里登记），
+        # 选中后切到设置窗口；设置窗口的导航栏保持同一顺序。
 
         # ============ 页签记忆 ============
         titles = [nb.tab(t, "text") for t in nb.tabs()]
