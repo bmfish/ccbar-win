@@ -686,6 +686,8 @@ L10N_EN.update({
     "按官方计费口径 · 美元": "Official billing basis · USD",
     "较昨日 %s%.0f%%": "vs yesterday %s%.0f%%",
     "已用 %.0f%%": "%.0f%% used",
+    "剩余 %.0f%%": "%.0f%% left",
+    "已用 %s · 共 %s": "Used %s · of %s",
     "未设置额度": "No quota set",
     "本月": "This month",
     "今日渠道构成": "Today's channel mix",

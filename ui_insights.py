@@ -200,7 +200,7 @@ class InsightsWindowsMixin:
         nb = PillTabs(root, vertical=True)
         nb.pack(fill=tk.BOTH, expand=True, padx=(4, 12), pady=(8, 12))
 
-        # 左侧导航图标（页序：洞察/流水/积分/渠道/费用/分享，
+        # 左侧导航图标（页序：洞察/积分/流水/渠道/费用/分享，
         # 之后是 Windows 独有的 WorkBuddy，最底部是设置入口）
         TAB_ICONS = {
             L("费用"): "◷",
@@ -323,10 +323,10 @@ class InsightsWindowsMixin:
 
         money = lambda v: f"${v:.2f}"
 
-        # 先按导航顺序登记页签：洞察 → 流水 → 积分 → 渠道 → 费用 → 分享
+        # 先按导航顺序登记页签：洞察 → 积分 → 流水 → 渠道 → 费用 → 分享
         # → WorkBuddy → 设置。页面内容仍按下方代码区块顺序往里填，互不影响。
         page_frame = {t: tab(t) for t in (
-            L("洞察"), L("流水"), L("积分"), L("渠道"),
+            L("洞察"), L("积分"), L("流水"), L("渠道"),
             L("费用"), L("分享"), L("WorkBuddy"), L("设置"))}
 
         # ============ 费用 ============
@@ -1785,7 +1785,8 @@ class InsightsWindowsMixin:
                              (L("时长"), "%.1fh" % span)])
 
             # ---- 右：积分余额 ----
-            bcard, bbody = rounded_card(top_row, padx=16, pady=14)
+            # expand=True 让内容区撑满卡片，耗尽提示才能压到卡片底部
+            bcard, bbody = rounded_card(top_row, padx=16, pady=14, expand=True)
             bcard.grid(row=0, column=1, sticky="nsew", padx=6, pady=4)
             bhead = tk.Frame(bbody, bg=Design.CARD_FILL)
             bhead.pack(fill=tk.X)
@@ -1805,37 +1806,48 @@ class InsightsWindowsMixin:
                 tk.Label(brow, text=format_credits(remain), fg=Design.BIG_NUMBER,
                          bg=Design.CARD_FILL, font=("Microsoft YaHei UI", 22, "bold")).pack(
                     side=tk.LEFT)
-                tk.Label(brow, text=L("已用 %s") % format_credits(consumed),
+                tk.Label(brow, text=L("已用 %s · 共 %s") % (format_credits(consumed),
+                                                          format_credits(ent_total)),
                          fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
                          font=Design.FONT_UI_SMALL).pack(side=tk.LEFT, padx=(8, 0))
                 ent_ratio = consumed / ent_total if ent_total > 0 else 0.0
+                used_ratio = min(max(ent_ratio, 0.0), 1.0)
+                # 进度条两段：已用灰、剩余绿（绿色只表示剩余额度）
+                remain_ratio = 1.0 - used_ratio
                 eb = tk.Canvas(bbody, height=Design.BAR_HEIGHT, bg=Design.CARD_FILL,
                                highlightthickness=0)
                 eb.pack(fill=tk.X, pady=(8, 2))
 
-                def draw_eb(event, cv=eb, fr=min(max(ent_ratio, 0.0), 1.0)):
+                def draw_eb(event, cv=eb, used=used_ratio):
                     cv.delete("all")
                     w = max(event.width, 1)
                     r = Design.BAR_HEIGHT / 2
+                    used_px = min(w * used, w)
                     ChartCanvas.round_rect(cv, 0, 0, w, Design.BAR_HEIGHT, r,
                                            fill=Design.BTN_BG)
-                    if fr > 0:
-                        ChartCanvas.round_rect(cv, 0, 0, max(w * fr, 2), Design.BAR_HEIGHT,
-                                               r, fill=Design.SUCCESS)
+                    if used_px > 1:
+                        ChartCanvas.round_rect(
+                            cv, 0, 0, used_px, Design.BAR_HEIGHT, r,
+                            fill=blend(Design.TEXT_MUTED, Design.CARD_FILL, 0.45))
+                    if w - used_px > 1:
+                        ChartCanvas.round_rect(cv, used_px, 0, w, Design.BAR_HEIGHT, r,
+                                               fill=Design.SUCCESS)
                 eb.bind("<Configure>", draw_eb)
                 lrow = tk.Frame(bbody, bg=Design.CARD_FILL)
                 lrow.pack(fill=tk.X)
-                tk.Label(lrow, text="0", fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
-                         font=Design.FONT_UI_TINY).pack(side=tk.LEFT)
-                tk.Label(lrow, text=L("已用 %.0f%%") % (ent_ratio * 100),
-                         fg=Design.TEXT_SECONDARY, bg=Design.CARD_FILL,
+                tk.Label(lrow, text=L("已用 %.0f%%") % (used_ratio * 100),
+                         fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                         font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT)
+                tk.Label(lrow, text=L("剩余 %.0f%%") % (remain_ratio * 100),
+                         fg=Design.SUCCESS, bg=Design.CARD_FILL,
                          font=Design.FONT_MONO_SMALL).pack(side=tk.RIGHT)
+                # 耗尽提示压在卡片底部，避免余额卡下半截留一大片空白
                 tk.Label(bbody,
                          text=(L("按今日速率，余额约 %d 天后耗尽") % days_left)
                               if daily_rate > 0 else L("暂无消耗速率"),
                          fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
                          font=Design.FONT_UI_SMALL, anchor='w',
-                         justify=tk.LEFT).pack(fill=tk.X, pady=(10, 0))
+                         justify=tk.LEFT).pack(side=tk.BOTTOM, fill=tk.X)
             else:
                 tk.Label(bbody, text=L("接入 Trae 并产生用量后展示积分余额"),
                          fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,

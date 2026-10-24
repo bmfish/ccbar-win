@@ -38,9 +38,9 @@ except Exception:  # pragma: no cover - 没有 tkinter 的构建
 class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
     """洞察中心必须完整建出全部页签"""
 
-    # 页序：洞察 / 流水 / 积分 / 渠道 / 费用 / 分享，
+    # 页序：洞察 / 积分 / 流水 / 渠道 / 费用 / 分享，
     # Windows 独有 WorkBuddy 排在倒数第二，最底部是设置入口
-    EXPECTED_TABS = ["洞察", "流水", "积分", "渠道", "费用", "分享", "WorkBuddy", "设置"]
+    EXPECTED_TABS = ["洞察", "积分", "流水", "渠道", "费用", "分享", "WorkBuddy", "设置"]
 
     # ------------------------------------------------------------ 用例
 
@@ -845,8 +845,8 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
         frame = self._tab_frame(nb, "积分")
         texts = self._texts(frame)
         self.assertTrue(any("积分余额" in t for t in texts))
-        self.assertIn("已用 250", texts)
-        self.assertIn("已用 25%", texts)
+        self.assertIn("已用 250 · 共 1000", texts)
+        self.assertIn("剩余 75%", texts)
         self.assertIn("12.50", texts)
         self.assertIn("3000", texts)
         self.assertFalse(any("接入 Trae 并产生用量后展示积分余额" in t for t in texts))
