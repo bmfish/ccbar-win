@@ -594,6 +594,10 @@ L10N_EN.update({
         "WorkBuddy is tracked separately and appears only in Insights",
     "WorkBuddy 同步失败:": "WorkBuddy sync failed: ",
     "WorkBuddy 同步间隔（60 ~ 7200 秒）": "WorkBuddy sync interval (60 – 7200 s)",
+    # ---- 洞察页「使用通查」（按原型升级新增文案）----
+    "当前连续": "Current streak",
+    "按当前速率 · 本月 %d 天": "At this rate · %d days this month",
+    "本月已用 ": "Used this month ",
 })
 
 # MARK: - 批次 4（i18n 全覆盖）补充：把 main.py 里新包裹的字面量补齐英文
@@ -674,4 +678,80 @@ L10N_EN.update({
     "请求数：%d": "Requests: %d",
     "宽版弹窗（380pt）": "Wide popover (380pt)",
     "ccBar - 未找到数据": "ccBar - no data",
+})
+
+# ---- 原型对齐：费用 / 渠道 / 积分页新增文案 ----
+L10N_EN.update({
+    # 费用
+    "按官方计费口径 · 美元": "Official billing basis · USD",
+    "较昨日 %s%.0f%%": "vs yesterday %s%.0f%%",
+    "已用 %.0f%%": "%.0f%% used",
+    "未设置额度": "No quota set",
+    "本月": "This month",
+    "今日渠道构成": "Today's channel mix",
+    "预计全月 ": "Projected month ",
+    "额度 ": "Quota ",
+    "单次会话": "Per session",
+    "最贵一天": "Peak day",
+    "近 %d 天费用走势": "Cost trend (%d days)",
+    "日均 %s": "Daily avg %s",
+    " · 本月共 %s": " · %s this month",
+    "模型费用": "Model costs",
+    "近 30 天 · 合计 %s": "30 days · total %s",
+    "其他 %d 个模型": "%d other models",
+    "性价比榜": "Value ranking",
+    "每 $1 换多少 token": "Tokens per $1",
+    "主力模型性价比排第 %d，第 1 名每 $1 可换 %s token":
+        "Top model ranks #%d; #1 yields %s tokens per $1",
+    # 渠道
+    "渠道 = 接入方式 · 应用 = 实际使用的工具":
+        "Channel = transport · App = the tool actually used",
+    "%d 次请求 · %s tokens": "%d requests · %s tokens",
+    "%d 次": "%d",
+    "近 %d 天构成变化": "Composition change (%d days)",
+    "按渠道": "By channel",
+    "按应用": "By app",
+    "%d月%d日": "%d/%d",
+    "%d月%d日 切换 %s": "%d/%d switched to %s",
+    "百分比堆叠：纵轴是构成比例，不是用量。%s 占比从 %.0f%% 变为 %.0f%%。":
+        "Percent-stacked: the axis shows share, not volume. %s went from %.0f%% to %.0f%%.",
+    "Token 构成": "Token mix",
+    "近 %d 天 · %s": "%d days · %s",
+    "缓存收益": "Cache savings",
+    "本月估算省下": "est. saved this month",
+    "%.0f%% 的 token 命中缓存，按缓存读约为输入价 1/10 计。":
+        "%.0f%% of tokens hit cache; cache reads are billed at ~1/10 the input price.",
+    "实际 ": "Actual ",
+    "省 %.0f%%": "Save %.0f%%",
+    "在设置里填写默认单价后估算缓存收益":
+        "Set a default price in Settings to estimate cache savings",
+    # 积分
+    "积分洞察": "Credit Insights",
+    "按 Trae 官方计费口径 · 历史数据最多回溯 90 天":
+        "Trae official billing · up to 90 days of history",
+    "今日": "Today",
+    "明细 ›": "Details ›",
+    "缓存命中": "Cache hit",
+    "时长": "Duration",
+    "积分余额": "Credit balance",
+    "可用 %d 天": "%d days left",
+    "已用 %s": "Used %s",
+    "按今日速率，余额约 %d 天后耗尽":
+        "At today's rate, balance runs out in ~%d days",
+    "暂无消耗速率": "No burn rate yet",
+    "接入 Trae 并产生用量后展示积分余额":
+        "Connect Trae and use it to see your credit balance",
+    "日均消耗": "Daily burn",
+    "峰值单日": "Peak day",
+    "近 %d 天积分走势": "Credit trend (%d days)",
+    "均值 %s": "Avg %s",
+    "今日消耗 %s 积分": "%s credits used today",
+    # 左侧导航 / 设置 / 流水 / 分享
+    "改动需点击保存后生效": "Changes take effect after you click Save",
+    "搜索设置": "Search settings",
+    "配置已修改": "Config modified",
+    "%d 个已连接": "%d connected",
+    "已用 %s · %.0f%%": "Used %s · %.0f%%",
+    "按天回看每条请求 · 支持导出 CSV": "Day-by-day requests · CSV export",
+    "把战报卡与周报导出成图片": "Export share cards and weekly reports as images",
 })

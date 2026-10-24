@@ -38,7 +38,8 @@ except Exception:  # pragma: no cover - 没有 tkinter 的构建
 class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
     """洞察中心必须完整建出全部页签"""
 
-    EXPECTED_TABS = ["费用", "洞察", "分享", "渠道", "流水", "积分", "WorkBuddy"]
+    # 页序与 macOS 版一致；Windows 独有 WorkBuddy 排在倒数第二，最底部是设置入口
+    EXPECTED_TABS = ["费用", "洞察", "分享", "渠道", "流水", "积分", "WorkBuddy", "设置"]
 
     # ------------------------------------------------------------ 用例
 
@@ -52,8 +53,9 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
         self.assertEqual(labels, self.EXPECTED_TABS,
                          f"页签不完整：实际 {labels}（构建中途抛异常会缺后面的页）")
 
-        # 每个页签里都要有内容（费用页的图表就是原 bug 的爆点）
-        for tab_id in nb.tabs():
+        # 每个内容页都要有内容（费用页的图表就是原 bug 的爆点）；
+        # 最后的「设置」只是导航入口，选中后切到设置窗口，本身不建页
+        for tab_id in nb.tabs()[:-1]:
             frame = nb.nametowidget(tab_id)
             self.assertTrue(frame.winfo_children(),
                             f"页签 {nb.tab(tab_id, 'text')} 是空的")
@@ -66,9 +68,9 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
         self.assertEqual([nb.tab(t, "text") for t in nb.tabs()], self.EXPECTED_TABS)
 
         texts = self._texts(nb.nametowidget(nb.tabs()[0]))
-        self.assertTrue(any(t.startswith("本月预算 $100.00") for t in texts),
-                        f"费用页缺少月度预算卡：{texts}")
-        self.assertTrue(any("已用预算" in t for t in texts), "缺少预算进度副行")
+        self.assertTrue(any(t.startswith("额度 $100.00") for t in texts),
+                        f"费用页缺少额度：{texts}")
+        self.assertTrue(any("已用 " in t for t in texts), "缺少预算进度副行")
         self.assertTrue(any("性价比榜" in t for t in texts), "费用页缺性价比榜")
         self.assertTrue(any("估算" in t for t in texts), "默认单价 > 0 时费用卡要标注估算")
 
@@ -82,9 +84,23 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
         """洞察页新增：今日会话 / 星期分布 / 热力图 / 模型编年史 / 导出长图"""
         _win, nb = self._build_insights()
         texts = self._texts(nb.nametowidget(nb.tabs()[1]))
-        for expect in ("今日会话", "星期分布（近 90 天）", "近 90 天用量热力图",
+        for expect in ("今日会话", "星期分布", "近 90 天用量热力图",
                        "模型编年史", "导出长图"):
             self.assertTrue(any(expect in t for t in texts), f"洞察页缺少 {expect}")
+
+    def test_insights_range_switch_rebuilds_hero(self):
+        """7/30/90/全部 切换必须重画 Hero 与下方区块（标题随范围变化）"""
+        _win, nb = self._build_insights()
+        page = self._tab_frame(nb, "洞察")
+        self.assertTrue(any(t.startswith("近 30 天用量") for t in self._texts(page)))
+
+        self._invoke_button(page, "全部")
+        self.assertTrue(any(t == "全部用量" for t in self._texts(page)),
+                        "切到「全部」后 Hero 标题没更新")
+
+        self._invoke_button(page, "7 天")
+        self.assertTrue(any(t.startswith("近 7 天用量") for t in self._texts(page)),
+                        "切到「7 天」后 Hero 标题没更新")
 
     def test_share_page_renders_two_cards(self):
         """分享页同时预览战报卡（640x420）与周报卡（460x400）"""
@@ -159,6 +175,21 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
         """分享页依赖 store.query_daily_tokens（曾缺失导致 AttributeError）"""
         img = self.app._share_card_png()
         self.assertEqual(img.size, (640, 420))
+
+    def test_vertical_nav_rail_selects_by_click(self):
+        """左侧竖向导航：条目纵向命中，点击第二个条目要切到对应页"""
+        from ui_tabs import PillTabs
+        rail = PillTabs(self.root, vertical=True)
+        rail.pack()
+        for name in ("费用", "洞察", "设置"):
+            rail.add(tk.Frame(rail, bg=Design.BACKGROUND), text=name, icon="•")
+        rail.select(0)
+        rail._draw()
+        self.assertEqual(len(rail._hit), 3)
+        y1, y2, idx = rail._hit[1]
+        self.assertEqual(idx, 1)
+        rail._on_click(types.SimpleNamespace(y=(y1 + y2) // 2, x=0))
+        self.assertEqual(rail.tab(rail.select()), "洞察")
 
     def test_settings_window_builds(self):
         """设置页新增长列表后仍要能完整建出来（内容滚动 + 钉底按钮栏）"""
@@ -798,7 +829,7 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
         self.assertIn("积分", [nb.tab(t, "text") for t in nb.tabs()])
         texts = self._texts(self._tab_frame(nb, "积分"))
         for expect in ("今日积分", "近 7 天", "近 30 天", "近 30 天积分走势",
-                       "接入 Trae 并产生用量后展示积分消耗",
+                       "接入 Trae 并产生用量后展示积分余额",
                        "积分为 Trae 官方计费口径；历史数据自接入起最多回溯 90 天"):
             self.assertTrue(any(expect in t for t in texts),
                             "积分页缺少 %r：%s" % (expect, texts))
@@ -812,12 +843,12 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
         _win, nb = self._build_insights()
         frame = self._tab_frame(nb, "积分")
         texts = self._texts(frame)
-        self.assertTrue(any("积分余额（官方账单）" in t for t in texts))
-        self.assertIn("已用 / 共 1000", texts)
-        self.assertIn("25%", texts)
+        self.assertTrue(any("积分余额" in t for t in texts))
+        self.assertIn("已用 250", texts)
+        self.assertIn("已用 25%", texts)
         self.assertIn("12.50", texts)
         self.assertIn("3000", texts)
-        self.assertFalse(any("接入 Trae 并产生用量后展示积分消耗" in t for t in texts))
+        self.assertFalse(any("接入 Trae 并产生用量后展示积分余额" in t for t in texts))
 
     def test_settings_window_has_trae_row_and_saves_it(self):
         """设置页数据源区的 Trae 行：勾选 + sessionid + 状态行，保存时带上两个键"""

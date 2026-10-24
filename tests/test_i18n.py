@@ -229,10 +229,12 @@ class TestEnglishUi(ui_fixture.TrayFixture):
     def test_insights_center_is_english(self):
         win, nb = self._build_insights()
         labels = [nb.tab(t, "text") for t in nb.tabs()]
+        # 页序对齐 macOS 版；WorkBuddy 倒数第二，最底部是设置入口
         self.assertEqual(labels,
                          [main.L(t) for t in
-                          ("费用", "洞察", "分享", "渠道", "流水", "积分", "WorkBuddy")])
-        for tab_id in nb.tabs():
+                          ("费用", "洞察", "分享", "渠道", "流水", "积分", "WorkBuddy", "设置")])
+        # 最后的「设置」只是导航入口，本身不建页
+        for tab_id in nb.tabs()[:-1]:
             self.assertTrue(nb.nametowidget(tab_id).winfo_children(),
                             "页签 %s 是空的" % nb.tab(tab_id, "text"))
         self._assert_english("洞察中心", [win], minimum=40)

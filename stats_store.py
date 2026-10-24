@@ -1152,6 +1152,35 @@ class StatsStore:
             result += [(d, r[0], r[1]) for r in today]
         return result
 
+    def query_channel_today(self):
+        """今日各渠道 (source, requests, token)，按 token 降序（渠道页构成条用）"""
+        rows = self.query_all("""
+            SELECT source, COALESCE(SUM(request_count), 0),
+                   COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+cache_creation_tokens), 0)
+            FROM usage_all WHERE created_at >= ?
+            GROUP BY source ORDER BY 3 DESC""", (self.local_midnight(0),))
+        return [(r[0], int(r[1] or 0), r[2] or 0) for r in rows] if rows else []
+
+    def query_session_cost(self, days):
+        """近 N 天 (会话数, 平均单次费用)：相邻请求间隔 > 30 分钟切新会话"""
+        rows = self.query_all("""
+            SELECT created_at, COALESCE(total_cost_usd, 0) FROM usage_all
+            WHERE created_at >= ? AND created_at < ? ORDER BY created_at""",
+            (self.window_start(days), self.local_midnight(-1)))
+        if not rows:
+            return 0, 0.0
+        sessions, cur = 1, 0.0
+        last_ts = rows[0][0]
+        total = 0.0
+        for ts, cost in rows:
+            if ts - last_ts > 1800:
+                sessions += 1
+                cur = 0.0
+            cur += cost
+            total += cost
+            last_ts = ts
+        return sessions, total / sessions
+
     def query_daily_tokens(self, days):
         """近 N 天（含今天）每日总 token（跨渠道，含今天实时），日期升序 [(date, token)]"""
         rows = self.query_all("""

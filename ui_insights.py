@@ -126,6 +126,17 @@ class InsightsWindowsMixin:
         ins_daily = store.query_daily_tokens(730)
         ins_first = store.query_first_usage_epoch()
         peak_hour_map = store.query_hour_histogram(30)
+        # 费用 / 渠道 / 积分页的 90 天范围切换（窄窗口在页面里按日期切片）
+        cost90 = store.query_cost(90)
+        cost_daily90 = store.query_cost_daily(90)
+        channels90 = store.query_channel_daily(90)
+        apps90 = store.query_app_daily(90)
+        comp90 = store.query_composition_daily(90)
+        credits_daily90 = store.query_credits_daily(90)
+        credits_yday = store.query_credits_day(1)
+        # 渠道页今日构成 + 费用页单次会话费用
+        channel_today = store.query_channel_today()
+        session30, session_cost30 = store.query_session_cost(30)
 
         return (cost_today, cost7, cost30, cost_daily, cost_models, streak,
                 this_week, last_week, peak, top, mtd, elapsed, dim, projected,
@@ -135,7 +146,9 @@ class InsightsWindowsMixin:
                 wb_clients, wb_models, wb_today_reqs, wb_synced_at, wb_status,
                 budget, price, cost_mtd, mtd_elapsed, month_days, daily_budget,
                 est, tokens91, weekday_totals, session_count, session_avg,
-                session_longest, top_channels, ins_daily, ins_first, peak_hour_map)
+                session_longest, top_channels, ins_daily, ins_first, peak_hour_map,
+                cost90, cost_daily90, channels90, apps90, comp90, credits_daily90,
+                channel_today, session30, session_cost30, credits_yday)
 
     @_on_gui
     def _render_insights(self, data, initial_page=None):
@@ -153,12 +166,14 @@ class InsightsWindowsMixin:
          wb_clients, wb_models, wb_today_reqs, wb_synced_at, wb_status,
          budget, price, cost_mtd, mtd_elapsed, month_days, daily_budget,
          est, tokens91, weekday_totals, session_count, session_avg,
-         session_longest, top_channels, ins_daily, ins_first, peak_hour_map) = data
+         session_longest, top_channels, ins_daily, ins_first, peak_hour_map,
+         cost90, cost_daily90, channels90, apps90, comp90, credits_daily90,
+         channel_today, session30, session_cost30, credits_yday) = data
 
         root = tk.Toplevel(self._ui_root)
         root.title(L("洞察中心"))
-        root.geometry(center_geometry("920x660"))
-        root.minsize(840, 540)
+        root.geometry(center_geometry("1000x700"))
+        root.minsize(900, 560)
         root.configure(bg=Design.BACKGROUND)
 
         style = ttk.Style(root)
@@ -169,25 +184,49 @@ class InsightsWindowsMixin:
                         foreground=Design.TEXT_MUTED, borderwidth=0)
         style.map("Insights.Treeview", background=[("selected", Design.CARD_BORDER)])
         style.configure("Insights.TCombobox", fieldbackground=Design.CARD_FILL,
-                        background=Design.CARD_FILL, foreground=Design.TEXT_PRIMARY)
+                        background=Design.CARD_FILL, foreground=Design.TEXT_PRIMARY,
+                        arrowcolor=Design.TEXT_SECONDARY,
+                        selectbackground=Design.CARD_FILL,
+                        selectforeground=Design.TEXT_PRIMARY)
+        # 只读态默认会用白色 fieldbackground，必须显式映射，否则筛选框是白块
+        style.map("Insights.TCombobox",
+                  fieldbackground=[("readonly", Design.CARD_FILL)],
+                  background=[("readonly", Design.CARD_FILL)],
+                  foreground=[("readonly", Design.TEXT_PRIMARY)],
+                  arrowcolor=[("readonly", Design.TEXT_SECONDARY)],
+                  selectbackground=[("readonly", Design.CARD_FILL)],
+                  selectforeground=[("readonly", Design.TEXT_PRIMARY)])
 
-        nb = PillTabs(root)
-        nb.pack(fill=tk.BOTH, expand=True, padx=12, pady=(12, 12))
+        nb = PillTabs(root, vertical=True)
+        nb.pack(fill=tk.BOTH, expand=True, padx=(4, 12), pady=(8, 12))
+
+        # 左侧导航图标（与 macOS 版页序一致：费用/洞察/分享/渠道/流水/积分，
+        # 之后是 Windows 独有的 WorkBuddy，最底部是设置入口）
+        TAB_ICONS = {
+            L("费用"): "◷",
+            L("洞察"): "∿",
+            L("分享"): "⇧",
+            L("渠道"): "▤",
+            L("流水"): "≡",
+            L("积分"): "⚡",
+            L("WorkBuddy"): "◈",
+            L("设置"): "⚙",
+        }
 
         def tab(title):
             # 必须显式 nb.add()——PillTabs 和 Notebook 一样只认登记过的页
             f = tk.Frame(nb, bg=Design.BACKGROUND)
-            nb.add(f, text=title)
+            nb.add(f, text=title, icon=TAB_ICONS.get(title, "•"))
             return f
 
-        def png_label(frame, img):
+        def png_label(frame, img, padx=16, pady=(10, 4)):
             """图表卡片：圆角卡里放 PIL 图。
 
             图的底色必须和卡片填充同为 CARD_FILL，否则圆角处会露出一块方角深色。
             padx 必须 ≥ 圆角半径，否则内容 Frame 的方角会盖住卡片圆角。
             """
             card, body = rounded_card(frame, padx=12, pady=8)
-            card.pack(fill=tk.X, padx=16, pady=(10, 4))
+            card.pack(fill=tk.X, padx=padx, pady=pady)
             lbl = tk.Label(body, bg=Design.CARD_FILL)
             photo = ImageTk.PhotoImage(img)
             lbl.configure(image=photo)
@@ -229,107 +268,283 @@ class InsightsWindowsMixin:
         def btn(parent, text, cmd, primary=False):
             return flat_button(parent, text, cmd, primary)
 
+        def range_pills(parent, specs, initial, on_pick):
+            """右上角分段切换（费用/渠道/积分页共用）。specs: [(key, label)]"""
+            card, body = rounded_card(parent, padx=4, pady=4, radius=14)
+            btns = {}
+
+            def set_active(key):
+                for k, b in btns.items():
+                    sel = k == key
+                    b.configure(bg=Design.BTN_BG if sel else Design.CARD_FILL,
+                                fg=Design.TEXT_PRIMARY if sel else Design.TEXT_SECONDARY)
+
+            for key, label in specs:
+                b = tk.Button(body, text=label, bd=0, relief=tk.FLAT, cursor="hand2",
+                              bg=Design.CARD_FILL, fg=Design.TEXT_SECONDARY,
+                              activebackground=Design.BTN_BG_HOVER,
+                              activeforeground=Design.TEXT_PRIMARY,
+                              font=Design.FONT_UI_SMALL, padx=10, pady=2,
+                              command=lambda k=key: (set_active(k), on_pick(k)))
+                b.pack(side=tk.LEFT)
+                btns[key] = b
+            set_active(initial)
+            return card, set_active
+
+        def stat_row(parent, items):
+            """卡片底部的「标题 + 数值」横排（费用卡片用）"""
+            row = tk.Frame(parent, bg=Design.CARD_FILL)
+            row.pack(fill=tk.X, pady=(8, 0))
+            for i, (title, value) in enumerate(items):
+                cell = tk.Frame(row, bg=Design.CARD_FILL)
+                cell.grid(row=0, column=i, sticky="w")
+                row.grid_columnconfigure(i, weight=1, uniform="stat")
+                tk.Label(cell, text=title, fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                         font=Design.FONT_UI_SMALL, anchor='w').pack(fill=tk.X)
+                tk.Label(cell, text=value, fg=Design.TEXT_PRIMARY, bg=Design.CARD_FILL,
+                         font=Design.FONT_TREND_VALUE, anchor='w').pack(fill=tk.X)
+            return row
+
+        def share_bar(parent, ratio, fill=None):
+            """模型费用行下方的细进度条"""
+            c = tk.Canvas(parent, height=4, bg=Design.CARD_FILL, highlightthickness=0)
+            c.pack(fill=tk.X, pady=(2, 0))
+            fr = min(max(ratio, 0.0), 1.0)
+
+            def draw(event, cv=c):
+                cv.delete("all")
+                w = max(event.width, 1)
+                ChartCanvas.round_rect(cv, 0, 0, w, 4, 2, fill=Design.BTN_BG)
+                if fr > 0:
+                    ChartCanvas.round_rect(cv, 0, 0, max(w * fr, 2), 4, 2,
+                                           fill=fill or Design.SUCCESS)
+            c.bind("<Configure>", draw)
+            return c
+
         money = lambda v: f"${v:.2f}"
 
         # ============ 费用 ============
         f_cost = tab(L("费用"))
         cost_page, cost_wheel = scroll_page(f_cost)
+        cost_body = tk.Frame(cost_page, bg=Design.BACKGROUND)
+        cost_body.pack(fill=tk.X)
 
-        card_row = tk.Frame(cost_page, bg=Design.BACKGROUND)
-        card_row.pack(fill=tk.X, padx=10, pady=(8, 0))
-        for i, (title, value, estimate) in enumerate(
-                [(L("今日费用"), cost_today, est[0]), (L("近 7 天"), cost7, est[7]),
-                 (L("近 30 天"), cost30, est[30])]):
-            card, body = rounded_card(card_row, padx=16, pady=12)
-            card.grid(row=0, column=i, sticky="nsew", padx=6, pady=4)
-            card_row.grid_columnconfigure(i, weight=1)
-            tk.Label(body, text=title, fg=semantic_color("secondary"), bg=Design.CARD_FILL,
+        cost_head = tk.Frame(cost_body, bg=Design.BACKGROUND)
+        cost_head.pack(fill=tk.X, padx=18, pady=(10, 2))
+        clog = tk.Frame(cost_head, bg=Design.BACKGROUND)
+        clog.pack(side=tk.LEFT)
+        tk.Label(clog, text=L("费用"), fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+                 font=("Microsoft YaHei UI", 16, "bold"), anchor='w').pack(anchor='w')
+        tk.Label(clog, text=L("按官方计费口径 · 美元"), fg=Design.TEXT_MUTED,
+                 bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL,
+                 anchor='w').pack(anchor='w')
+
+        cost_range = {"days": 30}
+
+        def on_cost_range(days):
+            cost_range["days"] = days
+            render_cost()
+
+        cost_pills, _cost_set = range_pills(
+            cost_head, [(7, L("7 天")), (30, L("30 天")), (90, L("90 天"))],
+            30, on_cost_range)
+        cost_pills.pack(side=tk.RIGHT)
+
+        cost_area = tk.Frame(cost_body, bg=Design.BACKGROUND)
+        cost_area.pack(fill=tk.X, padx=10, pady=(4, 10))
+
+        def render_cost():
+            for w in cost_area.winfo_children():
+                w.destroy()
+            yday_text = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+            cost_map = dict(cost_daily)
+            cost_map90 = dict(cost_daily90)
+            yday_cost = cost_map.get(yday_text, 0.0)
+            # 近 7 天迷你走势（缺失日补 0）
+            spark = []
+            for i in range(6, -1, -1):
+                day = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
+                spark.append(cost_map.get(day, cost_map90.get(day, 0.0)))
+            top_row = tk.Frame(cost_area, bg=Design.BACKGROUND)
+            top_row.pack(fill=tk.X, padx=6)
+            top_row.grid_columnconfigure(0, weight=3, uniform="costtop")
+            top_row.grid_columnconfigure(1, weight=2, uniform="costtop")
+
+            # ---- 左：今日费用 ----
+            hcard, hbody = rounded_card(top_row, padx=16, pady=14)
+            hcard.grid(row=0, column=0, sticky="nsew", padx=6, pady=4)
+            hhead = tk.Frame(hbody, bg=Design.CARD_FILL)
+            hhead.pack(fill=tk.X)
+            tk.Label(hhead, text=L("今日费用"), fg=Design.TEXT_SECONDARY,
+                     bg=Design.CARD_FILL, font=Design.FONT_UI).pack(side=tk.LEFT)
+            if yday_cost > 0:
+                pct = (cost_today - yday_cost) / yday_cost * 100
+                tk.Label(hhead, text=L("较昨日 %s%.0f%%") % ("▲ " if pct >= 0 else "▼ ", abs(pct)),
+                         fg=Design.WARNING if pct >= 0 else Design.SUCCESS,
+                         bg=Design.CARD_FILL, font=Design.FONT_UI_SMALL).pack(side=tk.RIGHT)
+            tk.Label(hbody, text=money(cost_today + est[0]), fg=Design.BIG_NUMBER,
+                     bg=Design.CARD_FILL, font=Design.FONT_BIG,
+                     anchor='w').pack(fill=tk.X, pady=(2, 0))
+            spark_photo = ImageTk.PhotoImage(
+                self._sparkline_png(spark, Design.SUCCESS, width=300, height=64))
+            png_label_body = tk.Label(hbody, bg=Design.CARD_FILL, image=spark_photo)
+            png_label_body.image = spark_photo
+            png_label_body.pack(fill=tk.X, pady=(6, 4))
+            tk.Frame(hbody, bg=Design.CARD_BORDER, height=1).pack(fill=tk.X, pady=(2, 6))
+            avg30 = cost30 / 30.0
+            stat_row(hbody, [(L("近 7 天"), money(cost7 + est[7])),
+                             (L("近 30 天"), money(cost30 + est[30])),
+                             (L("日均"), money(avg30))])
+
+            # ---- 右：本月 ----
+            mcard, mbody = rounded_card(top_row, padx=16, pady=14)
+            mcard.grid(row=0, column=1, sticky="nsew", padx=6, pady=4)
+            tk.Label(mbody, text=L("本月"), fg=Design.TEXT_SECONDARY, bg=Design.CARD_FILL,
                      font=Design.FONT_UI, anchor='w').pack(fill=tk.X)
-            tk.Label(body, text=money(value + estimate), fg=Design.BIG_NUMBER, bg=Design.CARD_FILL,
-                     font=Design.FONT_INSIGHT_VALUE, anchor='w').pack(fill=tk.X)
-            if estimate > 0:
-                # mac 版卡片小字：实测 $a · 估算 $b
-                tk.Label(body, text=L("实测 %s · 估算 %s") % (money(value), money(estimate)),
-                         fg=semantic_color("muted"), bg=Design.CARD_FILL,
-                         font=Design.FONT_MONO_TINY, anchor='w').pack(fill=tk.X)
+            mrow = tk.Frame(mbody, bg=Design.CARD_FILL)
+            mrow.pack(fill=tk.X, pady=(2, 0))
+            tk.Label(mrow, text=money(cost_mtd), fg=Design.BIG_NUMBER, bg=Design.CARD_FILL,
+                     font=("Microsoft YaHei UI", 22, "bold"), anchor='w').pack(side=tk.LEFT)
+            if budget > 0:
+                tk.Label(mrow, text=L("已用 %.0f%%") % (cost_mtd / budget * 100),
+                         fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                         font=Design.FONT_UI_SMALL).pack(side=tk.LEFT, padx=(8, 0))
+            else:
+                tk.Label(mrow, text=L("未设置额度"), fg=Design.TEXT_MUTED,
+                         bg=Design.CARD_FILL, font=Design.FONT_UI_SMALL).pack(side=tk.LEFT, padx=(8, 0))
+            mx = tk.Canvas(mbody, height=Design.BAR_HEIGHT, bg=Design.CARD_FILL,
+                           highlightthickness=0)
+            if budget > 0:
+                mx.pack(fill=tk.X, pady=(8, 4))
+            mratio = min(cost_mtd / budget, 1.0) if budget > 0 else 0.0
 
-        if budget > 0:
-            # 月度预算卡（mac CostPage.budgetCard 同款文案与字段）
-            ratio = cost_mtd / budget
-            over = cost_mtd > budget
-            projected_cost = cost_mtd / mtd_elapsed * month_days if mtd_elapsed else 0.0
-            bcard, bbody = rounded_card(cost_page, padx=16, pady=12)
-            bcard.pack(fill=tk.X, padx=16, pady=(10, 0))
-            tk.Label(bbody, text=L("本月预算 $%.2f") % budget, fg=Design.TEXT_PRIMARY,
-                     bg=Design.CARD_FILL, font=Design.FONT_TITLE, anchor='w').pack(fill=tk.X)
-            # 预算进度条：胶囊形（圆角 = 半高），同 mac
-            bar_h = Design.BAR_HEIGHT
-            bar = tk.Canvas(bbody, height=bar_h, bg=Design.CARD_FILL, highlightthickness=0)
-            bar.pack(fill=tk.X, pady=(8, 6))
-            fill_ratio = min(max(ratio, 0.0), 1.0)
-
-            def _draw_budget(event, c=bar, fr=fill_ratio):
-                c.delete("all")
+            def draw_mx(event, cv=mx, fr=mratio):
+                cv.delete("all")
                 w = max(event.width, 1)
-                r = bar_h / 2
-                ChartCanvas.round_rect(c, 0, 0, w, bar_h, r, fill=Design.BTN_BG)
+                r = Design.BAR_HEIGHT / 2
+                ChartCanvas.round_rect(cv, 0, 0, w, Design.BAR_HEIGHT, r, fill=Design.BTN_BG)
                 if fr > 0:
-                    ChartCanvas.round_rect(c, 0, 0, max(w * fr, 2), bar_h, r,
+                    ChartCanvas.round_rect(cv, 0, 0, max(w * fr, 2), Design.BAR_HEIGHT, r,
                                            fill=usage_color(fr))
+            mx.bind("<Configure>", draw_mx)
+            proj_text = money(cost_mtd / mtd_elapsed * month_days) if mtd_elapsed else money(cost_mtd)
+            prow = tk.Frame(mbody, bg=Design.CARD_FILL)
+            prow.pack(fill=tk.X)
+            tk.Label(prow, text=L("预计全月 ") + proj_text, fg=Design.TEXT_MUTED,
+                     bg=Design.CARD_FILL, font=Design.FONT_UI_SMALL).pack(side=tk.LEFT)
+            tk.Label(prow, text=(L("额度 ") + money(budget)) if budget > 0 else "",
+                     fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                     font=Design.FONT_UI_SMALL).pack(side=tk.RIGHT)
+            tk.Frame(mbody, bg=Design.CARD_BORDER, height=1).pack(fill=tk.X, pady=(10, 6))
+            peak_cost = max(cost_daily, key=lambda kv: kv[1]) if cost_daily else ("", 0.0)
+            stat_row(mbody, [(L("单次会话"), money(session_cost30)),
+                             (L("最贵一天"), money(peak_cost[1]))])
 
-            bar.bind("<Configure>", _draw_budget)
-            brow = tk.Frame(bbody, bg=Design.CARD_FILL)
-            brow.pack(fill=tk.X)
-            tk.Label(brow, text=L("本月已花 ") + money(cost_mtd), fg=Design.TEXT_PRIMARY,
-                     bg=Design.CARD_FILL, font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT)
-            tk.Label(brow,
-                     text=(L("已超预算 ") + money(cost_mtd - budget)) if over
-                     else (L("剩余 ") + money(budget - cost_mtd)),
-                     fg=Design.ERROR if over else Design.SUCCESS, bg=Design.CARD_FILL,
-                     font=Design.FONT_MONO_SMALL).pack(side=tk.RIGHT)
-            tk.Label(bbody,
-                     text=L("按当前速率预计 %s · 已用预算 %.0f%%") % (money(projected_cost), ratio * 100),
-                     fg=semantic_color("muted"), bg=Design.CARD_FILL,
-                     font=Design.FONT_UI_SMALL, anchor='w').pack(fill=tk.X, pady=(4, 0))
+            # ---- 走势 ----
+            days = cost_range["days"]
+            # 按自然日补零，横轴才是连续的；不足 90 天也能正确算日均
+            daily_map = dict(cost_daily90)
+            daily = []
+            for i in range(days - 1, -1, -1):
+                day = datetime.now() - timedelta(days=i)
+                daily.append((day.strftime("%m-%d"),
+                              daily_map.get(day.strftime("%Y-%m-%d"), 0.0)))
+            series = [(label, {L("费用"): c}) for label, c in daily]
+            sec = tk.Frame(cost_area, bg=Design.BACKGROUND)
+            sec.pack(fill=tk.X, padx=6, pady=(12, 0))
+            tk.Label(sec, text=L("近 %d 天费用走势") % days, fg=Design.TEXT_PRIMARY,
+                     bg=Design.BACKGROUND, font=Design.FONT_CARD_TITLE).pack(side=tk.LEFT)
+            avg_daily = sum(c for _, c in daily) / max(days, 1)
+            note = L("日均 %s") % money(avg_daily)
+            if mtd > 0:
+                note += L(" · 本月共 %s") % money(cost_mtd)
+            tk.Label(sec, text=note, fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
+                     font=Design.FONT_UI_SMALL).pack(side=tk.RIGHT)
+            png_label(cost_area, self._bar_chart_png(
+                series, {L("费用"): Design.SUCCESS},
+                budget_line=daily_budget if budget > 0 else None, value_fmt=money))
 
-        section(cost_page, L("近 30 天费用走势"))
-        cost_series = [(d[5:], {L("费用"): c}) for d, c in cost_daily]
-        png_label(cost_page, self._bar_chart_png(
-            cost_series, {L("费用"): Design.BRAND},
-            budget_line=daily_budget if budget > 0 else None, value_fmt=money))
+            # ---- 底部：模型费用 + 性价比榜 ----
+            bottom = tk.Frame(cost_area, bg=Design.BACKGROUND)
+            bottom.pack(fill=tk.X, padx=6, pady=(12, 0))
+            bottom.grid_columnconfigure(0, weight=1, uniform="costbot")
+            bottom.grid_columnconfigure(1, weight=1, uniform="costbot")
 
-        section(cost_page, L("模型费用排行（近 30 天）"))
-        if not cost_models:
-            muted(cost_page, L("暂无数据"))
-        for m, c, tok in cost_models:
-            row = tk.Frame(cost_page, bg=Design.BACKGROUND)
-            row.pack(fill=tk.X, padx=20)
-            tk.Label(row, text=m, fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
-                     font=("Microsoft YaHei UI", 10)).pack(side=tk.LEFT)
-            tk.Label(row, text=f"{money(c)} · {self.fmt_tokens(tok)}",
-                     fg=Design.TEXT_SECONDARY, bg=Design.BACKGROUND,
-                     font=Design.FONT_MONO_SMALL).pack(side=tk.RIGHT)
+            lcard, lbody = rounded_card(bottom, padx=14, pady=12)
+            lcard.grid(row=0, column=0, sticky="nsew", padx=6, pady=4)
+            lhead = tk.Frame(lbody, bg=Design.CARD_FILL)
+            lhead.pack(fill=tk.X)
+            tk.Label(lhead, text=L("模型费用"), fg=Design.TEXT_PRIMARY, bg=Design.CARD_FILL,
+                     font=Design.FONT_CARD_TITLE).pack(side=tk.LEFT)
+            tk.Label(lhead, text=L("近 30 天 · 合计 %s") % money(cost30),
+                     fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                     font=Design.FONT_UI_SMALL).pack(side=tk.RIGHT)
+            shown_models = cost_models[:4]
+            rest_cost = sum(c for _m, c, _t in cost_models[4:])
+            rest_count = len(cost_models[4:])
+            for m, c, _tok in shown_models:
+                r = tk.Frame(lbody, bg=Design.CARD_FILL)
+                r.pack(fill=tk.X, pady=(6, 0))
+                tk.Label(r, text=m, fg=Design.TEXT_PRIMARY, bg=Design.CARD_FILL,
+                         font=Design.FONT_UI, anchor='w').pack(side=tk.LEFT)
+                share = (c / cost30 * 100) if cost30 > 0 else 0.0
+                tk.Label(r, text="%.0f%%" % share, fg=Design.TEXT_MUTED,
+                         bg=Design.CARD_FILL, font=Design.FONT_MONO_SMALL).pack(side=tk.RIGHT)
+                tk.Label(r, text=money(c), fg=Design.DATA, bg=Design.CARD_FILL,
+                         font=Design.FONT_MONO_SMALL).pack(side=tk.RIGHT, padx=(0, 8))
+                share_bar(lbody, (c / cost30) if cost30 > 0 else 0.0, Design.SUCCESS)
+            if rest_count:
+                r = tk.Frame(lbody, bg=Design.CARD_FILL)
+                r.pack(fill=tk.X, pady=(8, 0))
+                tk.Label(r, text=L("其他 %d 个模型") % rest_count, fg=Design.TEXT_MUTED,
+                         bg=Design.CARD_FILL, font=Design.FONT_UI_SMALL).pack(side=tk.LEFT)
+                tk.Label(r, text=money(rest_cost), fg=Design.TEXT_SECONDARY,
+                         bg=Design.CARD_FILL, font=Design.FONT_MONO_SMALL).pack(side=tk.RIGHT)
+            tk.Frame(lbody, bg=Design.CARD_BORDER, height=1).pack(fill=tk.X, pady=(10, 0))
+            foot = L("费用按 cc-switch 记录的单价折算；未计费渠道可在设置里配默认单价估算")
+            if price > 0:
+                foot += L("（当前按 $%g/M tokens 估算）") % price
+            tk.Label(lbody, text=foot, fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                     font=Design.FONT_UI_TINY, anchor='w', justify=tk.LEFT,
+                     wraplength=300).pack(fill=tk.X, pady=(6, 0))
 
-        # 性价比榜：token / $（cost > 0.005 才参与，避免除零噪声）
-        section(cost_page, L("性价比榜（近 30 天）"))
-        ranked = sorted(((m, tok / c) for m, c, tok in cost_models if c > 0.005),
-                        key=lambda kv: kv[1], reverse=True)
-        if not ranked:
-            muted(cost_page, L("暂无数据"))
-        for i, (m, per_dollar) in enumerate(ranked):
-            row = tk.Frame(cost_page, bg=Design.BACKGROUND)
-            row.pack(fill=tk.X, padx=20)
-            tk.Label(row, text=f"{i + 1}. {m}", fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
-                     font=("Microsoft YaHei UI", 10)).pack(side=tk.LEFT)
-            tk.Label(row, text=self.fmt_tokens(int(per_dollar)) + " / $1", fg=Design.DATA,
-                     bg=Design.BACKGROUND, font=Design.FONT_MONO_SMALL).pack(side=tk.RIGHT)
+            vcard, vbody = rounded_card(bottom, padx=14, pady=12)
+            vcard.grid(row=0, column=1, sticky="nsew", padx=6, pady=4)
+            vhead = tk.Frame(vbody, bg=Design.CARD_FILL)
+            vhead.pack(fill=tk.X)
+            tk.Label(vhead, text=L("性价比榜"), fg=Design.TEXT_PRIMARY, bg=Design.CARD_FILL,
+                     font=Design.FONT_CARD_TITLE).pack(side=tk.LEFT)
+            tk.Label(vhead, text=L("每 $1 换多少 token"), fg=Design.TEXT_MUTED,
+                     bg=Design.CARD_FILL, font=Design.FONT_UI_SMALL).pack(side=tk.RIGHT)
+            ranked = sorted(((m, tok / c) for m, c, tok in cost_models if c > 0.005),
+                            key=lambda kv: kv[1], reverse=True)[:4]
+            best = ranked[0][1] if ranked else 1
+            for i, (m, per_dollar) in enumerate(ranked):
+                r = tk.Frame(vbody, bg=Design.CARD_FILL)
+                r.pack(fill=tk.X, pady=(6, 0))
+                badge = tk.Label(r, text=str(i + 1), width=2, bg=Design.BTN_BG,
+                                 fg=Design.SUCCESS if i == 0 else Design.TEXT_SECONDARY,
+                                 font=Design.FONT_MONO_SMALL)
+                badge.pack(side=tk.LEFT, padx=(0, 8))
+                tk.Label(r, text=m, fg=Design.TEXT_PRIMARY, bg=Design.CARD_FILL,
+                         font=Design.FONT_UI, anchor='w').pack(side=tk.LEFT)
+                tk.Label(r, text=self.fmt_tokens(int(per_dollar)) + " / $1",
+                         fg=Design.DATA, bg=Design.CARD_FILL,
+                         font=Design.FONT_MONO_SMALL).pack(side=tk.RIGHT)
+                share_bar(vbody, per_dollar / best, Design.SUCCESS)
+            if not ranked:
+                tk.Label(vbody, text=L("暂无数据"), fg=Design.TEXT_MUTED,
+                         bg=Design.CARD_FILL, font=Design.FONT_UI_SMALL).pack(anchor='w')
+            elif top and top[0] in [m for m, _p in ranked]:
+                rank = [m for m, _p in ranked].index(top[0]) + 1
+                tk.Label(vbody,
+                         text=L("主力模型性价比排第 %d，第 1 名每 $1 可换 %s token")
+                              % (rank, self.fmt_tokens(int(best))),
+                         fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                         font=Design.FONT_UI_TINY, anchor='w', justify=tk.LEFT,
+                         wraplength=300).pack(fill=tk.X, pady=(8, 0))
 
-        foot = L("费用按 cc-switch 记录的单价折算；未计费渠道可在设置里配默认单价估算")
-        if price > 0:
-            foot += L("（当前按 $%g/M tokens 估算）") % price
-        tk.Label(cost_page, text=foot, fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
-                 font=Design.FONT_UI_SMALL, anchor='w', justify=tk.LEFT,
-                 wraplength=690).pack(fill=tk.X, padx=16, pady=(14, 8))
+        render_cost()
         cost_wheel(cost_page)
 
         # ============ 洞察（使用通查） ============
@@ -418,8 +633,10 @@ class InsightsWindowsMixin:
             b.pack(side=tk.LEFT)
             seg_btns[key] = b
 
-        body = tk.Frame(ins_page, bg=Design.BACKGROUND)
-        body.pack(fill=tk.X, padx=10, pady=(2, 10))
+        # 注意：不要叫 body——下面积分/WorkBuddy 卡片也用了 `card, body =` 的写法，
+        # 同一个函数作用域里会把名字覆盖掉，范围切换就会重建到别的页签上去。
+        ins_body = tk.Frame(ins_page, bg=Design.BACKGROUND)
+        ins_body.pack(fill=tk.X, padx=10, pady=(2, 10))
         chron_state = {"expanded": False}
         chron_cache = {}
 
@@ -440,18 +657,24 @@ class InsightsWindowsMixin:
             c.bind("<Configure>", draw)
             return c
 
-        def metric_card(parent, col, title, value, sub):
+        def metric_card(parent, col, title, value, sub, value_font=None, icon=""):
             card, cb = rounded_card(parent, padx=14, pady=12)
             card.grid(row=0, column=col, sticky="nsew", padx=6, pady=4)
-            tk.Label(cb, text=title, fg=Design.TEXT_SECONDARY, bg=Design.CARD_FILL,
-                     font=Design.FONT_UI, anchor='w').pack(fill=tk.X)
+            trow = tk.Frame(cb, bg=Design.CARD_FILL)
+            trow.pack(fill=tk.X)
+            if icon:
+                tk.Label(trow, text=icon, fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                         font=("Segoe UI Emoji", 10)).pack(side=tk.LEFT, padx=(0, 4))
+            tk.Label(trow, text=title, fg=Design.TEXT_SECONDARY, bg=Design.CARD_FILL,
+                     font=Design.FONT_UI, anchor='w').pack(side=tk.LEFT)
             tk.Label(cb, text=value, fg=Design.TEXT_PRIMARY, bg=Design.CARD_FILL,
-                     font=Design.FONT_INSIGHT_VALUE, anchor='w').pack(fill=tk.X, pady=(2, 0))
+                     font=value_font or Design.FONT_INSIGHT_VALUE,
+                     anchor='w').pack(fill=tk.X, pady=(2, 0))
             tk.Label(cb, text=sub, fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
                      font=Design.FONT_UI_SMALL, anchor='w').pack(fill=tk.X)
 
         def render_range():
-            for w in body.winfo_children():
+            for w in ins_body.winfo_children():
                 w.destroy()
             key = range_state["key"]
             for k, b in seg_btns.items():
@@ -478,14 +701,12 @@ class InsightsWindowsMixin:
                     for i in range(days, days * 2))
 
             # ---- Hero：范围总量 + 环比 + 面积走势 + 日均/峰值/历史总量 ----
-            hero_row = tk.Frame(body, bg=Design.BACKGROUND)
+            # 原型图里「预计本月消耗」内联在 Hero 卡右上角，不再是独立卡片
+            hero_row = tk.Frame(ins_body, bg=Design.BACKGROUND)
             hero_row.pack(fill=tk.X)
-            hero_row.grid_columnconfigure(0, weight=3)
-            hero_row.grid_columnconfigure(1, weight=1)
+            hero_row.grid_columnconfigure(0, weight=1)
             hero, hero_body = rounded_card(hero_row, padx=16, pady=14)
             hero.grid(row=0, column=0, sticky="nsew", padx=(6, 6), pady=4)
-            pred, pred_body = rounded_card(hero_row, padx=16, pady=14)
-            pred.grid(row=0, column=1, sticky="nsew", padx=(0, 6), pady=4)
 
             hrow = tk.Frame(hero_body, bg=Design.CARD_FILL)
             hrow.pack(fill=tk.X)
@@ -500,7 +721,21 @@ class InsightsWindowsMixin:
                 else:
                     badge_txt, badge_color = "▼ %.0f%%" % -pct, Design.SUCCESS
                 tk.Label(hrow, text=badge_txt, fg=badge_color, bg=Design.CARD_FILL,
-                         font=Design.FONT_UI_SMALL).pack(side=tk.RIGHT)
+                         font=Design.FONT_UI_SMALL).pack(side=tk.LEFT, padx=(8, 0))
+
+            ratio = (mtd / projected) if projected else 0.0
+            pred_block = tk.Frame(hrow, bg=Design.CARD_FILL)
+            pred_block.pack(side=tk.RIGHT)
+            tk.Label(pred_block, text=L("预计本月消耗"), fg=Design.TEXT_MUTED,
+                     bg=Design.CARD_FILL, font=Design.FONT_UI_TINY,
+                     anchor='e').pack(anchor='e')
+            tk.Label(pred_block, text=self.fmt_tokens(projected), fg=INS_GREEN,
+                     bg=Design.CARD_FILL, font=Design.FONT_VALUE,
+                     anchor='e').pack(anchor='e')
+            tk.Label(pred_block, text=L("已用 %s · %.0f%%") % (self.fmt_tokens(mtd),
+                                                            ratio * 100),
+                     fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                     font=Design.FONT_UI_TINY, anchor='e').pack(anchor='e')
 
             vrow = tk.Frame(hero_body, bg=Design.CARD_FILL)
             vrow.pack(fill=tk.X, pady=(2, 0))
@@ -533,27 +768,8 @@ class InsightsWindowsMixin:
                 tk.Label(col, text=sub, fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
                          font=Design.FONT_UI_TINY, anchor='w').pack(anchor='w')
 
-            # ---- 右侧：预计本月消耗 ----
-            tk.Label(pred_body, text=L("预计本月消耗"), fg=Design.TEXT_SECONDARY,
-                     bg=Design.CARD_FILL, font=Design.FONT_UI, anchor='w').pack(fill=tk.X)
-            tk.Label(pred_body, text=self.fmt_tokens(projected), fg=INS_GREEN,
-                     bg=Design.CARD_FILL, font=Design.FONT_INSIGHT_VALUE,
-                     anchor='w').pack(fill=tk.X, pady=(2, 0))
-            ratio = (mtd / projected) if projected else 0.0
-            flat_canvas(pred_body, height=6, ratio=ratio)
-            prow = tk.Frame(pred_body, bg=Design.CARD_FILL)
-            prow.pack(fill=tk.X)
-            tk.Label(prow, text=L("本月已用 ") + self.fmt_tokens(mtd),
-                     fg=Design.TEXT_SECONDARY, bg=Design.CARD_FILL,
-                     font=Design.FONT_MONO_TINY).pack(side=tk.LEFT)
-            tk.Label(prow, text="%.0f%%" % (ratio * 100), fg=Design.TEXT_MUTED,
-                     bg=Design.CARD_FILL, font=Design.FONT_MONO_TINY).pack(side=tk.RIGHT)
-            tk.Label(pred_body, text=L("按当前速率 · 本月 %d 天") % month_days,
-                     fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
-                     font=Design.FONT_UI_TINY, anchor='w').pack(fill=tk.X, pady=(4, 0))
-
             # ---- 四张指标卡：连续使用 / 今日会话 / 最活跃时段 / 主力模型 ----
-            cards_row = tk.Frame(body, bg=Design.BACKGROUND)
+            cards_row = tk.Frame(ins_body, bg=Design.BACKGROUND)
             cards_row.pack(fill=tk.X, pady=(4, 0))
             for i in range(4):
                 cards_row.grid_columnconfigure(i, weight=1, uniform="ins")
@@ -562,18 +778,23 @@ class InsightsWindowsMixin:
             if peak_hour_map:
                 h = max(peak_hour_map.items(), key=lambda kv: kv[1])[0]
                 hour_txt = "%02d:00 – %02d:00" % (h, (h + 1) % 24)
-            last30 = zero_filled(30)
-            total30 = sum(v for _, v in last30) or 1
-            top_share = (top[1] / total30 * 100) if top else 0.0
-            metric_card(cards_row, 0, L("连续使用"), L("%d 天") % streak, L("当前连续"))
+            share_base = total_all or 1
+            top_share = (top[1] / share_base * 100) if top else 0.0
+            top_name = top[0] if top else "-"
+            if len(top_name) > 12:
+                top_name = top_name[:12] + "…"
+            metric_card(cards_row, 0, L("连续使用"), L("%d 天") % streak, L("当前连续"),
+                        icon="🔥")
             metric_card(cards_row, 1, L("今日会话"), L("%d 个") % session_count,
-                        L("平均 %d 分钟 · 最长 %d 分钟") % (session_avg, session_longest))
-            metric_card(cards_row, 2, L("最活跃时段"), hour_txt, L("近 30 天"))
-            metric_card(cards_row, 3, L("主力模型"),
-                        self.fmt_tokens(top[1]) if top else "-",
-                        (L("占 %.0f%%") % top_share) if top else L("暂无数据"))
+                        L("平均 %d 分钟 · 最长 %d 分钟") % (session_avg, session_longest),
+                        icon="▤")
+            metric_card(cards_row, 2, L("最活跃时段"), hour_txt, L("近 30 天"), icon="◷")
+            metric_card(cards_row, 3, L("主力模型"), top_name,
+                        (self.fmt_tokens(top[1]) + " · " + L("占 %.0f%%") % top_share)
+                        if top else L("暂无数据"),
+                        value_font=("Microsoft YaHei UI", 13, "bold"), icon="◆")
 
-            # ---- 星期分布 ----
+            # ---- 星期分布：近 91 天按星期几求日均 ----
             wd_sum = [0] * 7
             wd_cnt = [0] * 7
             for i in range(91):
@@ -588,29 +809,54 @@ class InsightsWindowsMixin:
             workday_avg = int(sum(wd_avg[:5]) / 5)
             weekend_avg = int(sum(wd_avg[5:]) / 2)
 
-            wsec = tk.Frame(body, bg=Design.BACKGROUND)
-            wsec.pack(fill=tk.X, padx=6, pady=(10, 0))
-            tk.Label(wsec, text=L("星期分布"), fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+            # ---- 星期分布 + 近 90 天热力图：并排两栏（与 mac 原型一致） ----
+            duo = tk.Frame(ins_body, bg=Design.BACKGROUND)
+            duo.pack(fill=tk.X, padx=6, pady=(10, 0))
+            duo.grid_columnconfigure(0, weight=1, uniform="duo")
+            duo.grid_columnconfigure(1, weight=1, uniform="duo")
+            duo.grid_rowconfigure(0, weight=1)
+
+            # 左：星期分布（七根柱，柱顶数值 + 全星期标签）
+            wsec = tk.Frame(duo, bg=Design.BACKGROUND)
+            wsec.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+            whead = tk.Frame(wsec, bg=Design.BACKGROUND)
+            whead.pack(fill=tk.X)
+            tk.Label(whead, text=L("星期分布"), fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
                      font=Design.FONT_CARD_TITLE, anchor='w').pack(side=tk.LEFT)
-            tk.Label(wsec, text=(L("近 90 天均值") + " " + self.fmt_tokens(wd_overall) + L("/天")),
+            tk.Label(whead, text=(L("近 90 天均值") + " " + self.fmt_tokens(wd_overall) + L("/天")),
                      fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
                      font=Design.FONT_UI_SMALL).pack(side=tk.RIGHT)
 
-            wcard, wbody = rounded_card(body, padx=14, pady=10)
-            wcard.pack(fill=tk.X, padx=16, pady=(4, 0))
+            wcard, wbody = rounded_card(wsec, padx=14, pady=10)
+            wcard.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
             if not any(wd_sum):
                 tk.Label(wbody, text=L("暂无数据"), fg=Design.TEXT_MUTED,
                          bg=Design.CARD_FILL, font=Design.FONT_UI_SMALL).pack(anchor='w')
             else:
-                wd_series = [(wd_labels[i], {wd_labels[i]: int(wd_avg[i])}) for i in range(7)]
-                wd_colors = {}
-                for i in range(7):
-                    wd_colors[wd_labels[i]] = INS_GREEN if i < 5 else blend(INS_GREEN, Design.CARD_FILL, 0.45)
-                wimg = self._bar_chart_png(wd_series, wd_colors, width=680, height=132)
-                wphoto = ImageTk.PhotoImage(wimg)
-                wlbl = tk.Label(wbody, image=wphoto, bg=Design.CARD_FILL, bd=0)
-                wlbl.image = wphoto
-                wlbl.pack(fill=tk.X)
+                wchart = tk.Canvas(wbody, height=132, bg=Design.CARD_FILL,
+                                   highlightthickness=0)
+                wchart.pack(fill=tk.X)
+                wd_max = max(wd_avg) or 1
+
+                def draw_weekday(_event=None, cv=wchart):
+                    cv.delete("all")
+                    width = max(cv.winfo_width(), 1)
+                    slot = width / 7.0
+                    bar_w = max(min(slot * 0.52, 24), 6)
+                    top_y, base_y = 24, 110
+                    for i in range(7):
+                        cx = slot * (i + 0.5)
+                        value = wd_avg[i]
+                        bar_h = max((value / wd_max) * (base_y - top_y), 2)
+                        color = INS_GREEN if i < 5 else blend(INS_GREEN, Design.CARD_FILL, 0.45)
+                        cv.create_text(cx, 10, text=self.fmt_tokens(int(value)),
+                                       fill=Design.TEXT_MUTED, font=Design.FONT_UI_TINY)
+                        ChartCanvas.round_rect(cv, cx - bar_w / 2, base_y - bar_h,
+                                               cx + bar_w / 2, base_y, 3, fill=color)
+                        cv.create_text(cx, base_y + 11, text=wd_labels[i],
+                                       fill=Design.TEXT_MUTED, font=Design.FONT_UI_TINY)
+
+                wchart.bind("<Configure>", draw_weekday)
                 wfoot = tk.Frame(wbody, bg=Design.CARD_FILL)
                 wfoot.pack(fill=tk.X, pady=(4, 0))
                 tk.Label(wfoot, text=L("工作日日均") + " " + self.fmt_tokens(workday_avg),
@@ -620,12 +866,15 @@ class InsightsWindowsMixin:
                          fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
                          font=Design.FONT_MONO_TINY).pack(side=tk.RIGHT)
 
-            # ---- 近 90 天热力图（绿色色阶） ----
-            hsec = tk.Frame(body, bg=Design.BACKGROUND)
-            hsec.pack(fill=tk.X, padx=6, pady=(10, 0))
-            tk.Label(hsec, text=L("近 90 天用量热力图"), fg=Design.TEXT_PRIMARY,
-                     bg=Design.BACKGROUND, font=Design.FONT_CARD_TITLE, anchor='w').pack(side=tk.LEFT)
-            lg = tk.Canvas(hsec, width=92, height=14, bg=Design.BACKGROUND, highlightthickness=0)
+            # 右：近 90 天热力图（绿色色阶）
+            hsec = tk.Frame(duo, bg=Design.BACKGROUND)
+            hsec.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+            hhead = tk.Frame(hsec, bg=Design.BACKGROUND)
+            hhead.pack(fill=tk.X)
+            tk.Label(hhead, text=L("近 90 天用量热力图"), fg=Design.TEXT_PRIMARY,
+                     bg=Design.BACKGROUND, font=Design.FONT_CARD_TITLE,
+                     anchor='w').pack(side=tk.LEFT)
+            lg = tk.Canvas(hhead, width=92, height=14, bg=Design.BACKGROUND, highlightthickness=0)
             lg.pack(side=tk.RIGHT)
             lg.create_text(0, 7, text=L("少"), fill=Design.TEXT_MUTED,
                            font=Design.FONT_UI_TINY, anchor='w')
@@ -635,8 +884,8 @@ class InsightsWindowsMixin:
             lg.create_text(72, 7, text=L("多"), fill=Design.TEXT_MUTED,
                            font=Design.FONT_UI_TINY, anchor='w')
 
-            heat_card, heat_body = rounded_card(body, padx=14, pady=10)
-            heat_card.pack(fill=tk.X, padx=16, pady=(4, 0))
+            heat_card, heat_body = rounded_card(hsec, padx=14, pady=10)
+            heat_card.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
             start_day = day_zero - timedelta(days=90)
             pad = start_day.weekday()
             cells = [("", -1)] * pad
@@ -661,7 +910,8 @@ class InsightsWindowsMixin:
             def make_enter(date_text, token, cx, cy):
                 def enter(_event=None):
                     tip.configure(text="%s · %s" % (date_text, self.fmt_tokens(token)))
-                    tip.place(x=min(cx + 12, max(canvas_w - 160, 12)), y=max(cy - 26, 2))
+                    tip.place(x=min(cx + 12, max(heat.winfo_width() - 160, 12)),
+                              y=max(cy - 26, 2))
                 return enter
 
             for row, name in ((0, L("一")), (2, L("三")), (4, L("五"))):
@@ -733,7 +983,7 @@ class InsightsWindowsMixin:
                 render_chronicle(force=True)
                 messagebox.showinfo(L("合并完成"), L("已改写 %d 行明细") % changed)
 
-            csec = tk.Frame(body, bg=Design.BACKGROUND)
+            csec = tk.Frame(ins_body, bg=Design.BACKGROUND)
             csec.pack(fill=tk.X, padx=6, pady=(10, 0))
             tk.Label(csec, text=L("模型编年史"), fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
                      font=Design.FONT_CARD_TITLE, anchor='w').pack(side=tk.LEFT)
@@ -741,7 +991,7 @@ class InsightsWindowsMixin:
                                  font=Design.FONT_UI_SMALL)
             cmeta_lbl.pack(side=tk.LEFT, padx=(8, 0))
 
-            chron_card, chron_body = rounded_card(body, padx=14, pady=10)
+            chron_card, chron_body = rounded_card(ins_body, padx=14, pady=10)
             chron_card.pack(fill=tk.X, padx=16, pady=(4, 0))
             chron_wrap = tk.Frame(chron_body, bg=Design.CARD_FILL)
             chron_wrap.pack(fill=tk.X)
@@ -784,7 +1034,7 @@ class InsightsWindowsMixin:
                         if marker.timestamp() > max_epoch:
                             break
                         x = (marker.timestamp() - min_epoch) / span * w
-                        cv.create_text(x, 8, text=marker.strftime("%m 月"),
+                        cv.create_text(x, 8, text=L("%d 月") % marker.month,
                                        fill=Design.TEXT_MUTED, font=Design.FONT_UI_TINY,
                                        anchor='w')
                         cur = marker
@@ -845,13 +1095,23 @@ class InsightsWindowsMixin:
                 ins_wheel(chron_wrap)
 
             render_chronicle()
-            ins_wheel(body)
+            ins_wheel(ins_body)
 
         render_range()
 
         # ============ 分享 ============
         f_share = tab(L("分享"))
         share_page, share_wheel = scroll_page(f_share)
+
+        share_head = tk.Frame(share_page, bg=Design.BACKGROUND)
+        share_head.pack(fill=tk.X, padx=18, pady=(10, 2))
+        share_log = tk.Frame(share_head, bg=Design.BACKGROUND)
+        share_log.pack(side=tk.LEFT)
+        tk.Label(share_log, text=L("分享"), fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+                 font=("Microsoft YaHei UI", 16, "bold"), anchor='w').pack(anchor='w')
+        tk.Label(share_log, text=L("把战报卡与周报导出成图片"), fg=Design.TEXT_MUTED,
+                 bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL,
+                 anchor='w').pack(anchor='w')
 
         def save_card_image(factory, prefix):
             from tkinter import filedialog, messagebox
@@ -939,88 +1199,325 @@ class InsightsWindowsMixin:
         # ============ 渠道 ============
         f_ch = tab(L("渠道"))
         ch_page, ch_wheel = scroll_page(f_ch)
-        section(ch_page, L("近 30 天渠道用量（堆叠）"))
-        # 按显示名归并：cc-switch-rollup 是 cc-switch 的历史聚合源，
-        # 直接按 source 分键会拆成两条都叫「cc-switch」的序列。
-        by_date = {}
-        for d, src, tok in channels:
-            name = store.source_display_name(src)
-            by_date.setdefault(d, {}).setdefault(name, 0)
-            by_date[d][name] += tok
-        src_names = sorted({n for v in by_date.values() for n in v})
-        src_colors = {"cc-switch": "#4A90E2", "ZCode": "#34C759", "Trae": "#AF52DE"}
-        # 兜底色按序号取；hash() 随 PYTHONHASHSEED 变，不能拿来定颜色
-        palette = {n: src_colors.get(n, Design.MODEL_COLORS[i % len(Design.MODEL_COLORS)])
-                   for i, n in enumerate(src_names)}
-        ch_series = [(d[5:], by_date[d]) for d in sorted(by_date)]
-        png_label(ch_page, self._bar_chart_png(ch_series, palette))
+        ch_body = tk.Frame(ch_page, bg=Design.BACKGROUND)
+        ch_body.pack(fill=tk.X)
 
-        section(ch_page, L("今日各渠道"))
-        today_str = datetime.now().strftime("%Y-%m-%d")
-        today_map = {}
-        for r in channels:
-            if r[0] == today_str:
-                n = store.source_display_name(r[1])
-                today_map[n] = today_map.get(n, 0) + r[2]
-        if not today_map:
-            muted(ch_page, L("暂无数据"))
-        for name, tok in sorted(today_map.items(), key=lambda x: -x[1]):
-            row = tk.Frame(ch_page, bg=Design.BACKGROUND)
-            row.pack(fill=tk.X, padx=20)
-            tk.Label(row, text=f"● {name}", fg=Design.BRAND,
-                     bg=Design.BACKGROUND, font=("Microsoft YaHei UI", 10, "bold")).pack(side=tk.LEFT)
-            tk.Label(row, text=self.fmt_tokens(tok), fg=Design.DATA, bg=Design.BACKGROUND,
-                     font=Design.FONT_MONO_SMALL).pack(side=tk.RIGHT)
+        ch_head = tk.Frame(ch_body, bg=Design.BACKGROUND)
+        ch_head.pack(fill=tk.X, padx=18, pady=(10, 2))
+        chlog = tk.Frame(ch_head, bg=Design.BACKGROUND)
+        chlog.pack(side=tk.LEFT)
+        tk.Label(chlog, text=L("渠道"), fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+                 font=("Microsoft YaHei UI", 16, "bold"), anchor='w').pack(anchor='w')
+        tk.Label(chlog, text=L("渠道 = 接入方式 · 应用 = 实际使用的工具"),
+                 fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
+                 font=Design.FONT_UI_SMALL, anchor='w').pack(anchor='w')
 
-        section(ch_page, L("近 30 天应用分布（堆叠）"))
-        app_names = ["Claude Code", "Codex", "OpenCode", "ZCode"]
-        app_map = {"claude": "Claude Code", "claude-desktop": "Claude Desktop", "codex": "Codex",
-                   "opencode": "OpenCode", "zcode": "ZCode", "unknown": L("未知")}
+        ch_state = {"days": 30, "mode": "channel"}
 
-        def app_name(raw):
-            return app_map.get(raw, raw)
+        def on_ch_range(days):
+            ch_state["days"] = days
+            render_channels()
 
-        app_palette = {"Claude Code": "#4A90E2", "OpenCode": "#34C759", "ZCode": "#FF9500"}
-        app_by_date = {}
-        for d, raw, tok in apps:
-            name = app_name(raw)
-            app_by_date.setdefault(d, {}).setdefault(name, 0)
-            app_by_date[d][name] += tok
-        used_names = [n for n in app_names if any(n in v for v in app_by_date.values())]
-        app_palette = {n: c for n, c in app_palette.items() if n in used_names}
-        for i, n in enumerate(used_names):
-            app_palette.setdefault(n, Design.MODEL_COLORS[i % len(Design.MODEL_COLORS)])
-        app_series = [(d[5:], app_by_date[d]) for d in sorted(app_by_date)]
-        png_label(ch_page, self._bar_chart_png(app_series, app_palette))
+        ch_pills, _ch_set = range_pills(
+            ch_head, [(7, L("7 天")), (30, L("30 天")), (90, L("90 天"))],
+            30, on_ch_range)
+        ch_pills.pack(side=tk.RIGHT)
 
-        section(ch_page, L("近 30 天 Token 构成"))
-        comp_palette = {L("输入"): "#4A90E2", L("输出"): "#34C759", L("缓存读"): "#FF9500", L("缓存创建"): "#AF52DE"}
-        comp_series = [(d, {L("输入"): i, L("输出"): o, L("缓存读"): cr, L("缓存创建"): cc})
-                       for d, i, o, cr, cc in comp]
-        png_label(ch_page, self._bar_chart_png(comp_series, comp_palette))
+        ch_area = tk.Frame(ch_body, bg=Design.BACKGROUND)
+        ch_area.pack(fill=tk.X, padx=10, pady=(4, 10))
 
-        section(ch_page, L("缓存命中率（近 30 天）"))
-        hit_pts = [(d, cr / max(i + o + cr + cc, 1) * 100) for d, i, o, cr, cc in comp]
-        png_label(ch_page, self._line_chart_png(hit_pts, Design.BRAND, suffix="%"))
+        CH_COLORS = {"Trae": "#34C759", "ZCode": "#22A85A", "cc-switch": "#167A41"}
+
+        def ch_color(name, idx):
+            return CH_COLORS.get(name, Design.MODEL_COLORS[idx % len(Design.MODEL_COLORS)])
+
+        def pct_bar(parent, items, height=12):
+            """横向百分比构成条：items=[(名称, 占比 0..1, 颜色)]"""
+            c = tk.Canvas(parent, height=height, bg=Design.CARD_FILL, highlightthickness=0)
+            c.pack(fill=tk.X, pady=(8, 4))
+
+            def draw(event, cv=c):
+                cv.delete("all")
+                w = max(event.width, 1)
+                x = 0.0
+                for i, (_n, ratio, color) in enumerate(items):
+                    seg = w * ratio if i < len(items) - 1 else w - x
+                    seg = max(seg, 1.5)
+                    ChartCanvas.round_rect(cv, x, 0, x + seg, height, height / 2, fill=color)
+                    x += seg
+                if x < w:
+                    ChartCanvas.round_rect(cv, x, 0, w, height, height / 2,
+                                           fill=Design.BTN_BG)
+            c.bind("<Configure>", draw)
+            return c
+
+        def render_channels():
+            for w in ch_area.winfo_children():
+                w.destroy()
+            days = ch_state["days"]
+            cutoff = (datetime.now() - timedelta(days=days - 1)).strftime("%Y-%m-%d")
+            ch_rows = [r for r in channels90 if r[0] >= cutoff]
+            app_rows = [r for r in apps90 if r[0] >= cutoff]
+            comp_rows = [r for r in comp90 if r[0] >= cutoff]
+
+            # ---- 今日渠道构成 ----
+            tcard, tbody = rounded_card(ch_area, padx=16, pady=12)
+            tcard.pack(fill=tk.X, padx=6, pady=4)
+            thead = tk.Frame(tbody, bg=Design.CARD_FILL)
+            thead.pack(fill=tk.X)
+            tk.Label(thead, text=L("今日渠道构成"), fg=Design.TEXT_PRIMARY,
+                     bg=Design.CARD_FILL, font=Design.FONT_CARD_TITLE).pack(side=tk.LEFT)
+            req_total = sum(r[1] for r in channel_today)
+            tok_total = sum(r[2] for r in channel_today)
+            tk.Label(thead, text=L("%d 次请求 · %s tokens") % (req_total, self.fmt_tokens(tok_total)),
+                     fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                     font=Design.FONT_UI_SMALL).pack(side=tk.RIGHT)
+            if not channel_today or tok_total <= 0:
+                tk.Label(tbody, text=L("暂无数据"), fg=Design.TEXT_MUTED,
+                         bg=Design.CARD_FILL, font=Design.FONT_UI_SMALL).pack(anchor='w', pady=(8, 0))
+            else:
+                names = [store.source_display_name(r[0]) for r in channel_today]
+                colors = {n: ch_color(n, i) for i, n in enumerate(names)}
+                pct_bar(tbody, [(n, r[2] / tok_total, colors[n])
+                                for n, r in zip(names, channel_today)])
+                for n, r in zip(names, channel_today):
+                    row = tk.Frame(tbody, bg=Design.CARD_FILL)
+                    row.pack(fill=tk.X, pady=2)
+                    tk.Label(row, text="● " + n, fg=colors[n], bg=Design.CARD_FILL,
+                             font=Design.FONT_UI).pack(side=tk.LEFT)
+                    tk.Label(row, text=L("%d 次") % r[1], fg=Design.TEXT_MUTED,
+                             bg=Design.CARD_FILL,
+                             font=Design.FONT_UI_SMALL).pack(side=tk.LEFT, padx=(8, 0))
+                    tk.Label(row, text="%.0f%%" % (r[2] / tok_total * 100), fg=Design.SUCCESS,
+                             bg=Design.CARD_FILL, font=Design.FONT_MONO_SMALL).pack(side=tk.RIGHT)
+                    tk.Label(row, text=self.fmt_tokens(r[2]), fg=Design.TEXT_SECONDARY,
+                             bg=Design.CARD_FILL, font=Design.FONT_MONO_SMALL).pack(
+                        side=tk.RIGHT, padx=(0, 10))
+
+            # ---- 构成变化（按渠道 / 按应用）----
+            ccard, cbody = rounded_card(ch_area, padx=16, pady=12)
+            ccard.pack(fill=tk.X, padx=6, pady=(10, 4))
+            chead = tk.Frame(cbody, bg=Design.CARD_FILL)
+            chead.pack(fill=tk.X)
+            tk.Label(chead, text=L("近 %d 天构成变化") % days, fg=Design.TEXT_PRIMARY,
+                     bg=Design.CARD_FILL, font=Design.FONT_CARD_TITLE).pack(side=tk.LEFT)
+            toggle_body = tk.Frame(chead, bg=Design.BTN_BG)
+            toggle_body.pack(side=tk.RIGHT)
+            mode_btns = {}
+
+            def set_mode(mode):
+                ch_state["mode"] = mode
+                for k, b in mode_btns.items():
+                    sel = k == mode
+                    b.configure(bg=Design.CARD_FILL if sel else Design.BTN_BG,
+                                fg=Design.TEXT_PRIMARY if sel else Design.TEXT_MUTED)
+                render_channels()
+
+            for mode, label in (("channel", L("按渠道")), ("app", L("按应用"))):
+                b = tk.Button(toggle_body, text=label, bd=0, relief=tk.FLAT, cursor="hand2",
+                              bg=Design.BTN_BG, fg=Design.TEXT_MUTED,
+                              activebackground=Design.BTN_BG_HOVER,
+                              activeforeground=Design.TEXT_PRIMARY,
+                              font=Design.FONT_UI_SMALL, padx=8, pady=1,
+                              command=lambda m=mode: set_mode(m))
+                b.pack(side=tk.LEFT)
+                mode_btns[mode] = b
+
+            if ch_state["mode"] == "channel":
+                src_rows = ch_rows
+                key_fn = lambda r: store.source_display_name(r[1])
+                raw_names = [key_fn(r) for r in src_rows]
+            else:
+                src_rows = app_rows
+                app_map = {"claude": "Claude Code", "claude-desktop": "Claude Desktop",
+                           "codex": "Codex", "opencode": "OpenCode", "zcode": "ZCode",
+                           "unknown": L("未知")}
+                key_fn = lambda r: app_map.get(r[1], r[1])
+                raw_names = [key_fn(r) for r in src_rows]
+            used = [n for n in sorted(set(raw_names),
+                                       key=lambda n: sum(r[2] for r in src_rows if key_fn(r) == n),
+                                       reverse=True)
+                    if sum(r[2] for r in src_rows if key_fn(r) == n) > 0]
+            col_map = {n: ch_color(n, i) for i, n in enumerate(used)}
+            by_day = {}
+            for r in src_rows:
+                by_day.setdefault(r[0], {}).setdefault(key_fn(r), 0)
+                by_day[r[0]][key_fn(r)] += r[2]
+            series = []
+            for d in sorted(by_day):
+                try:
+                    label = L("%d月%d日") % (int(d[5:7]), int(d[8:10]))
+                except (TypeError, ValueError):
+                    label = d
+                series.append((label, by_day[d]))
+            totals = {n: sum(vals.get(n, 0) for _l, vals in series) for n in used}
+            grand = sum(totals.values()) or 1
+            legend = tk.Frame(cbody, bg=Design.CARD_FILL)
+            legend.pack(fill=tk.X, pady=(6, 2))
+            for n in used[:4]:
+                tk.Label(legend, text="● " + n, fg=col_map[n], bg=Design.CARD_FILL,
+                         font=Design.FONT_UI_SMALL).pack(side=tk.LEFT)
+                tk.Label(legend, text="%.0f%%" % (totals[n] / grand * 100),
+                         fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                         font=Design.FONT_UI_SMALL).pack(side=tk.LEFT, padx=(4, 12))
+            # 切换标注：最大份额单日跃变的位置
+            marker = None
+            if len(series) >= 2 and used:
+                top_name = used[0]
+                best_jump, best_i = -1.0, 1
+                for i in range(1, len(series)):
+                    prev = series[i - 1][1]
+                    cur = series[i][1]
+                    p = prev.get(top_name, 0) / (sum(prev.values()) or 1)
+                    c = cur.get(top_name, 0) / (sum(cur.values()) or 1)
+                    if abs(c - p) > best_jump:
+                        best_jump, best_i = abs(c - p), i
+                if best_jump > 0.2:
+                    day_text = sorted(by_day)[best_i]
+                    marker = (best_i, L("%d月%d日 切换 %s") % (
+                        int(day_text[5:7]), int(day_text[8:10]), top_name))
+            png_label(cbody, self._stacked_area_png(series, col_map, marker=marker),
+                      padx=0, pady=(4, 2))
+            first_share = (series[0][1].get(used[0], 0) / (sum(series[0][1].values()) or 1)
+                           if series and used else 0)
+            last_share = (series[-1][1].get(used[0], 0) / (sum(series[-1][1].values()) or 1)
+                          if series and used else 0)
+            tk.Label(cbody,
+                     text=L("百分比堆叠：纵轴是构成比例，不是用量。%s 占比从 %.0f%% 变为 %.0f%%。")
+                          % (used[0], first_share * 100, last_share * 100) if used
+                          else L("暂无数据"),
+                     fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                     font=Design.FONT_UI_SMALL, anchor='w', justify=tk.LEFT,
+                     wraplength=620).pack(fill=tk.X, pady=(6, 0))
+
+            # ---- 底部：Token 构成 + 缓存收益 ----
+            bottom = tk.Frame(ch_area, bg=Design.BACKGROUND)
+            bottom.pack(fill=tk.X, padx=6, pady=(10, 0))
+            bottom.grid_columnconfigure(0, weight=1, uniform="chbot")
+            bottom.grid_columnconfigure(1, weight=1, uniform="chbot")
+
+            tok = [sum(r[1] for r in comp_rows), sum(r[2] for r in comp_rows),
+                   sum(r[3] for r in comp_rows), sum(r[4] for r in comp_rows)]
+            # 顺序：缓存读 / 输入 / 输出 / 缓存创建（与原型图一致）
+            items = [(L("缓存读"), tok[2], "#34C759"), (L("输入"), tok[0], "#5AC8FA"),
+                     (L("输出"), tok[1], "#FFD60A"), (L("缓存创建"), tok[3], "#8E8E93")]
+            tok_total2 = sum(tok) or 1
+            t2card, t2body = rounded_card(bottom, padx=14, pady=12)
+            t2card.grid(row=0, column=0, sticky="nsew", padx=6, pady=4)
+            t2head = tk.Frame(t2body, bg=Design.CARD_FILL)
+            t2head.pack(fill=tk.X)
+            tk.Label(t2head, text=L("Token 构成"), fg=Design.TEXT_PRIMARY,
+                     bg=Design.CARD_FILL, font=Design.FONT_CARD_TITLE).pack(side=tk.LEFT)
+            tk.Label(t2head, text=L("近 %d 天 · %s") % (days, self.fmt_tokens(tok_total2)),
+                     fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                     font=Design.FONT_UI_SMALL).pack(side=tk.RIGHT)
+            pct_bar(t2body, [(n, v / tok_total2, c) for n, v, c in items])
+            grid = tk.Frame(t2body, bg=Design.CARD_FILL)
+            grid.pack(fill=tk.X)
+            grid.grid_columnconfigure(0, weight=1, uniform="tok")
+            grid.grid_columnconfigure(1, weight=1, uniform="tok")
+            for i, (n, v, c) in enumerate(items):
+                cell = tk.Frame(grid, bg=Design.CARD_FILL)
+                cell.grid(row=i // 2, column=i % 2, sticky="w", pady=2)
+                tk.Label(cell, text="● " + n, fg=c, bg=Design.CARD_FILL,
+                         font=Design.FONT_UI_SMALL).pack(side=tk.LEFT)
+                tk.Label(cell, text="%.0f%%" % (v / tok_total2 * 100), fg=Design.TEXT_PRIMARY,
+                         bg=Design.CARD_FILL, font=Design.FONT_MONO_SMALL).pack(side=tk.RIGHT)
+
+            # 缓存收益：缓存读按输入价 1/10 计，省下 90% 的输入成本
+            scard, sbody = rounded_card(bottom, padx=14, pady=12)
+            scard.grid(row=0, column=1, sticky="nsew", padx=6, pady=4)
+            tk.Label(sbody, text=L("缓存收益"), fg=Design.TEXT_PRIMARY, bg=Design.CARD_FILL,
+                     font=Design.FONT_CARD_TITLE, anchor='w').pack(fill=tk.X)
+            cost_sel = sum(c for d, c in cost_daily90 if d >= cutoff)
+            cached = tok[2]
+            if price > 0 and cached > 0:
+                saved = cached / 1_000_000 * price * 0.9
+                srow = tk.Frame(sbody, bg=Design.CARD_FILL)
+                srow.pack(fill=tk.X, pady=(4, 0))
+                tk.Label(srow, text="$%.0f" % saved, fg=Design.SUCCESS, bg=Design.CARD_FILL,
+                         font=("Microsoft YaHei UI", 20, "bold")).pack(side=tk.LEFT)
+                tk.Label(srow, text=L("本月估算省下"), fg=Design.TEXT_MUTED,
+                         bg=Design.CARD_FILL, font=Design.FONT_UI_SMALL).pack(
+                    side=tk.LEFT, padx=(6, 0))
+                hit = cached / tok_total2 * 100
+                tk.Label(sbody,
+                         text=L("%.0f%% 的 token 命中缓存，按缓存读约为输入价 1/10 计。")
+                              % hit,
+                         fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                         font=Design.FONT_UI_SMALL, anchor='w', justify=tk.LEFT,
+                         wraplength=280).pack(fill=tk.X, pady=(6, 0))
+                no_cache = cost_sel + saved
+                ratio = saved / no_cache if no_cache > 0 else 0
+                tk.Frame(sbody, bg=Design.CARD_BORDER, height=1).pack(fill=tk.X, pady=(8, 6))
+                arow = tk.Frame(sbody, bg=Design.CARD_FILL)
+                arow.pack(fill=tk.X)
+                tk.Label(arow, text=L("实际 ") + money(cost_sel), fg=Design.TEXT_SECONDARY,
+                         bg=Design.CARD_FILL, font=Design.FONT_UI_SMALL).pack(side=tk.LEFT)
+                tk.Label(arow, text=L("省 %.0f%%") % (ratio * 100), fg=Design.SUCCESS,
+                         bg=Design.CARD_FILL, font=Design.FONT_MONO_SMALL).pack(side=tk.RIGHT)
+                share_bar(sbody, ratio, Design.SUCCESS)
+            else:
+                tk.Label(sbody, text=L("在设置里填写默认单价后估算缓存收益"),
+                         fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                         font=Design.FONT_UI_SMALL, anchor='w', justify=tk.LEFT,
+                         wraplength=280).pack(fill=tk.X, pady=(8, 0))
+
+        render_channels()
         ch_wheel(ch_page)
 
         # ============ 流水 ============
         f_tl = tab(L("流水"))
-        cols = (L("时间"), L("渠道"), L("模型"), "Token", L("费用"))
-        tree = ttk.Treeview(f_tl, columns=cols, show="headings", height=19, style="Insights.Treeview")
-        widths = (90, 90, 220, 110, 90)
-        for c, w in zip(cols, widths):
-            tree.heading(c, text=c)
-            tree.column(c, width=w, anchor='w' if c in (L("渠道"), L("模型")) else 'e')
-        vsb = ttk.Scrollbar(f_tl, orient=tk.VERTICAL, command=tree.yview)
-        tree.configure(yscrollcommand=vsb.set)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 8), pady=10)
-        tree.pack(fill=tk.BOTH, expand=True, padx=(12, 0), pady=(6, 10))
+
+        tl_head = tk.Frame(f_tl, bg=Design.BACKGROUND)
+        tl_head.pack(fill=tk.X, padx=18, pady=(10, 2))
+        tl_title = tk.Frame(tl_head, bg=Design.BACKGROUND)
+        tl_title.pack(side=tk.LEFT)
+        tk.Label(tl_title, text=L("流水"), fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+                 font=("Microsoft YaHei UI", 16, "bold"), anchor='w').pack(anchor='w')
+        tk.Label(tl_title, text=L("按天回看每条请求 · 支持导出 CSV"), fg=Design.TEXT_MUTED,
+                 bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL,
+                 anchor='w').pack(anchor='w')
+
+        # 当日汇总三卡（请求数 / Token / 费用或积分）
+        tl_stats = tk.Frame(f_tl, bg=Design.BACKGROUND)
+        tl_stats.pack(fill=tk.X, padx=10, pady=(6, 2))
+        for _i in range(3):
+            tl_stats.grid_columnconfigure(_i, weight=1, uniform="tlstat")
+        tl_labels = {}
+        for _i, (_key, _title) in enumerate([("reqs", L("请求数")),
+                                             ("tokens", "Token"),
+                                             ("cost", L("费用"))]):
+            _card, _body = rounded_card(tl_stats, padx=14, pady=8)
+            _card.grid(row=0, column=_i, sticky="nsew", padx=6, pady=4)
+            tk.Label(_body, text=_title, fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                     font=Design.FONT_UI_SMALL, anchor='w').pack(fill=tk.X)
+            _lbl = tk.Label(_body, text="-", fg=Design.TEXT_PRIMARY, bg=Design.CARD_FILL,
+                            font=Design.FONT_TREND_VALUE, anchor='w')
+            _lbl.pack(fill=tk.X)
+            tl_labels[_key] = _lbl
 
         filter_bar = tk.Frame(f_tl, bg=Design.BACKGROUND)
         filter_bar.pack(fill=tk.X, padx=12, pady=(10, 0))
         tk.Label(filter_bar, text=L("筛选"), fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
                  font=Design.FONT_UI_SMALL).pack(side=tk.LEFT)
+
+        table_wrap = tk.Frame(f_tl, bg=Design.BACKGROUND)
+        table_wrap.pack(fill=tk.BOTH, expand=True, padx=10, pady=(6, 10))
+        table_card, table_body = rounded_card(table_wrap, padx=6, pady=6)
+        table_card.pack(fill=tk.BOTH, expand=True)
+
+        cols = (L("时间"), L("渠道"), L("模型"), "Token", L("费用"))
+        tree = ttk.Treeview(table_body, columns=cols, show="headings", height=16,
+                            style="Insights.Treeview")
+        widths = (90, 90, 220, 110, 90)
+        for c, w in zip(cols, widths):
+            tree.heading(c, text=c)
+            tree.column(c, width=w, anchor='w' if c in (L("渠道"), L("模型")) else 'e')
+        vsb = ttk.Scrollbar(table_body, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        tree.pack(fill=tk.BOTH, expand=True)
 
         tl_state = {"day": datetime.now().date(), "rows": []}
 
@@ -1121,6 +1618,18 @@ class InsightsWindowsMixin:
             src_box.set(L("全部渠道"))
             model_box.set(L("全部模型"))
             refill()
+            rows = tl_state["rows"]
+            tl_labels["reqs"].configure(text=str(len(rows)))
+            tl_labels["tokens"].configure(
+                text=self.fmt_tokens(sum(r[3] for r in rows)))
+            day_cost = sum(r[4] for r in rows)
+            day_credits = sum(r[5] for r in rows)
+            if day_cost > 0:
+                tl_labels["cost"].configure(text="$%.2f" % day_cost)
+            elif day_credits > 0:
+                tl_labels["cost"].configure(text=L("%s 积分") % self._fmt_credits(day_credits))
+            else:
+                tl_labels["cost"].configure(text="-")
 
         def set_day(day):
             tl_state["day"] = day
@@ -1163,70 +1672,255 @@ class InsightsWindowsMixin:
         # 顺序与 mac InsightsPage 枚举一致：费用 / 洞察 / 分享 / 渠道 / 流水 / 积分
         f_cred = tab(L("积分"))
         cred_page, cred_wheel = scroll_page(f_cred)
+        cred_body = tk.Frame(cred_page, bg=Design.BACKGROUND)
+        cred_body.pack(fill=tk.X)
 
-        cred_row = tk.Frame(cred_page, bg=Design.BACKGROUND)
-        cred_row.pack(fill=tk.X, padx=10, pady=(8, 0))
-        for i, (title, value) in enumerate([(L("今日积分"), credits_today),
-                                            (L("近 7 天"), credits7),
-                                            (L("近 30 天"), credits30)]):
-            card, body = rounded_card(cred_row, padx=16, pady=12)
-            card.grid(row=0, column=i, sticky="nsew", padx=6, pady=4)
-            cred_row.grid_columnconfigure(i, weight=1)
-            tk.Label(body, text=title, fg=semantic_color("secondary"), bg=Design.CARD_FILL,
-                     font=Design.FONT_UI, anchor='w').pack(fill=tk.X)
-            tk.Label(body, text=format_credits(value), fg=Design.BIG_NUMBER,
+        cred_head = tk.Frame(cred_body, bg=Design.BACKGROUND)
+        cred_head.pack(fill=tk.X, padx=18, pady=(10, 2))
+        crlog = tk.Frame(cred_head, bg=Design.BACKGROUND)
+        crlog.pack(side=tk.LEFT)
+        tk.Label(crlog, text=L("积分洞察"), fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+                 font=("Microsoft YaHei UI", 16, "bold"), anchor='w').pack(anchor='w')
+        tk.Label(crlog, text=L("按 Trae 官方计费口径 · 历史数据最多回溯 90 天"),
+                 fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
+                 font=Design.FONT_UI_SMALL, anchor='w').pack(anchor='w')
+
+        cred_state = {"days": 30}
+
+        def on_cred_range(days):
+            cred_state["days"] = days
+            render_credits()
+
+        cred_pills, _cr_set = range_pills(
+            cred_head, [(0, L("今日")), (7, L("7 天")), (30, L("30 天")),
+                        (90, L("90 天"))], 30, on_cred_range)
+        cred_pills.pack(side=tk.RIGHT)
+
+        cred_area = tk.Frame(cred_body, bg=Design.BACKGROUND)
+        cred_area.pack(fill=tk.X, padx=10, pady=(4, 10))
+
+        def render_credits():
+            for w in cred_area.winfo_children():
+                w.destroy()
+            cd = dict(credits_daily90)
+            today_str = datetime.now().strftime("%Y-%m-%d")
+
+            def sum_range(n, offset=0):
+                total = 0.0
+                for i in range(offset, offset + n):
+                    d = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
+                    total += cd.get(d, 0.0)
+                return total
+
+            def zero_days(n):
+                out = []
+                for i in range(n - 1, -1, -1):
+                    day = datetime.now() - timedelta(days=i)
+                    out.append(("%d/%d" % (day.month, day.day),
+                                cd.get(day.strftime("%Y-%m-%d"), 0.0)))
+                return out
+
+            def delta_badge(parent, cur, prev):
+                if not prev or prev <= 0:
+                    return
+                pct = (cur - prev) / prev * 100
+                tk.Label(parent, text="%s %.1f%%" % ("▲" if pct >= 0 else "▼", abs(pct)),
+                         fg=Design.SUCCESS if pct >= 0 else Design.WARNING,
+                         bg=Design.CARD_FILL, font=Design.FONT_UI_SMALL).pack(
+                    side=tk.RIGHT)
+
+            top_row = tk.Frame(cred_area, bg=Design.BACKGROUND)
+            top_row.pack(fill=tk.X, padx=6)
+            top_row.grid_columnconfigure(0, weight=3, uniform="credtop")
+            top_row.grid_columnconfigure(1, weight=2, uniform="credtop")
+
+            # ---- 左：今日积分 ----
+            hcard, hbody = rounded_card(top_row, padx=16, pady=14)
+            hcard.grid(row=0, column=0, sticky="nsew", padx=6, pady=4)
+            hhead = tk.Frame(hbody, bg=Design.CARD_FILL)
+            hhead.pack(fill=tk.X)
+            tk.Label(hhead, text=L("今日积分"), fg=Design.TEXT_SECONDARY,
+                     bg=Design.CARD_FILL, font=Design.FONT_UI).pack(side=tk.LEFT)
+            detail_btn = tk.Button(hhead, text=L("明细 ›"), bd=0, relief=tk.FLAT,
+                                   bg=Design.CARD_FILL, fg=Design.TEXT_MUTED,
+                                   activebackground=Design.CARD_FILL,
+                                   activeforeground=Design.TEXT_PRIMARY,
+                                   cursor="hand2", font=Design.FONT_UI_SMALL,
+                                   command=lambda: select_page(L("流水")))
+            detail_btn.pack(side=tk.RIGHT)
+            hrow = tk.Frame(hbody, bg=Design.CARD_FILL)
+            hrow.pack(fill=tk.X, pady=(2, 0))
+            tk.Label(hrow, text=format_credits(credits_today), fg=Design.BIG_NUMBER,
+                     bg=Design.CARD_FILL, font=Design.FONT_BIG).pack(side=tk.LEFT)
+            tk.Label(hrow, text=L("积分"), fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                     font=Design.FONT_UI_SMALL).pack(side=tk.LEFT, padx=(6, 8))
+            delta_badge(hrow, credits_today, credits_yday)
+            cred_spark = ImageTk.PhotoImage(
+                self._sparkline_png([v for _l, v in zero_days(7)], Design.SUCCESS,
+                                    width=300, height=76))
+            lbl = tk.Label(hbody, bg=Design.CARD_FILL, image=cred_spark)
+            lbl.image = cred_spark
+            lbl.pack(fill=tk.X, pady=(6, 2))
+            tk.Frame(hbody, bg=Design.CARD_BORDER, height=1).pack(fill=tk.X, pady=(2, 6))
+            # 今日请求数 / 缓存命中 / 时长
+            today_reqs = len(today_timeline)
+            today_comp = next((r for r in comp90 if r[0] == today_str), None)
+            if today_comp:
+                ct = sum(today_comp[1:]) or 1
+                cache_hit = today_comp[3] / ct * 100
+            else:
+                cache_hit = 0.0
+            if today_timeline:
+                span = (max(r[0] for r in today_timeline)
+                        - min(r[0] for r in today_timeline)) / 3600.0
+            else:
+                span = 0.0
+            stat_row(hbody, [(L("请求数"), str(today_reqs)),
+                             (L("缓存命中"), "%.0f%%" % cache_hit),
+                             (L("时长"), "%.1fh" % span)])
+
+            # ---- 右：积分余额 ----
+            bcard, bbody = rounded_card(top_row, padx=16, pady=14)
+            bcard.grid(row=0, column=1, sticky="nsew", padx=6, pady=4)
+            bhead = tk.Frame(bbody, bg=Design.CARD_FILL)
+            bhead.pack(fill=tk.X)
+            tk.Label(bhead, text=L("积分余额"), fg=Design.TEXT_SECONDARY,
+                     bg=Design.CARD_FILL, font=Design.FONT_UI).pack(side=tk.LEFT)
+            if credits_ent:
+                consumed, ent_total = credits_ent
+                remain = max(ent_total - consumed, 0.0)
+                daily_rate = credits30 / 30.0
+                days_left = int(remain / daily_rate) if daily_rate > 0 else 0
+                if daily_rate > 0:
+                    tk.Label(bhead, text=L("可用 %d 天") % days_left, fg=Design.SUCCESS,
+                             bg=Design.BTN_BG, font=Design.FONT_UI_SMALL,
+                             padx=8).pack(side=tk.RIGHT)
+                brow = tk.Frame(bbody, bg=Design.CARD_FILL)
+                brow.pack(fill=tk.X, pady=(2, 0))
+                tk.Label(brow, text=format_credits(remain), fg=Design.BIG_NUMBER,
+                         bg=Design.CARD_FILL, font=("Microsoft YaHei UI", 22, "bold")).pack(
+                    side=tk.LEFT)
+                tk.Label(brow, text=L("已用 %s") % format_credits(consumed),
+                         fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                         font=Design.FONT_UI_SMALL).pack(side=tk.LEFT, padx=(8, 0))
+                ent_ratio = consumed / ent_total if ent_total > 0 else 0.0
+                eb = tk.Canvas(bbody, height=Design.BAR_HEIGHT, bg=Design.CARD_FILL,
+                               highlightthickness=0)
+                eb.pack(fill=tk.X, pady=(8, 2))
+
+                def draw_eb(event, cv=eb, fr=min(max(ent_ratio, 0.0), 1.0)):
+                    cv.delete("all")
+                    w = max(event.width, 1)
+                    r = Design.BAR_HEIGHT / 2
+                    ChartCanvas.round_rect(cv, 0, 0, w, Design.BAR_HEIGHT, r,
+                                           fill=Design.BTN_BG)
+                    if fr > 0:
+                        ChartCanvas.round_rect(cv, 0, 0, max(w * fr, 2), Design.BAR_HEIGHT,
+                                               r, fill=Design.SUCCESS)
+                eb.bind("<Configure>", draw_eb)
+                lrow = tk.Frame(bbody, bg=Design.CARD_FILL)
+                lrow.pack(fill=tk.X)
+                tk.Label(lrow, text="0", fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                         font=Design.FONT_UI_TINY).pack(side=tk.LEFT)
+                tk.Label(lrow, text=L("已用 %.0f%%") % (ent_ratio * 100),
+                         fg=Design.TEXT_SECONDARY, bg=Design.CARD_FILL,
+                         font=Design.FONT_MONO_SMALL).pack(side=tk.RIGHT)
+                tk.Label(bbody,
+                         text=(L("按今日速率，余额约 %d 天后耗尽") % days_left)
+                              if daily_rate > 0 else L("暂无消耗速率"),
+                         fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                         font=Design.FONT_UI_SMALL, anchor='w',
+                         justify=tk.LEFT).pack(fill=tk.X, pady=(10, 0))
+            else:
+                tk.Label(bbody, text=L("接入 Trae 并产生用量后展示积分余额"),
+                         fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                         font=Design.FONT_UI_SMALL, anchor='w',
+                         justify=tk.LEFT).pack(fill=tk.X, pady=(10, 0))
+
+            # ---- 四张指标卡（带迷你走势）----
+            c7 = sum_range(7)
+            p7 = sum_range(7, 7)
+            c30 = credits30
+            p30 = sum_range(30, 30)
+            avg30 = c30 / 30.0
+            prev_avg = p30 / 30.0
+            peak_cred = max(((d, v) for d, v in cd.items()
+                             if d >= (datetime.now() - timedelta(days=29)).strftime("%Y-%m-%d")),
+                            key=lambda kv: kv[1], default=("", 0.0))
+            cards = tk.Frame(cred_area, bg=Design.BACKGROUND)
+            cards.pack(fill=tk.X, padx=6, pady=(10, 0))
+            for i in range(4):
+                cards.grid_columnconfigure(i, weight=1, uniform="cred")
+            specs = [
+                (L("近 7 天"), format_credits(c7), c7, p7, zero_days(7)),
+                (L("近 30 天"), format_credits(c30), c30, p30, zero_days(30)),
+                (L("日均消耗"), format_credits(avg30), avg30, prev_avg, zero_days(14)),
+            ]
+            for i, (title, value, cur, prev, pts) in enumerate(specs):
+                card, body = rounded_card(cards, padx=14, pady=12)
+                card.grid(row=0, column=i, sticky="nsew", padx=6, pady=4)
+                trow = tk.Frame(body, bg=Design.CARD_FILL)
+                trow.pack(fill=tk.X)
+                tk.Label(trow, text=title, fg=Design.TEXT_SECONDARY, bg=Design.CARD_FILL,
+                         font=Design.FONT_UI).pack(side=tk.LEFT)
+                delta_badge(trow, cur, prev)
+                tk.Label(body, text=value, fg=Design.TEXT_PRIMARY, bg=Design.CARD_FILL,
+                         font=Design.FONT_INSIGHT_VALUE, anchor='w').pack(fill=tk.X)
+                sp = ImageTk.PhotoImage(
+                    self._sparkline_png([v for _l, v in pts], Design.SUCCESS,
+                                        width=170, height=34))
+                sl = tk.Label(body, bg=Design.CARD_FILL, image=sp)
+                sl.image = sp
+                sl.pack(fill=tk.X, pady=(4, 0))
+            # 峰值单日
+            card, body = rounded_card(cards, padx=14, pady=12)
+            card.grid(row=0, column=3, sticky="nsew", padx=6, pady=4)
+            trow = tk.Frame(body, bg=Design.CARD_FILL)
+            trow.pack(fill=tk.X)
+            tk.Label(trow, text=L("峰值单日"), fg=Design.TEXT_SECONDARY, bg=Design.CARD_FILL,
+                     font=Design.FONT_UI).pack(side=tk.LEFT)
+            if peak_cred[0]:
+                try:
+                    peak_label = L("%d月%d日") % (int(peak_cred[0][5:7]),
+                                                int(peak_cred[0][8:10]))
+                except (TypeError, ValueError):
+                    peak_label = peak_cred[0]
+                tk.Label(trow, text=peak_label, fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                         font=Design.FONT_UI_SMALL).pack(side=tk.RIGHT)
+            tk.Label(body, text=format_credits(peak_cred[1]), fg=Design.TEXT_PRIMARY,
                      bg=Design.CARD_FILL, font=Design.FONT_INSIGHT_VALUE,
                      anchor='w').pack(fill=tk.X)
+            sp = ImageTk.PhotoImage(
+                self._sparkline_png([v for _l, v in zero_days(30)], Design.DATA,
+                                    width=170, height=34))
+            sl = tk.Label(body, bg=Design.CARD_FILL, image=sp)
+            sl.image = sp
+            sl.pack(fill=tk.X, pady=(4, 0))
 
-        if credits_ent:
-            consumed, ent_total = credits_ent
-            ecard, ebody = rounded_card(cred_page, padx=16, pady=12)
-            ecard.pack(fill=tk.X, padx=16, pady=(10, 0))
-            tk.Label(ebody, text=L("积分余额（官方账单）"), fg=semantic_color("secondary"),
-                     bg=Design.CARD_FILL, font=Design.FONT_UI, anchor='w').pack(fill=tk.X)
-            erow = tk.Frame(ebody, bg=Design.CARD_FILL)
-            erow.pack(fill=tk.X, pady=(4, 0))
-            tk.Label(erow, text=format_credits(consumed), fg=Design.DATA,
-                     bg=Design.CARD_FILL, font=Design.FONT_INSIGHT_VALUE,
-                     anchor='w').pack(side=tk.LEFT)
-            tk.Label(erow, text=L("已用 / 共 %s") % format_credits(ent_total),
-                     fg=semantic_color("secondary"), bg=Design.CARD_FILL,
-                     font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT, padx=(10, 0))
-            ent_ratio = (consumed / ent_total) if ent_total > 0 else 0.0
-            if ent_total > 0:
-                tk.Label(erow, text="%.0f%%" % (ent_ratio * 100), fg=Design.BRAND,
-                         bg=Design.CARD_FILL, font=Design.FONT_MONO_SMALL).pack(side=tk.RIGHT)
-                # 胶囊进度条
-                bar_h = Design.BAR_HEIGHT
-                bar = tk.Canvas(ebody, height=bar_h, bg=Design.CARD_FILL, highlightthickness=0)
-                bar.pack(fill=tk.X, pady=(8, 0))
-                fill_ratio = min(max(ent_ratio, 0.0), 1.0)
+            # ---- 积分走势 ----
+            days = cred_state["days"]
+            sec = tk.Frame(cred_area, bg=Design.BACKGROUND)
+            sec.pack(fill=tk.X, padx=6, pady=(12, 0))
+            title = L("近 %d 天积分走势") % days if days else L("今日积分")
+            tk.Label(sec, text=title, fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+                     font=Design.FONT_CARD_TITLE).pack(side=tk.LEFT)
+            if days == 0:
+                tk.Label(cred_area, text=L("今日消耗 %s 积分")
+                         % format_credits(credits_today),
+                         fg=Design.TEXT_SECONDARY, bg=Design.BACKGROUND,
+                         font=Design.FONT_UI, anchor='w').pack(fill=tk.X, padx=10,
+                                                               pady=(8, 0))
+            else:
+                pts = zero_days(days)
+                mean = sum(v for _l, v in pts) / max(len(pts), 1)
+                tk.Label(sec, text=L("均值 %s") % format_credits(mean),
+                         fg=Design.WARNING, bg=Design.BACKGROUND,
+                         font=Design.FONT_UI_SMALL).pack(side=tk.RIGHT)
+                png_label(cred_area, self._trend_area_png(
+                    pts, Design.SUCCESS, mean=mean,
+                    value_fmt=lambda v: format_credits(v)))
 
-                def _draw_ent(event, c=bar, fr=fill_ratio):
-                    c.delete("all")
-                    w = max(event.width, 1)
-                    r = bar_h / 2
-                    ChartCanvas.round_rect(c, 0, 0, w, bar_h, r, fill=Design.BTN_BG)
-                    if fr > 0:
-                        ChartCanvas.round_rect(c, 0, 0, max(w * fr, 2), bar_h, r,
-                                               fill=blend(Design.BRAND, Design.CARD_FILL, 0.75))
-
-                bar.bind("<Configure>", _draw_ent)
-
-        section(cred_page, L("近 30 天积分走势"))
-        if credits30 <= 0:
-            muted(cred_page, L("接入 Trae 并产生用量后展示积分消耗"))
-        elif not credits_daily:
-            muted(cred_page, L("暂无数据"))
-        else:
-            # 逐柱取主题模型色板（与 mac CreditsPage / 模型分布卡同一机制）
-            palette = model_colors(max(len(credits_daily), 1))
-            cred_series = [(d[5:], {d: v}) for d, v in credits_daily]
-            cred_colors = {d: palette[i % len(palette)]
-                           for i, (d, _v) in enumerate(credits_daily)}
-            png_label(cred_page, self._bar_chart_png(cred_series, cred_colors,
-                                                     value_fmt=format_credits))
-
+        render_credits()
         tk.Label(cred_page,
                  text=L("积分为 Trae 官方计费口径；历史数据自接入起最多回溯 90 天"),
                  fg=Design.TEXT_MUTED, bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL,
@@ -1330,10 +2024,15 @@ class InsightsWindowsMixin:
                  wraplength=690).pack(fill=tk.X, padx=16, pady=(14, 8))
         wb_wheel(wb_page)
 
+        # 导航最底部「设置」：不是一个真页，选中后切到设置窗口
+        # （设置窗口的导航栏也是同一顺序，点其他页再切回洞察中心）
+        tab(L("设置"))
+
         # ============ 页签记忆 ============
         titles = [nb.tab(t, "text") for t in nb.tabs()]
         last_page = initial_page or self.settings.get("insights_last_page") or L("费用")
-        if last_page not in titles:
+        # 「设置」只是导航入口，不参与页签记忆
+        if last_page not in titles or last_page == L("设置"):
             last_page = L("费用")
         try:
             nb.select(titles.index(last_page))
@@ -1354,6 +2053,11 @@ class InsightsWindowsMixin:
             try:
                 name = nb.tab(nb.index(nb.select()), "text")
             except Exception:
+                return
+            if name == L("设置"):
+                # 导航最底部是设置入口：打开设置窗口，洞察中心收起
+                self.show_settings()
+                root.destroy()
                 return
             if self.settings.get("insights_last_page") != name:
                 self.settings.set("insights_last_page", name)

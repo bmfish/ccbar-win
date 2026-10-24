@@ -1087,9 +1087,18 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
         d.text((4, 2), (value_fmt(maxv) if value_fmt else CcBarTray.fmt_tokens_static(maxv)),
                fill="#6B6B6B", font=CcBarTray._pil_font(11))
         if series:
-            d.text((4, height - 16), series[0][0], fill="#6B6B6B", font=CcBarTray._pil_font(10))
-            d.text((width - 4, height - 16), series[-1][0], fill="#6B6B6B",
-                   anchor="ra", font=CcBarTray._pil_font(10))
+            # 首尾 + 中间均分共 5 个日期刻度（原型图横轴不是只有两端）
+            ticks = sorted({0, len(series) // 4, len(series) // 2,
+                            (3 * len(series)) // 4, len(series) - 1})
+            for i in ticks:
+                if i == 0:
+                    x, anchor = (i + 0.5) * slot, "la"
+                elif i == len(series) - 1:
+                    x, anchor = (i + 0.5) * slot, "ra"
+                else:
+                    x, anchor = (i + 0.5) * slot, "ma"
+                d.text((x, height - 16), series[i][0], fill="#6B6B6B",
+                       anchor=anchor, font=CcBarTray._pil_font(10))
         return img
 
     @staticmethod
@@ -1118,7 +1127,7 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
         # 末点小圆点（原型图里曲线右端有个亮点）
         d.ellipse([pts[-1][0] - 2.5, pts[-1][1] - 2.5,
                    pts[-1][0] + 2.5, pts[-1][1] + 2.5], fill=color)
-        d.text((4, 0), (f"{maxv / 1e8:.2f}亿" if maxv >= 1e8 else f"{maxv / 1e4:.0f}万"),
+        d.text((4, 0), CcBarTray.fmt_tokens_static(maxv),
                fill="#6B6B6B", font=CcBarTray._pil_font(10))
         d.text((left, height - 14), points[0][0], fill="#6B6B6B",
                font=CcBarTray._pil_font(9))
@@ -1144,6 +1153,122 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
         d.line(pts, fill=color, width=2)
         d.text((width - 4, 2), f"{maxv:.0f}{suffix}", fill="#6B6B6B", anchor="ra",
                font=CcBarTray._pil_font(11))
+        return img
+
+    @staticmethod
+    def _sparkline_png(points, color, width=260, height=46):
+        """卡片内的迷你走势：只有折线与浅填充，无坐标文字。points: [值]"""
+        from PIL import Image, ImageDraw
+
+        vals = [float(v) for v in points]
+        img = Image.new("RGB", (width, height), Design.CARD_FILL)
+        d = ImageDraw.Draw(img)
+        if len(vals) < 2:
+            return img
+        maxv = max(vals) or 1
+        minv = min(vals)
+        rng = (maxv - minv) or maxv or 1
+        left, right, top, bottom = 2, width - 3, 3, height - 4
+        step = (right - left) / (len(vals) - 1)
+        pts = [(left + i * step, bottom - (v - minv) / rng * (bottom - top))
+               for i, v in enumerate(vals)]
+        d.polygon(pts + [(right, bottom), (left, bottom)],
+                  fill=blend(color, Design.CARD_FILL, 0.18))
+        d.line(pts, fill=color, width=2)
+        d.ellipse([pts[-1][0] - 2, pts[-1][1] - 2,
+                   pts[-1][0] + 2, pts[-1][1] + 2], fill=color)
+        return img
+
+    @staticmethod
+    def _stacked_area_png(series, colors, width=680, height=210, marker=None):
+        """100% 堆叠面积图（渠道页构成变化）。
+
+        series: [(label, {名称: 值})]，按构成比例铺满纵轴，不表示用量绝对值。
+        marker: (i, 文案) 在第 i 个点画竖向虚线并标注（渠道切换日）。
+        """
+        from PIL import Image, ImageDraw
+
+        img = Image.new("RGB", (width, height), Design.CARD_FILL)
+        d = ImageDraw.Draw(img)
+        if len(series) < 2:
+            d.text((width // 2, height // 2), L("暂无数据"), fill="#6B6B6B",
+                   anchor="mm", font=CcBarTray._pil_font(13))
+            return img
+        top, bottom, left, right = 8, height - 22, 6, width - 6
+        names = [n for n in colors if any(vals.get(n, 0) for _, vals in series)]
+        step = (right - left) / (len(series) - 1)
+        xs = [left + i * step for i in range(len(series))]
+        base = [float(bottom)] * len(series)
+        for n in reversed(names):
+            ys = []
+            for i, (_label, vals) in enumerate(series):
+                total = sum(vals.get(k, 0) for k in names) or 1
+                ys.append(base[i] - vals.get(n, 0) / total * (bottom - top))
+            poly = [(xs[i], ys[i]) for i in range(len(xs))]
+            poly += [(xs[i], base[i]) for i in range(len(xs) - 1, -1, -1)]
+            d.polygon(poly, fill=colors[n])
+            base = ys
+        if marker and 0 <= marker[0] < len(xs):
+            mx = xs[marker[0]]
+            y = top
+            while y < bottom:
+                d.line([(mx, y), (mx, min(y + 4, bottom))], fill=Design.WARNING)
+                y += 7
+            mfont = CcBarTray._pil_font(10)
+            mwidth = d.textlength(marker[1], font=mfont)
+            d.rectangle([mx + 4, top + 2, mx + 10 + mwidth, top + 17],
+                        fill=Design.CARD_FILL)
+            d.text((mx + 4, top + 2), marker[1], fill=Design.WARNING,
+                   font=mfont)
+        for i in range(0, len(series), max(1, len(series) // 5)):
+            d.text((xs[i], height - 15), series[i][0], fill="#6B6B6B",
+                   anchor="ma" if 0 < i < len(series) - 1 else ("la" if i == 0 else "ra"),
+                   font=CcBarTray._pil_font(10))
+        return img
+
+    @staticmethod
+    def _trend_area_png(points, color, width=680, height=190, mean=None,
+                        value_fmt=None):
+        """积分/费用走势：面积 + 折线 + 均值虚线 + 末点数值 + 右侧刻度。
+
+        points: [(label, value)]；mean 有值时按同一纵轴画虚线并标注。
+        """
+        from PIL import Image, ImageDraw
+
+        img = Image.new("RGB", (width, height), Design.CARD_FILL)
+        d = ImageDraw.Draw(img)
+        if len(points) < 2:
+            d.text((width // 2, height // 2), L("暂无数据"), fill="#6B6B6B",
+                   anchor="mm", font=CcBarTray._pil_font(13))
+            return img
+        top, bottom, left, right = 14, height - 24, 8, width - 44
+        maxv = max([v for _, v in points] + ([mean] if mean else [])) or 1
+        step = (right - left) / (len(points) - 1)
+        pts = [(left + i * step, bottom - (v / maxv) * (bottom - top))
+               for i, (_, v) in enumerate(points)]
+        d.polygon(pts + [(right, bottom), (left, bottom)],
+                  fill=blend(color, Design.CARD_FILL, 0.20))
+        d.line(pts, fill=color, width=2)
+        fmt = value_fmt or (lambda v: CcBarTray.fmt_tokens_static(v))
+        # 均值虚线
+        if mean and mean > 0:
+            my = bottom - (mean / maxv) * (bottom - top)
+            x = left
+            while x < right:
+                d.line([(x, my), (min(x + 5, right), my)], fill=Design.WARNING)
+                x += 9
+        # 右侧刻度：0 / 半值 / 最大值
+        for frac in (0.0, 0.5, 1.0):
+            y = bottom - frac * (bottom - top)
+            d.text((right + 6, y), fmt(maxv * frac), fill="#6B6B6B",
+                   anchor="lm", font=CcBarTray._pil_font(9))
+        # 末点数值
+        d.text((pts[-1][0] - 4, max(pts[-1][1] - 12, 0)), fmt(points[-1][1]),
+               fill=Design.TEXT_PRIMARY, anchor="ra", font=CcBarTray._pil_font(10))
+        for i in range(0, len(points), max(1, len(points) // 4)):
+            d.text((pts[i][0], height - 14), points[i][0], fill="#6B6B6B",
+                   anchor="ma" if 0 < i < len(points) - 1 else ("la" if i == 0 else "ra"),
+                   font=CcBarTray._pil_font(9))
         return img
 
     @staticmethod
@@ -1249,19 +1374,66 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
 
         root = tk.Toplevel(self._ui_root)
         root.title(L("ccBar 设置"))
-        root.geometry(center_geometry("560x640"))
-        root.minsize(520, 420)
+        root.geometry(center_geometry("1000x760"))
+        root.minsize(900, 600)
         root.configure(bg=Design.BACKGROUND)
 
-        tk.Label(root, text=L("⚙️ 设置"), font=Design.FONT_WINDOW_TITLE, fg=Design.TEXT_PRIMARY,
-                 bg=Design.BACKGROUND).pack(anchor='w', padx=24, pady=(18, 10))
-        tk.Frame(root, bg=Design.SEPARATOR, height=1).pack(fill=tk.X, padx=24)
+        # 左侧导航栏：与洞察中心同一套竖向 PillTabs，原型图里设置也挂在同一列
+        from ui_tabs import PillTabs
+
+        nav = PillTabs(root, vertical=True)
+        nav.pack(side=tk.LEFT, fill=tk.Y, padx=(4, 0), pady=(8, 12))
+        NAV_PAGES = [L("费用"), L("洞察"), L("分享"), L("渠道"),
+                     L("流水"), L("积分"), L("WorkBuddy"), L("设置")]
+        NAV_ICONS = ["◷", "∿", "⇧", "▤", "≡", "⚡", "◈", "⚙"]
+        for name, icon in zip(NAV_PAGES, NAV_ICONS):
+            nav.add(tk.Frame(nav, bg=Design.BACKGROUND), text=name, icon=icon)
+
+        page = tk.Frame(root, bg=Design.BACKGROUND)
+        page.pack(fill=tk.BOTH, expand=True)
+
+        rail_switching = {"on": False}
+
+        def _nav_changed():
+            if rail_switching["on"]:
+                return
+            sel = nav.tab(nav.select())
+            if sel == L("设置"):
+                return
+            rail_switching["on"] = True
+            self.show_insights(initial_page=sel)
+            root.destroy()
+
+        nav.bind("<<NotebookTabChanged>>", _nav_changed)
+        nav.select(nav.tabs()[-1])
+
+        head = tk.Frame(page, bg=Design.BACKGROUND)
+        head.pack(fill=tk.X, padx=24, pady=(18, 10))
+        hleft = tk.Frame(head, bg=Design.BACKGROUND)
+        hleft.pack(side=tk.LEFT)
+        tk.Label(hleft, text=L("设置"), font=Design.FONT_WINDOW_TITLE,
+                 fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND).pack(anchor='w')
+        tk.Label(hleft, text=L("改动需点击保存后生效"), font=Design.FONT_UI_SMALL,
+                 fg=Design.TEXT_MUTED, bg=Design.BACKGROUND).pack(anchor='w')
+        hright = tk.Frame(head, bg=Design.BACKGROUND)
+        hright.pack(side=tk.RIGHT, pady=(6, 0))
+        tk.Label(hright, text=L("搜索设置"), fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
+                 font=Design.FONT_UI_SMALL).pack(side=tk.LEFT, padx=(0, 8))
+        search_var = tk.StringVar()
+        search_entry = tk.Entry(hright, textvariable=search_var, width=14,
+                                bg=Design.CARD_FILL, fg=Design.TEXT_PRIMARY,
+                                insertbackground=Design.TEXT_PRIMARY, relief="flat",
+                                font=Design.FONT_UI_SMALL, highlightthickness=1,
+                                highlightbackground=Design.CARD_BORDER,
+                                highlightcolor=Design.BRAND)
+        search_entry.pack(side=tk.LEFT, ipady=3)
+        tk.Frame(page, bg=Design.SEPARATOR, height=1).pack(fill=tk.X, padx=24)
 
         # 按钮栏钉底，内容区自己滚动
-        btn_bar = tk.Frame(root, bg=Design.BACKGROUND)
+        btn_bar = tk.Frame(page, bg=Design.BACKGROUND)
         btn_bar.pack(side=tk.BOTTOM, fill=tk.X, padx=24, pady=(8, 16))
 
-        body = tk.Frame(root, bg=Design.BACKGROUND)
+        body = tk.Frame(page, bg=Design.BACKGROUND)
         body.pack(fill=tk.BOTH, expand=True)
         canvas = tk.Canvas(body, bg=Design.BACKGROUND, highlightthickness=0, bd=0)
         vsb = tk.Scrollbar(body, orient=tk.VERTICAL, command=canvas.yview)
@@ -1281,7 +1453,48 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
         root.bind("<Destroy>",
                   lambda e: canvas.unbind_all("<MouseWheel>") if e.widget is root else None)
 
+        def search_settings(event=None):
+            """搜索设置：找到第一个命中的说明文字并滚到它，命中项短暂高亮"""
+            keyword = search_var.get().strip().lower()
+            if not keyword:
+                return
+            hits = []
+
+            def walk(widget):
+                for child in widget.winfo_children():
+                    if isinstance(child, tk.Label):
+                        try:
+                            text = str(child.cget("text"))
+                        except Exception:
+                            text = ""
+                        if text and keyword in text.lower():
+                            hits.append(child)
+                    walk(child)
+            walk(inner)
+            if not hits:
+                return
+            target = hits[0]
+            try:
+                offset = target.winfo_rooty() - inner.winfo_rooty()
+                canvas.yview_moveto(max(0.0, min(1.0, offset / max(inner.winfo_height(), 1))))
+                for h in hits[:8]:
+                    h.configure(fg=Design.BRAND)
+            except Exception:
+                pass
+
+        search_entry.bind("<Return>", search_settings)
+
         OK_COLOR, WARN_COLOR = "#34C759", "#FF9500"
+        dirty_label = tk.Label(btn_bar, text="", fg=WARN_COLOR, bg=Design.BACKGROUND,
+                               font=Design.FONT_UI_SMALL)
+        dirty_label.pack(side=tk.LEFT)
+
+        def mark_dirty(*_args):
+            try:
+                dirty_label.configure(text=L("配置已修改"))
+            except Exception:
+                pass
+
         # 显示名统一由 l10n.language_display_name 给（"中文" 一项刻意保持中文）
         LANG_LABELS = {p: l10n.language_display_name(p) for p in l10n.LANGUAGES}
         LANG_BY_LABEL = {v: k for k, v in LANG_LABELS.items()}
@@ -1302,6 +1515,7 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
                              highlightbackground=Design.CARD_BORDER,
                              highlightcolor=Design.BRAND)
             entry.pack(side=tk.LEFT, ipady=4)
+            entry.bind("<KeyRelease>", mark_dirty)
             if hint:
                 tk.Label(row, text=hint, fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
                          font=Design.FONT_UI_SMALL).pack(side=tk.LEFT, padx=(10, 0))
@@ -1315,6 +1529,7 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
             # 自绘胶囊开关（原生 Checkbutton 的方框和暗色界面不搭）
             ToggleRow(inner, text=text, var=var, bg=Design.BACKGROUND).pack(
                 fill=tk.X, padx=24, pady=4)
+            var.trace_add("write", mark_dirty)
             return var
 
         custom = [dict(t) for t in (self.settings.get("custom_themes") or [])]
@@ -1459,6 +1674,11 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
 
         # ------------------------------------------------------------ 数据源
         section(L("数据源"))
+        _connected = sum(1 for _k in ("ccswitch_enabled", "zcode_enabled", "trae_enabled")
+                         if self.settings.get(_k))
+        tk.Label(inner, text=L("%d 个已连接") % _connected, fg=OK_COLOR,
+                 bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL,
+                 anchor='e').pack(fill=tk.X, padx=24)
 
         source_vars, source_entries, source_status = {}, {}, {}
         source_keys = {"ccswitch": ("ccswitch_enabled", "db_path"),
@@ -1491,6 +1711,7 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
 
             var = tk.BooleanVar(value=self.settings.get(enable_key, False))
             source_vars[adapter.id] = var
+            var.trace_add("write", mark_dirty)
             ToggleSwitch(row, var=var, bg=Design.BACKGROUND).pack(side=tk.LEFT)
 
             tk.Label(row, text=adapter.name, fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
@@ -1503,6 +1724,7 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
                              highlightcolor=Design.BRAND)
             entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=4)
             entry.insert(0, self.settings.get(path_key) or adapter.default_path)
+            entry.bind("<KeyRelease>", mark_dirty)
             source_entries[adapter.id] = entry
 
             def make_browse(entry_box, adapter_id):
