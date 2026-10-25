@@ -69,7 +69,7 @@ import themes
 import weekly_report
 
 # 当前版本（发布时随 tag 更新）
-APP_VERSION = "1.7.1"   # Windows 仓库自己的版本线（功能对齐 macOS v1.8.2）
+APP_VERSION = "1.9.20"   # 与 macOS 版本线对齐
 
 # 数据库路径（cc-switch 默认值，可在设置中修改）
 DB_PATH = os.path.expanduser("~/.cc-switch/cc-switch.db")

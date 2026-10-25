@@ -148,6 +148,9 @@ python -m unittest discover -s tests -v
 
 ## 版本
 
+- **v1.9.20** — 版本号与 macOS 对齐；Trae 凭据粘贴更宽容（裸 sessionid、`sessionid=…`、
+  整段 Cookie、带 `Cookie:` 前缀均可，支持直接粘贴 `X-Cloudide-Session=…` 跳过首次换签）、
+  登录过期提示同步更新；含洞察中心「使用通查」升级与面板趋势按天缓存
 - **v1.7.1** — 洞察中心按原型图升级五页（费用 / 渠道 / 积分 / 分享 / 流水）并统一
   左侧竖向导航；导航页序为 洞察 / 积分 / 流水 / 渠道 / 费用 / 分享 /
   WorkBuddy / 设置，设置固定在导航最底部
