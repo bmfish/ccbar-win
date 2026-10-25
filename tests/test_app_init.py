@@ -79,6 +79,8 @@ class TestConstructApp(unittest.TestCase):
     def test_tooltip_is_three_lines_like_macos(self):
         """悬停提示（需求已精简）：只显示今日用量；有积分才追加今日积分"""
         app = main.CcBarTray()
+        # 构造时按“跟随系统”应用语言；本条断言中文文案，先固定为中文
+        l10n.set_language("zh")
         try:
             stats = {0: {"total": 1234567, "reqs": 7}, 1: {"total": 20000}}
             app.query_day_stats = lambda days=0: stats.get(days)
