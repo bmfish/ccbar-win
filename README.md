@@ -148,6 +148,8 @@ python -m unittest discover -s tests -v
 
 ## 版本
 
+- **v1.9.21** — 设置页 Trae 凭据旁新增「如何获取？」步骤弹窗（浏览器登录 trae.cn →
+  F12 开发者工具 → Cookies 复制 sessionid → 粘贴保存），与 macOS 版同步
 - **v1.9.20** — 版本号与 macOS 对齐；Trae 凭据粘贴更宽容（裸 sessionid、`sessionid=…`、
   整段 Cookie、带 `Cookie:` 前缀均可，支持直接粘贴 `X-Cloudide-Session=…` 跳过首次换签）、
   登录过期提示同步更新；含洞察中心「使用通查」升级与面板趋势按天缓存

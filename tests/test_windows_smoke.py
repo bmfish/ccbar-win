@@ -894,6 +894,26 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
         self.assertEqual(captured["trae_sessionid"], "session-abc")
         self.assertEqual(self.app.settings.get("trae_sessionid"), "session-abc")
 
+    def test_settings_trae_help_shows_steps(self):
+        """Trae 行旁的「如何获取？」要弹出凭据步骤，新用户不用去翻文档"""
+        CcBarTray.show_settings.__wrapped__(self.app)
+        win = self._toplevels("ccBar 设置")[0]
+        self._invoke_button(win, "如何获取？")
+
+        helps = [w for w in self._walk(self.root)
+                 if isinstance(w, tk.Toplevel) and w.title() == "获取 Trae 凭据"]
+        self.assertEqual(len(helps), 1, "凭据帮助窗口没打开")
+        help_win = helps[0]
+        self.assertTrue(self._find_by_text(help_win, "浏览器打开 trae.cn 并登录"))
+        self.assertTrue(self._find_by_text(
+            help_win, "找到 sessionid，双击 Value 后复制（约 60 天有效）"))
+        self.assertTrue(self._find_by_text(help_win, "知道了"))
+
+        self._invoke_button(help_win, "知道了")
+        helps = [w for w in self._walk(self.root)
+                 if isinstance(w, tk.Toplevel) and w.title() == "获取 Trae 凭据"]
+        self.assertEqual(helps, [])
+
     # ------------------------------------------------------------ WorkBuddy 页签 + 设置行
 
     def test_workbuddy_tab_is_isolated_from_other_tabs(self):

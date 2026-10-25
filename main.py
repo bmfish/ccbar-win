@@ -69,7 +69,7 @@ import themes
 import weekly_report
 
 # 当前版本（发布时随 tag 更新）
-APP_VERSION = "1.9.20"   # 与 macOS 版本线对齐
+APP_VERSION = "1.9.21"   # 与 macOS 版本线对齐
 
 # 数据库路径（cc-switch 默认值，可在设置中修改）
 DB_PATH = os.path.expanduser("~/.cc-switch/cc-switch.db")
@@ -1770,9 +1770,70 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
                               highlightcolor=Design.BRAND)
         trae_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=4)
         trae_entry.insert(0, self.settings.get("trae_sessionid") or "")
-        tk.Label(trae_row, text=L("粘贴 sessionid / 整段 Cookie / X-Cloudide-Session"),
+        trae_hint = tk.Frame(trae_row, bg=Design.BACKGROUND)
+        trae_hint.pack(fill=tk.X, pady=(2, 0))
+        tk.Label(trae_hint, text=L("粘贴 sessionid / 整段 Cookie / X-Cloudide-Session"),
                  fg=Design.TEXT_MUTED, bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL,
-                 anchor='w').pack(fill=tk.X, pady=(2, 0))
+                 anchor='w').pack(side=tk.LEFT)
+
+        def show_trae_help():
+            """凭据是一长串 Cookie，不给步骤用户不知道从哪里复制"""
+            import webbrowser
+
+            dlg = tk.Toplevel(root)
+            dlg.title(L("获取 Trae 凭据"))
+            dlg.configure(bg=Design.BACKGROUND)
+            dlg.transient(root)
+            dlg.resizable(False, False)
+
+            wrap = tk.Frame(dlg, bg=Design.BACKGROUND, padx=18, pady=14)
+            wrap.pack(fill=tk.BOTH, expand=True)
+            tk.Label(wrap, text=L("获取 Trae 凭据"), fg=Design.TEXT_PRIMARY,
+                     bg=Design.BACKGROUND, font=Design.FONT_UI, anchor='w').pack(fill=tk.X)
+            tk.Label(wrap, text=L("sessionid 就是登录态；推荐只复制它的值，不要带引号。"),
+                     fg=Design.TEXT_MUTED, bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL,
+                     anchor='w', justify='left', wraplength=400).pack(fill=tk.X, pady=(3, 10))
+
+            steps = [
+                L("浏览器打开 trae.cn 并登录"),
+                L("按 F12 打开开发者工具，进入 Application → Cookies → https://www.trae.cn"),
+                L("找到 sessionid，双击 Value 后复制（约 60 天有效）"),
+                L("粘贴到左侧输入框，点「保存」"),
+            ]
+            steps_box = tk.Frame(wrap, bg=Design.BACKGROUND)
+            steps_box.pack(fill=tk.X)
+            for idx, step in enumerate(steps, 1):
+                line = tk.Frame(steps_box, bg=Design.BACKGROUND)
+                line.pack(fill=tk.X, pady=2)
+                tk.Label(line, text="%d." % idx, fg=Design.BRAND, bg=Design.BACKGROUND,
+                         font=Design.FONT_MONO_SMALL, width=2,
+                         anchor='ne').pack(side=tk.LEFT)
+                tk.Label(line, text=step, fg=Design.TEXT_SECONDARY, bg=Design.BACKGROUND,
+                         font=Design.FONT_UI_SMALL, anchor='w', justify='left',
+                         wraplength=380).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+            tk.Frame(wrap, bg=Design.SEPARATOR, height=1).pack(fill=tk.X, pady=(10, 8))
+            tk.Label(wrap,
+                     text=L("也支持 X-Cloudide-Session=…（约 14 天）或整段 Cookie，但只填 sessionid 最省事。"),
+                     fg=Design.TEXT_MUTED, bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL,
+                     anchor='w', justify='left', wraplength=400).pack(fill=tk.X)
+            tk.Label(wrap, text=L("凭据只保存在本机，仅用于请求 Trae 官方接口。"),
+                     fg=Design.TEXT_MUTED, bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL,
+                     anchor='w', justify='left', wraplength=400).pack(fill=tk.X, pady=(3, 0))
+
+            btns = tk.Frame(wrap, bg=Design.BACKGROUND)
+            btns.pack(fill=tk.X, pady=(12, 0))
+            flat_button(btns, L("打开 trae.cn"),
+                        lambda: webbrowser.open("https://www.trae.cn")).pack(side=tk.LEFT)
+            flat_button(btns, L("知道了"), dlg.destroy, primary=True).pack(side=tk.RIGHT)
+
+            x = root.winfo_rootx() + max(0, (root.winfo_width() - 440) // 2)
+            y = root.winfo_rooty() + max(0, (root.winfo_height() - 380) // 3)
+            dlg.geometry("+%d+%d" % (x, y))
+            dlg.after(50, dlg.grab_set)
+            dlg.focus_set()
+
+        flat_button(trae_hint, L("如何获取？"), show_trae_help).pack(side=tk.RIGHT)
 
         # 状态行：HTTP 源没有库路径可校验，直接透出统计库的诊断信息
         try:
