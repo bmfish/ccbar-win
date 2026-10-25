@@ -1301,7 +1301,7 @@ class TestStatsStore(unittest.TestCase):
         t0 = self._at(hour=10)
         cases = [
             (TraeResult("ok", rows=[]), "已连接"),
-            (TraeResult("auth_expired", message="会话失效"), "登录已过期，请重新提供 sessionid"),
+            (TraeResult("auth_expired", message="会话失效"), "登录已过期，请重新提供 sessionid 或 X-Cloudide-Session"),
             (TraeResult("failed", message="网络不通"), "同步失败：网络不通"),
             (TraeResult("not_configured"), "未配置登录"),
         ]

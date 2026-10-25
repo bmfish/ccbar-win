@@ -722,7 +722,7 @@ class StatsStore:
                     self._meta_set("trae_ent_at", int(now_epoch))
                 self.source_status["trae"] = "已连接"
             elif result.status == "auth_expired":
-                self.source_status["trae"] = "登录已过期，请重新提供 sessionid"
+                self.source_status["trae"] = "登录已过期，请重新提供 sessionid 或 X-Cloudide-Session"
             elif result.status == "not_configured":
                 self.source_status["trae"] = "未配置登录"
             else:

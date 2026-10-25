@@ -103,14 +103,14 @@ ccbar 自带统计库（`~/.ccbar/ccbar.db`），对外部源库**全程只读**
 
 - **历史**（昨天及更早）：每日首次刷新自动补账进自家库，源库清理不影响已有统计
 - **今日**：每次刷新实时查各源库汇总，零延迟；`daily_agg` 永不包含今天
-- **Trae**：本地库是 SQLCipher 加密的，改走官方 HTTP 用量接口（登录态在设置里粘 sessionid，
-  自动换签续期），会话快照 UPSERT 幂等，0–9 点静默
+- **Trae**：本地库是 SQLCipher 加密的，改走官方 HTTP 用量接口（登录态可粘 sessionid、整段 Cookie
+  或 X-Cloudide-Session，自动换签续期），会话快照 UPSERT 幂等，0–9 点静默
 
 | 数据源 | 口径 | 默认 |
 |---|---|---|
 | cc-switch | input + output + 缓存读 + 缓存创建（全量，费用按 cc-switch 记录的单价折算） | 启用 |
 | ZCode | input + output（与 ZCode 官方统计一致，可直接对账；官方未计费，可用默认单价估算） | 关闭，设置中勾选 |
-| Trae | 净输入（input = 总量 − 缓存命中）+ output；积分为官方计费口径 | 关闭，需填 sessionid |
+| Trae | 净输入（input = 总量 − 缓存命中）+ output；积分为官方计费口径 | 关闭，需填 sessionid（或整段 Cookie / X-Cloudide-Session） |
 | WorkBuddy | **仅积分**（接口只给 `credit`，无 token / 无金额）：请求数 + 积分 + 模型 + 客户端；独立存表，只在洞察中心有独立页签 | 关闭，需粘贴 Cookie |
 
 新增数据源：实现 `stats_store.py` 里的 `SourceAdapter` 并注册到 `SOURCE_REGISTRY` 即可
@@ -120,7 +120,7 @@ ccbar 自带统计库（`~/.ccbar/ccbar.db`），对外部源库**全程只读**
 
 - cc-switch：`~/.cc-switch/cc-switch.db`（可在设置中修改）
 - ZCode：`~/.zcode/cli/db/db.sqlite`（可在设置中修改，默认未启用）
-- Trae：无本地库，走 `https://api.trae.cn` 官方接口（需在设置里粘贴 sessionid）
+- Trae：无本地库，走 `https://api.trae.cn` 官方接口（设置里粘贴 sessionid、整段 Cookie 或 `X-Cloudide-Session`）
 - WorkBuddy：无本地库，走 `https://www.codebuddy.cn` 的 `get-user-request-usage` 接口
   （凭据是整条 Cookie，设置页支持直接粘贴整条 `Copy as cURL` 命令自动提取 `session`；
   若服务端在响应里回写新的 `session`，会就地保存并用于下次同步）

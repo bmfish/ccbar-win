@@ -3,7 +3,7 @@
 Trae 的用量不走本地 SQLite——本地 ai-agent 库是 SQLCipher 加密的，读不了，
 所以走官方网页端同一套 API：
 
-  passport sessionid（60 天）                        —— 用户唯一要提供的凭据
+  passport sessionid（60 天）                        —— 主凭据；也可粘贴 X-Cloudide-Session（14 天）
    └→ POST /cloudide/api/v3/trae/Login               —— 换 X-Cloudide-Session（14 天，Set-Cookie 返回）
        └→ POST /cloudide/api/v3/common/GetUserToken —— 换 Cloud-IDE-JWT（8 小时，可续签）
            ├→ POST /trae/api/v1/pay/query_user_usage_group_by_session  逐会话用量（token 四元组 + credits + 金额）
@@ -157,6 +157,33 @@ def extract_session_cookie(set_cookie_header):
             value = trimmed[len("X-Cloudide-Session="):].split(";")[0].strip()
             return value or None
     return None
+
+
+# ---- 凭据解析 ----
+
+
+def parse_credential(text):
+    """设置里粘贴的内容 → (passport Cookie, X-Cloudide-Session)。
+
+    支持整段 Cookie、带 sessionid= 前缀、裸值，以及显式 X-Cloudide-Session=…。
+    未识别的 name=value 串原样当作 Cookie（兼容旧输入）。
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return ("", "")
+    if raw.lower().startswith("cookie:"):
+        raw = raw[len("cookie:"):].strip()
+
+    cookies = http_common.parse_cookie_header(raw)
+    lower = {k.lower(): v for k, v in cookies.items()}
+    sessionid = lower.get("sessionid", "").strip().strip('"')
+    cloudide = lower.get("x-cloudide-session", "").strip().strip('"')
+    if sessionid or cloudide:
+        return (("sessionid=" + sessionid) if sessionid else "", cloudide)
+    # 裸值按 sessionid 处理；带 '=' 的未知串保持原样，避免破坏旧输入
+    if "=" in raw:
+        return (raw, "")
+    return ("sessionid=" + raw, "")
 
 
 def is_night_silent(now=None):
@@ -378,9 +405,9 @@ def _ensure_jwt(passport_cookie, auth, send, now):
             return ("failed", val)
         # auth_expired：Session 失效，走 Login 重造
 
-    session = _login(passport_cookie, send)
+    session = _login(passport_cookie, send) if passport_cookie else None
     if not session:
-        return ("auth_expired", "登录已过期，请重新提供 sessionid")
+        return ("auth_expired", "登录已过期，请重新提供 sessionid 或 X-Cloudide-Session")
     auth.cloudide_session = session
     st, val = _fetch_token(session, send)
     if st == "success":
@@ -388,7 +415,7 @@ def _ensure_jwt(passport_cookie, auth, send, now):
         return ("success", val[0])
     if st == "failed":
         return ("failed", val)
-    return ("auth_expired", "登录已过期，请重新提供 sessionid")
+    return ("auth_expired", "登录已过期，请重新提供 sessionid 或 X-Cloudide-Session")
 
 
 # ---- 使用量分页拉取 ----
@@ -451,6 +478,7 @@ def run(sessionid, auth=None, from_epoch=0, to_epoch=None, fetch_ent=False,
         post=None, now=None, cutoff=None):
     """完整同步一次。
 
+    sessionid 可传 sessionid=…、整段 Cookie、裸值或 X-Cloudide-Session=…；
     auth 会被就地更新（换签结果），调用方负责持久化；
     post 可注入假 transport（签名同 http_post），测试因此不碰网络；
     fetch_ent=False 时跳过积分账单（它 1 小时刷一次就够，减少无谓请求）；
@@ -459,15 +487,20 @@ def run(sessionid, auth=None, from_epoch=0, to_epoch=None, fetch_ent=False,
     """
     send = post or http_post
     auth = auth if auth is not None else TraeAuth()
-    sessionid = (sessionid or "").strip()
+    passport_cookie, cloudide_session = parse_credential(sessionid)
     if to_epoch is None:
         to_epoch = int(_epoch(now))
 
-    if not sessionid:
+    if not passport_cookie and not cloudide_session:
         return TraeResult("not_configured", message="未配置登录")
+    # 用户显式给了新的 X-Cloudide-Session：它对应的 JWT 必须重新换，不能沿用旧账号/旧会话的缓存
+    if cloudide_session and cloudide_session != auth.cloudide_session:
+        auth.cloudide_session = cloudide_session
+        auth.jwt = ""
+        auth.jwt_exp = 0
 
     # ---- 1. 确保 JWT 可用（无效就换签）----
-    st, val = _ensure_jwt(sessionid, auth, send, now)
+    st, val = _ensure_jwt(passport_cookie, auth, send, now)
     if st == "not_configured":
         return TraeResult("not_configured", message="未配置登录")
     if st == "auth_expired":
@@ -487,15 +520,15 @@ def run(sessionid, auth=None, from_epoch=0, to_epoch=None, fetch_ent=False,
         # 强制换签（清 JWT；Session 也不行时 _ensure_jwt 内部会走 Login 重造）
         auth.jwt = ""
         auth.jwt_exp = 0
-        st, val = _ensure_jwt(sessionid, auth, send, now)
+        st, val = _ensure_jwt(passport_cookie, auth, send, now)
         if st in ("not_configured", "auth_expired"):
-            return TraeResult("auth_expired", message="登录已过期，请重新提供 sessionid")
+            return TraeResult("auth_expired", message="登录已过期，请重新提供 sessionid 或 X-Cloudide-Session")
         if st == "failed":
             return TraeResult("failed", message=val)
         jwt2 = val
         st, msg, rows, truncated = _fetch_sessions(jwt2, from_epoch, to_epoch, send, cutoff=cutoff)
         if st == "auth_expired":
-            return TraeResult("auth_expired", message="登录已过期，请重新提供 sessionid")
+            return TraeResult("auth_expired", message="登录已过期，请重新提供 sessionid 或 X-Cloudide-Session")
         if st == "failed":
             return TraeResult("failed", message=msg)
 

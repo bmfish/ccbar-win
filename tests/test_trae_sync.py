@@ -235,6 +235,35 @@ class TestExtractSessionCookie(unittest.TestCase):
         self.assertIsNone(ts.extract_session_cookie({"Content-Type": "application/json"}))
 
 
+# ---- 凭据解析（sessionid / 整段 Cookie / X-Cloudide-Session） ----
+
+
+class TestParseCredential(unittest.TestCase):
+    def test_bare_value_defaults_to_sessionid(self):
+        self.assertEqual(ts.parse_credential("  abc123\n"), ("sessionid=abc123", ""))
+
+    def test_sessionid_prefix_and_whole_cookie(self):
+        self.assertEqual(ts.parse_credential("sessionid=abc123"), ("sessionid=abc123", ""))
+        self.assertEqual(ts.parse_credential("foo=1; sessionid=abc123; Path=/; HttpOnly"),
+                         ("sessionid=abc123", ""))
+        self.assertEqual(ts.parse_credential("Cookie: sessionid=abc123; foo=1"),
+                         ("sessionid=abc123", ""))
+        self.assertEqual(ts.parse_credential('sessionid="abc123"'), ("sessionid=abc123", ""))
+
+    def test_cloudide_session_and_both(self):
+        self.assertEqual(
+            ts.parse_credential("X-Cloudide-Session=KC_lA83=.18dc8d30b30; Path=/; HttpOnly"),
+            ("", "KC_lA83=.18dc8d30b30"))
+        self.assertEqual(ts.parse_credential("sessionid=abc; X-Cloudide-Session=def"),
+                         ("sessionid=abc", "def"))
+
+    def test_empty_and_unknown_formats(self):
+        self.assertEqual(ts.parse_credential("   "), ("", ""))
+        self.assertEqual(ts.parse_credential(None), ("", ""))
+        # 未识别的 cookie 串保持旧行为：原样交给 Login
+        self.assertEqual(ts.parse_credential("foo=bar"), ("foo=bar", ""))
+
+
 # ---- 凭据序列化与可用性 ----
 
 
@@ -299,6 +328,28 @@ class TestRun(unittest.TestCase):
         res = ts.run("sessionid=x", post=fake, now=NOW)
         self.assertEqual(res.status, "auth_expired")
         self.assertEqual(fake.paths(), [ts.LOGIN_PATH])
+
+    def test_whole_cookie_uses_only_sessionid_for_login(self):
+        fake = FakePost().add(ts.LOGIN_PATH, (403, {}, "forbidden"))
+        res = ts.run("foo=1; sessionid=x; Path=/; HttpOnly", post=fake, now=NOW)
+        self.assertEqual(res.status, "auth_expired")
+        self.assertEqual(fake.calls[0]["cookie"], "sessionid=x",
+                         "整段 Cookie 只取 sessionid，不能把其他 cookie 一起送出去")
+
+    def test_cloudide_session_paste_skips_login(self):
+        token = make_jwt(NOW + 8 * 3600)
+        fake = (FakePost()
+                .add(ts.TOKEN_PATH, ok_response({"Result": {"Token": token}}))
+                .add(ts.USAGE_PATH, ok_response(usage_page([sess("s1")], total=1))))
+        auth = TraeAuth()
+        res = ts.run("X-Cloudide-Session=pasted-sess; Path=/", auth=auth, post=fake, now=NOW)
+
+        self.assertEqual(res.status, "ok")
+        self.assertEqual(fake.paths(), [ts.TOKEN_PATH, ts.USAGE_PATH],
+                         "直接给了 Session 就不该再走 Login")
+        self.assertEqual(fake.calls[0]["cookie"], "X-Cloudide-Session=pasted-sess")
+        self.assertEqual(auth.cloudide_session, "pasted-sess")
+        self.assertEqual(auth.jwt, token)
 
     def test_full_chain_login_token_usage(self):
         exp = NOW + 8 * 3600

@@ -860,7 +860,7 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
         self.assertEqual(len(wins), 1, "设置窗口没建出来")
         win = wins[0]
         self.assertTrue(self._find_by_text(win, "Trae"))
-        self.assertTrue(self._find_by_text(win, "粘贴 trae.cn 登录后的 sessionid cookie 值"))
+        self.assertTrue(self._find_by_text(win, "粘贴 sessionid / 整段 Cookie / X-Cloudide-Session"))
 
         entries = [w for w in self._walk(win) if isinstance(w, tk.Entry)]
         trae_entries = [e for e in entries

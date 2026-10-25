@@ -1770,7 +1770,7 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
                               highlightcolor=Design.BRAND)
         trae_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=4)
         trae_entry.insert(0, self.settings.get("trae_sessionid") or "")
-        tk.Label(trae_row, text=L("粘贴 trae.cn 登录后的 sessionid cookie 值"),
+        tk.Label(trae_row, text=L("粘贴 sessionid / 整段 Cookie / X-Cloudide-Session"),
                  fg=Design.TEXT_MUTED, bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL,
                  anchor='w').pack(fill=tk.X, pady=(2, 0))
 
