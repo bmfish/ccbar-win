@@ -186,6 +186,41 @@ def parse_credential(text):
     return ("sessionid=" + raw, "")
 
 
+def jwt_uid(token):
+    """解 JWT payload 里的账号 uid（claims.data.id）。纯本地 base64 解码，失败返回 ""。
+
+    uid 是账号唯一身份：同一账号多份 cookie / 重登轮换后 uid 不变，
+    游标（水位/余额）按 uid 记账，换 cookie 不再依赖字符串比对。
+    """
+    parts = _jwt_parts(token)
+    if len(parts) < 2:
+        return ""
+    payload = parts[1] + "=" * (-len(parts[1]) % 4)
+    try:
+        obj = json.loads(base64.urlsafe_b64decode(payload).decode("utf-8", "replace"))
+    except Exception:
+        return ""
+    if not isinstance(obj, dict):
+        return ""
+    inner = obj.get("data")
+    if not isinstance(inner, dict):
+        return ""
+    uid = inner.get("id")
+    if uid is None or isinstance(uid, bool):
+        return ""
+    return str(uid).strip()
+
+
+def credential_identity(text):
+    """账号身份指纹：passport cookie 优先，退而 X-Cloudide-Session。
+
+    用于"uid 记忆"与凭据的匹配——同一账号换 cookie（刷新/补 Session/整段粘贴）
+    指纹不变，游标得以保留；跨账号指纹必变，uid 重新认领、走 90 天全量。
+    """
+    passport, cloudide = parse_credential(text)
+    return passport if passport else cloudide
+
+
 def is_night_silent(now=None):
     """0–9 点本地时间静默：凌晨不拉 API，由 9 点后第一次同步的"水位-2 天"窗口覆盖"""
     return _now_dt(now).hour < NIGHT_SILENT_UNTIL_HOUR

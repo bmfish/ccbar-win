@@ -252,6 +252,7 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
         self.store.rebuild(configs,
                            trae_enabled=bool(self.settings.get("trae_enabled")),
                            trae_sessionid=self.settings.get("trae_sessionid") or "",
+                           trae_sessionid2=self.settings.get("trae_sessionid2") or "",
                            trae_bg_interval=self.settings.get("trae_bg_interval"),
                            workbuddy_enabled=bool(self.settings.get("workbuddy_enabled")),
                            workbuddy_cookie=self.settings.get("workbuddy_cookie") or "",
@@ -1776,6 +1777,24 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
                  fg=Design.TEXT_MUTED, bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL,
                  anchor='w').pack(side=tk.LEFT)
 
+        # 账号 2（可选）：多账号合计展示，游标按 uid 独立记账
+        trae_row2 = tk.Frame(inner, bg=Design.BACKGROUND)
+        trae_row2.pack(fill=tk.X, padx=24, pady=(4, 0))
+        tk.Label(trae_row2, text=L("账号 2"), fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
+                 font=Design.FONT_UI, width=10, anchor='w').pack(side=tk.LEFT, padx=(8, 0))
+        trae_entry2 = tk.Entry(trae_row2, bg=Design.CARD_FILL, fg=Design.TEXT_PRIMARY,
+                               insertbackground=Design.TEXT_PRIMARY, relief="flat",
+                               font=Design.FONT_MONO_SMALL, highlightthickness=1,
+                               highlightbackground=Design.CARD_BORDER,
+                               highlightcolor=Design.BRAND)
+        trae_entry2.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=4)
+        trae_entry2.insert(0, self.settings.get("trae_sessionid2") or "")
+        trae_hint2 = tk.Frame(inner, bg=Design.BACKGROUND)
+        trae_hint2.pack(fill=tk.X, padx=24, pady=(2, 0))
+        tk.Label(trae_hint2, text=L("可选：第二账号 sessionid / Cookie（两账号用量与积分合计展示）"),
+                 fg=Design.TEXT_MUTED, bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL,
+                 anchor='w').pack(side=tk.LEFT)
+
         def show_trae_help():
             """凭据是一长串 Cookie，不给步骤用户不知道从哪里复制"""
             import webbrowser
@@ -2087,6 +2106,7 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
             # Trae 是 HTTP 源：开关 + 登录凭据 + 后台同步间隔（validate/apply 一并处理）
             updates["trae_enabled"] = trae_var.get()
             updates["trae_sessionid"] = trae_entry.get().strip()
+            updates["trae_sessionid2"] = trae_entry2.get().strip()
             updates["trae_bg_interval"] = trae_interval_entry.get()
             # WorkBuddy 同理；粘贴的内容统一归一化成 "session=…; session_2=…"
             wb_raw = wb_text.get("1.0", tk.END)
@@ -2262,6 +2282,7 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
             return
         # 登录态与后台间隔可能在设置里改过，先同步进统计库
         self.store.trae_sessionid = self.settings.get("trae_sessionid") or ""
+        self.store.trae_sessionid2 = self.settings.get("trae_sessionid2") or ""
         self.store.trae_bg_interval = trae_sync.clamp_bg_interval(
             self.settings.get("trae_bg_interval"))
 

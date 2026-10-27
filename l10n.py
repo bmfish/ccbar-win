@@ -337,6 +337,8 @@ L10N_EN = {
     "积分余额（官方账单）": "Credit Balance (official)",
     "筛选": "Filter",
     "粘贴 sessionid / 整段 Cookie / X-Cloudide-Session": "paste sessionid / whole cookie / X-Cloudide-Session",
+    "账号 2": "Account 2",
+    "可选：第二账号 sessionid / Cookie（两账号用量与积分合计展示）": "Optional: second account's sessionid / cookie (usage and credits shown combined)",
     "粘贴后将在保存后生效": "Applied after save",
     "粘贴到左侧输入框，点「保存」": "Paste it into the field and click Save",
     "如何获取？": "How to get it?",

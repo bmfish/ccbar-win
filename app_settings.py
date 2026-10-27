@@ -60,6 +60,7 @@ DEFAULTS = {
     "zcode_path": DEFAULT_PATHS["zcode"],
     "trae_enabled": False,
     "trae_sessionid": "",                 # Trae 的 passport sessionid cookie
+    "trae_sessionid2": "",                # Trae 第二账号凭据（可选，多账号合计展示）
     "trae_bg_interval": DEFAULT_BG_INTERVAL,       # Trae 后台同步间隔（秒），默认 10 分钟
     # WorkBuddy 是 HTTP 源但**独立存放**：只出现在洞察中心的独立页签
     "workbuddy_enabled": False,

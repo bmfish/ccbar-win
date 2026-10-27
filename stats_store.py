@@ -310,6 +310,8 @@ class StatsStore:
         # Trae 是 HTTP 源（不走 ATTACH）：rebuild 时把启用状态与凭据快照进来
         self.trae_enabled = False
         self.trae_sessionid = ""
+        # Trae 第二账号凭据（可选）：两槽各自换签、各自按 uid 记游标，明细同表 UPSERT 合计
+        self.trae_sessionid2 = ""
         self.trae_bg_interval = trae_sync.BG_MIN_INTERVAL   # 后台节流间隔（秒）
         self._last_trae_sync_at = 0.0   # 上次 Trae 同步时刻（in-memory，重启无妨）
         # WorkBuddy 也是 HTTP 源，但独立存表、独立节流（不参与其他任何页面）
@@ -332,6 +334,7 @@ class StatsStore:
     # ------------------------------------------------------------ 连接管理
 
     def rebuild(self, configs, trae_enabled=False, trae_sessionid="",
+                trae_sessionid2="",
                 trae_bg_interval=None, workbuddy_enabled=False,
                 workbuddy_cookie="", workbuddy_bg_interval=None):
         """（重）建连接并 ATTACH 各启用源。
@@ -339,15 +342,19 @@ class StatsStore:
         configs: [(adapter, enabled, path), ...]
         trae_enabled / trae_sessionid: Trae 是 HTTP 源不走 ATTACH，只登记启用状态与
         passport 凭据。Trae-only 安装（无任何 SQLite 源）同样要能查数。
+        trae_sessionid2: 第二账号凭据（可选，多账号合计展示）。
         trae_bg_interval: Trae 后台同步间隔（秒）；None/非法回落到 trae_sync 默认。
         workbuddy_enabled / workbuddy_cookie: WorkBuddy 同样是 HTTP 源，凭据是整条
         Cookie；它的明细进独立表，**不参与** usage_all 与其他页面。
         workbuddy_bg_interval: WorkBuddy 后台同步间隔（秒）。
         """
+        old_sid = self.trae_sessionid
+        old_sid2 = self.trae_sessionid2
         with self._lock:
             self._close()
             self.trae_enabled = bool(trae_enabled)
             self.trae_sessionid = (trae_sessionid or "").strip()
+            self.trae_sessionid2 = (trae_sessionid2 or "").strip()
             self.trae_bg_interval = trae_sync.clamp_bg_interval(trae_bg_interval)
             self.workbuddy_enabled = bool(workbuddy_enabled)
             self.workbuddy_cookie = workbuddy_sync.normalize_cookie(
@@ -384,6 +391,17 @@ class StatsStore:
                     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
                 # 已移除的 Trae 每日签到功能会留下 trae_checkin_* 键，启动时清掉
                 self.conn.execute("DELETE FROM meta WHERE key LIKE 'trae_checkin%'")
+                # 换凭据只清 JWT 缓存（新 cookie 需要重新换签，旧 JWT 未过期前会拉旧账号
+                # 数据）。按"身份指纹"比较而非原始串：同一账号换粘贴格式不清缓存。
+                # 游标与明细按 uid 记账、永不删除：同账号换 cookie 指纹不变、
+                # 游标保留；跨账号 uid 重新认领后自然 90 天全量，UPSERT 幂等无重复。
+                for old_sid_v, new_sid_v, auth_key in (
+                        (old_sid, self.trae_sessionid, "trae_auth"),
+                        (old_sid2, self.trae_sessionid2, "trae_auth_2")):
+                    if (old_sid_v and new_sid_v
+                            and trae_sync.credential_identity(old_sid_v)
+                            != trae_sync.credential_identity(new_sid_v)):
+                        self.conn.execute("DELETE FROM meta WHERE key = ?", (auth_key,))
                 # 每日聚合缓存：区间/总量查询直接读它，不再扫明细。
                 # meta 标记控制升级后一次性全量回填。
                 self.conn.execute(DAILY_AGG_DDL)
@@ -636,35 +654,63 @@ class StatsStore:
             return default
 
     def sync_trae_if_needed(self, now=None, interactive=False):
-        """按需同步 Trae 用量（HTTP 源）。返回 TraeResult 或 None（被守卫拦下）。
+        """按需同步 Trae 用量（HTTP 源）。返回槽 1 的 TraeResult 或 None（被守卫拦下）。
 
         interactive=True 是用户点开弹窗的主动刷新，间隔更短（60s vs trae_bg_interval）。
         夜间静默（0–9 点本地时间）直接返回且**不占**节流窗口：凌晨会话由 9 点后
         第一次同步的"水位 - 2 天"窗口覆盖，不丢数。
+        多账号：槽 1 主凭据，槽 2 trae_sessionid2（空则跳过）；两槽共用节流时钟串行执行。
         """
         now_epoch = self._now_epoch(now)
         now_dt = datetime.fromtimestamp(now_epoch)
-
-        # ---- 守卫 1~5（锁内取快照；网络绝不在锁内跑）----
         with self._lock:
             if self.conn is None:
                 return None
             if not self.trae_enabled:
                 self.source_status["trae"] = "未启用"
                 return None
+            sid1, sid2 = self.trae_sessionid, self.trae_sessionid2
+        result = None
+        if sid1:
+            result = self._sync_trae_slot(1, sid1, now_epoch, now_dt, interactive)
+        if sid2:
+            self._sync_trae_slot(2, sid2, now_epoch, now_dt, interactive)
+        return result
+
+    def _slot_uid(self, slot, sessionid):
+        """槽内 uid 记忆：uid 与凭据指纹绑定。同账号换 cookie 指纹不变 → 游标延续；
+        跨账号指纹必变 → uid 视为未知，走 90 天全量（UPSERT 幂等，无重复风险）。"""
+        suffix = "_2" if slot == 2 else ""
+        saved = self._meta_get("trae_uid%s" % suffix)
+        saved_cred = self._meta_get("trae_uid_cred%s" % suffix)
+        if not saved or saved_cred != trae_sync.credential_identity(sessionid):
+            return ""
+        return saved
+
+    def _sync_trae_slot(self, slot, sessionid, now_epoch, now_dt, interactive):
+        """单账号同步：游标（水位/剪枝基准/余额）全部按 uid 记账，明细永不删除。"""
+        uid = self._slot_uid(slot, sessionid)
+        auth_key = "trae_auth_2" if slot == 2 else "trae_auth"
+        ent_at_key = "trae_ent_at_2" if slot == 2 else "trae_ent_at"
+        status_key = "trae_2" if slot == 2 else "trae"
+
+        # ---- 守卫与拉取窗口（锁内取快照；网络绝不在锁内跑）----
+        with self._lock:
+            if self.conn is None:
+                return None
             # 夜间静默只限后台定时器（0–9 点）；用户主动点开弹窗仍放行
             if not interactive and trae_sync.is_night_silent(now_dt):
                 return None   # 0–9 点后台静默，不消耗节流
-            if not self.trae_sessionid:
-                self.source_status["trae"] = "未配置登录"
-                return None   # 没有凭据就不发 HTTP
             interval = (trae_sync.INTERACTIVE_MIN_INTERVAL if interactive
                         else trae_sync.clamp_bg_interval(self.trae_bg_interval))
             if now_epoch - self._last_trae_sync_at < interval:
                 return None   # 节流窗口内
 
-            # ---- 拉取窗口：水位 -2 天回看（跨零点迟到会话 + 会话跨天推进），首次 90 天全量
-            water = self._meta_get("trae_synced_day")
+            # ---- 拉取窗口：水位 -2 天回看（跨零点迟到会话 + 会话跨天推进），
+            # uid 未知（首次/换账号）时 90 天全量；JWT 解不出 uid 的异常场景
+            # 回落旧全局键（单账号行为降级，保底不丢游标）
+            water = (self._meta_get("trae_synced_day_%s" % uid) if uid
+                     else self._meta_get("trae_synced_day"))
             from_epoch = self.local_midnight(trae_sync.FIRST_FETCH_DAYS, now=now_dt)
             if water:
                 try:
@@ -675,18 +721,19 @@ class StatsStore:
                     pass   # 水位坏了当首次全量
             to_epoch = int(now_epoch)
             # 积分账单（只喂设置页）按小时节流，不必跟着每次同步拉
-            fetch_ent = now_epoch - self._meta_float("trae_ent_at") >= trae_sync.ENT_MIN_INTERVAL
+            fetch_ent = now_epoch - self._meta_float(ent_at_key) >= trae_sync.ENT_MIN_INTERVAL
             # 剪枝：上次完整成功同步时刻 − 1h。服务端倒序返回，某页最新 usage_time
             # 都比它旧时，该页及后续页全是已入库数据，翻页直接停（省请求）。
             # 首次（无水位）或上次被截断时不应剪枝——由下方"仅完整成功才推进
             # trae_synced_at"保证：截断那轮不推进，cutoff 保持旧值，剪枝自动变保守。
-            last_full_sync = self._meta_float("trae_synced_at", 0.0)
+            last_full_sync = (self._meta_float("trae_synced_at_%s" % uid) if uid
+                              else self._meta_float("trae_synced_at"))
             cutoff = int(last_full_sync) - 3600 if last_full_sync else None
-            auth = TraeAuth.from_json(self._meta_get("trae_auth")) or TraeAuth()
+            auth = TraeAuth.from_json(self._meta_get(auth_key)) or TraeAuth()
 
         # ---- 网络（锁外）----
         try:
-            result = _fetch_trae_window(self.trae_sessionid, auth, from_epoch,
+            result = _fetch_trae_window(sessionid, auth, from_epoch,
                                         to_epoch, fetch_ent, now_epoch, cutoff)
         except Exception as e:   # 注入的 transport 等异常也不许把界面打挂
             result = TraeResult("failed", message=str(e))
@@ -698,7 +745,14 @@ class StatsStore:
             if self.conn is None:
                 return result
             # 换签结果（run 就地更新了 auth）必须持久化，重启不丢
-            self._meta_set("trae_auth", auth.to_json())
+            self._meta_set(auth_key, auth.to_json())
+            # uid 认领：换签成功即解出账号 uid 并与凭据指纹绑定（uid 未变则无需重写）。
+            resolved_uid = trae_sync.jwt_uid(auth.jwt) or uid
+            uid_key = "trae_uid_2" if slot == 2 else "trae_uid"
+            cred_key = "trae_uid_cred_2" if slot == 2 else "trae_uid_cred"
+            if resolved_uid and resolved_uid != uid:
+                self._meta_set(uid_key, resolved_uid)
+                self._meta_set(cred_key, trae_sync.credential_identity(sessionid))
             if result.status == "ok":
                 # commit=False：明细写并入下面窗口重算/meta 的同一事务收口，
                 # 每轮同步从 3 次 commit 降到 2 次（rebuild 就地提交是 VACUUM 契约，保留）
@@ -710,24 +764,31 @@ class StatsStore:
                 # 仅"完整成功"（分页没截断）才推进水位与剪枝基准：
                 # 截断意味着窗口内还有更旧的会话没拉到，推进水位会让回看窗口变窄，
                 # 缺口永远补不回来。二分重取后仍截断（单日会话超上限）时保留旧水位，
-                # 下轮同步继续从原起点补。
+                # 下轮同步继续从原起点补。uid 未知（首次/换号）时本轮只建立基线，
+                # 游标随 uid 认领成功后下一轮起正常增量（最多多一轮全量，无重复数据）。
+                # JWT 解不出 uid 的异常场景回落旧全局键（单账号行为降级）。
                 if not result.truncated:
-                    self._meta_set("trae_synced_day", today)
-                    self._meta_set("trae_synced_at", int(now_epoch))
+                    if resolved_uid:
+                        self._meta_set("trae_synced_day_%s" % resolved_uid, today)
+                        self._meta_set("trae_synced_at_%s" % resolved_uid, int(now_epoch))
+                    else:
+                        self._meta_set("trae_synced_day", today)
+                        self._meta_set("trae_synced_at", int(now_epoch))
                 else:
-                    print("[ccBar] Trae 本窗口仍不完整，水位保持 %s" %
-                          (water or "空"))
+                    print("[ccBar] Trae 槽%d 本窗口仍不完整，水位保持 %s" %
+                          (slot, water or "空"))
                 if result.consumed is not None and result.total is not None:
-                    self._meta_set("trae_ent", "%s|%s" % (result.consumed, result.total))
-                    self._meta_set("trae_ent_at", int(now_epoch))
-                self.source_status["trae"] = "已连接"
+                    ent_key = ("trae_ent_%s" % resolved_uid) if resolved_uid else "trae_ent"
+                    self._meta_set(ent_key, "%s|%s" % (result.consumed, result.total))
+                    self._meta_set(ent_at_key, int(now_epoch))
+                self.source_status[status_key] = "已连接"
             elif result.status == "auth_expired":
-                self.source_status["trae"] = "登录已过期，请重新提供 sessionid 或 X-Cloudide-Session"
+                self.source_status[status_key] = "登录已过期，请重新提供 sessionid 或 X-Cloudide-Session"
             elif result.status == "not_configured":
-                self.source_status["trae"] = "未配置登录"
+                self.source_status[status_key] = "未配置登录"
             else:
-                print(f"Trae 同步失败: {result.message}")
-                self.source_status["trae"] = "同步失败：" + (result.message or "")
+                print("Trae 槽%d 同步失败: %s" % (slot, result.message))
+                self.source_status[status_key] = "同步失败：" + (result.message or "")
             self.conn.commit()
         return result
 
@@ -781,16 +842,39 @@ class StatsStore:
         return written
 
     def trae_ent_summary(self):
-        """Trae 官方积分账单 meta "consumed|total" → (consumed, total)；缺失/坏数据 None"""
+        """Trae 官方积分账单，多账号按 uid 键合计 → (consumed, total)；缺失/坏数据 None。
+
+        trae_ent_at* 是节流时间戳需跳过；存在 per-uid 键时忽略旧全局键（迁移脚本会
+        搬走），避免"脚本未跑 + 新键已写"时同账号双算。
+        """
         with self._lock:
-            raw = self._meta_get("trae_ent")
-        parts = (raw or "").split("|")
-        if len(parts) != 2:
-            return None
-        try:
-            return (float(parts[0]), float(parts[1]))
-        except ValueError:
-            return None
+            if self.conn is None:
+                return None
+            rows = self.conn.execute(
+                "SELECT key, value FROM meta WHERE key LIKE 'trae_ent%'").fetchall()
+        consumed = total = 0.0
+        per_uid = 0
+        legacy = None
+        for key, raw in rows:
+            if key.startswith("trae_ent_at"):
+                continue
+            parts = (raw or "").split("|")
+            if len(parts) != 2:
+                continue
+            try:
+                c, t = float(parts[0]), float(parts[1])
+            except ValueError:
+                continue
+            if key == "trae_ent":
+                legacy = (c, t)
+            else:
+                consumed += c
+                total += t
+                per_uid += 1
+        if per_uid == 0 and legacy:
+            consumed, total = legacy
+            per_uid = 1
+        return (consumed, total) if per_uid else None
 
     # ------------------------------------------------------------ WorkBuddy（HTTP 源，独立表）
     # 明细进 workbuddy_usage，**不进 usage_log / daily_agg / usage_all**：
