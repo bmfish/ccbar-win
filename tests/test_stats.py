@@ -1079,7 +1079,7 @@ class TestStatsStore(unittest.TestCase):
         with mock.patch.object(trae_sync, "run", fake):
             self.assertIsNone(self.store.sync_trae_if_needed(now=night))
         self.assertEqual(fake.calls, [], "夜间不得发请求")
-        self.assertEqual(self.store._last_trae_sync_at, 0.0, "静默不占节流窗口")
+        self.assertEqual(self.store._last_trae_sync_at, {}, "静默不占节流窗口")
 
         with mock.patch.object(trae_sync, "run", fake):
             self.assertIsNotNone(self.store.sync_trae_if_needed(now=self._at(hour=9)))
@@ -1152,7 +1152,7 @@ class TestStatsStore(unittest.TestCase):
             result = self.store.sync_trae_if_needed(now=t0)
             self.assertEqual(result.status, "failed")
             self.assertEqual(self.store.source_status["trae"], "同步失败：boom")
-            self.assertEqual(self.store._last_trae_sync_at, t0.timestamp())
+            self.assertEqual(self.store._last_trae_sync_at.get(1), t0.timestamp())
             self.assertIsNone(self.store.sync_trae_if_needed(
                 now=t0 + timedelta(seconds=1)), "失败也占掉节流窗口")
             self.assertEqual(len(calls), 1)

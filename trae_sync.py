@@ -339,14 +339,17 @@ def normalize(payload):
         # 库内统一 Anthropic 口径（input=净输入，三项相加=总 prompt），否则合计会重复计算缓存。
         gross = _int(extra.get("input_token"))
         cached = _int(extra.get("cache_read_token"))
+        # 模型名缺失/空白/非字符串统一兜底，避免入库出现空模型条目
         model = s.get("model_name")
+        if not isinstance(model, str) or not model.strip():
+            model = "unknown"
         # credits_float 缺失回落 amount_float，两者都缺为 0
         credits = _opt_num(s.get("credits_float"))
         if credits is None:
             credits = _opt_num(s.get("amount_float"))
         rows.append(TraeRow(
             session_id=sid,
-            model=model if model is not None else "unknown",
+            model=model,
             input=max(0, gross - cached),
             output=_int(extra.get("output_token")),
             cache_read=cached,

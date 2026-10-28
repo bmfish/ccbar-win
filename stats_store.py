@@ -313,7 +313,7 @@ class StatsStore:
         # Trae 第二账号凭据（可选）：两槽各自换签、各自按 uid 记游标，明细同表 UPSERT 合计
         self.trae_sessionid2 = ""
         self.trae_bg_interval = trae_sync.BG_MIN_INTERVAL   # 后台节流间隔（秒）
-        self._last_trae_sync_at = 0.0   # 上次 Trae 同步时刻（in-memory，重启无妨）
+        self._last_trae_sync_at = {}    # {槽: 上次同步时刻}，两槽各自节流（in-memory，重启无妨）
         # WorkBuddy 也是 HTTP 源，但独立存表、独立节流（不参与其他任何页面）
         self.workbuddy_enabled = False
         self.workbuddy_cookie = ""
@@ -703,8 +703,9 @@ class StatsStore:
                 return None   # 0–9 点后台静默，不消耗节流
             interval = (trae_sync.INTERACTIVE_MIN_INTERVAL if interactive
                         else trae_sync.clamp_bg_interval(self.trae_bg_interval))
-            if now_epoch - self._last_trae_sync_at < interval:
-                return None   # 节流窗口内
+            last_sync = self._last_trae_sync_at.get(slot, 0.0)
+            if now_epoch - last_sync < interval:
+                return None   # 节流窗口内（按槽独立，不会互相吞掉）
 
             # ---- 拉取窗口：水位 -2 天回看（跨零点迟到会话 + 会话跨天推进），
             # uid 未知（首次/换账号）时 90 天全量；JWT 解不出 uid 的异常场景
@@ -741,7 +742,7 @@ class StatsStore:
         # ---- 入库 + 状态（锁内）。节流时间戳在所有出口都推进：
         # 失败/过期也占掉窗口，防弹窗反复开关把接口打爆（下次后台周期自然重试）
         with self._lock:
-            self._last_trae_sync_at = now_epoch
+            self._last_trae_sync_at[slot] = now_epoch
             if self.conn is None:
                 return result
             # 换签结果（run 就地更新了 auth）必须持久化，重启不丢
