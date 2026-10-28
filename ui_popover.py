@@ -328,19 +328,26 @@ class PopoverWindow:
             # 今日每小时曲线（卡片内垫底，颜色按卡片底色混）
             self._hourly_sparkline(body, bg=fill)
 
-            # 今日会话（口径同 mac sessionStats）
-            sessions = self._session_text()
-            if sessions:
-                tk.Label(body, text=sessions, fg=Design.TEXT_MUTED,
-                         bg=fill, font=Design.FONT_UI_TINY,
-                         anchor='w').pack(fill=tk.X, pady=(4, 0))
+            # 今日会话小字已按需求移除；页脚改为多账号积分拆分（见下）
 
-            # 速率预测（mac predictionText：工时 > 0.2h 才给）
-            prediction = self._prediction_text(today, work_hours)
-            if prediction:
-                tk.Label(body, text=prediction, fg=Design.TEXT_MUTED,
-                         bg=fill, font=Design.FONT_UI_TINY,
-                         anchor='w').pack(fill=tk.X, pady=(2, 0))
+            # 页脚：双账号且余额总额非 0 → 各账号今日积分拆分；单账号回落速率预测
+            by_account = self._today_credits_by_account()
+            if len(by_account) > 1:
+                arow = tk.Frame(body, bg=fill)
+                arow.pack(fill=tk.X, pady=(4, 0))
+                for slot, val in by_account:
+                    tk.Label(arow, text="●", fg=Design.SUCCESS if slot == 1 else Design.BRAND,
+                             bg=fill, font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT)
+                    tk.Label(arow, text=format_credits(val), fg=Design.TEXT_SECONDARY,
+                             bg=fill, font=Design.FONT_UI_TINY).pack(
+                        side=tk.LEFT, padx=(2, 10))
+            else:
+                # 速率预测（mac predictionText：工时 > 0.2h 才给）
+                prediction = self._prediction_text(today, work_hours)
+                if prediction:
+                    tk.Label(body, text=prediction, fg=Design.TEXT_MUTED,
+                             bg=fill, font=Design.FONT_UI_TINY,
+                             anchor='w').pack(fill=tk.X, pady=(2, 0))
 
             self._bind_card(card, self._open(self.app.show_hourly_detail_today))
         elif self.app.store.attached:
@@ -542,6 +549,22 @@ class PopoverWindow:
         if count <= 0:
             return ""
         return L("今日会话 %d 个 · 均 %d 分 · 最长 %d 分") % (count, avg, longest)
+
+    def _today_credits_by_account(self):
+        """今日各账号积分（按槽位；仅双账号已认领且余额总额非 0 时返回 2 元素）"""
+        try:
+            accounts = self.app.store.query_today_credits_by_account() or []
+        except Exception:
+            return []
+        if len(accounts) < 2:
+            return []
+        try:
+            ent = self.app.store.trae_ent_summary()
+        except Exception:
+            ent = None
+        if not ent or ent[1] <= 0:
+            return []
+        return accounts
 
     @staticmethod
     def _prediction_text(today, work_hours):

@@ -702,7 +702,7 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
         body.destroy()
 
     def test_popover_today_card_shows_credits_prediction_sessions(self):
-        """今日卡：积分缀在大数字后、速率预测行、今日会话行"""
+        """今日卡：积分缀在大数字后、速率预测行；今日会话行已移除（按需求）"""
         self.app.store.query_today_credits = lambda: 42.0
         self.app.query_work_hours = lambda: "4.0"
         _popover, body = self._build_popover()
@@ -711,7 +711,7 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
         total = (self.app.query_day_stats(0) or {"total": 0})["total"]
         expected = "按当前速率到 24:00 约 %s" % Design.fmt_tokens(int(total / 4.0 * 24))
         self.assertIn(expected, texts)
-        self.assertTrue(any("今日会话" in t for t in texts), texts)
+        self.assertFalse(any("今日会话" in t for t in texts), texts)
         body.destroy()
 
     def test_popover_prediction_needs_work_hours(self):

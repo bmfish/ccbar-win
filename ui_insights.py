@@ -77,6 +77,15 @@ class InsightsWindowsMixin:
             credits_ent = store.trae_ent_summary()
         except Exception:
             credits_ent = None
+        # 多账号拆分：分账号余额 + 今日各账号积分（单账号时均为空/单元素，页面不拆分展示）
+        try:
+            credits_accounts = store.trae_ent_accounts()
+        except Exception:
+            credits_accounts = []
+        try:
+            today_by_account = store.query_today_credits_by_account()
+        except Exception:
+            today_by_account = []
         # WorkBuddy 页：独立表，只在这里出现。必须同步等一次交互档同步，
         # 否则本次打开读到的是上一轮数据（这里已在后台线程，可以安全阻塞）。
         self._prepare_workbuddy_sync()
@@ -148,7 +157,8 @@ class InsightsWindowsMixin:
                 est, tokens91, weekday_totals, session_count, session_avg,
                 session_longest, top_channels, ins_daily, ins_first, peak_hour_map,
                 cost90, cost_daily90, channels90, apps90, comp90, credits_daily90,
-                channel_today, session30, session_cost30, credits_yday)
+                channel_today, session30, session_cost30, credits_yday,
+                credits_accounts, today_by_account)
 
     @_on_gui
     def _render_insights(self, data, initial_page=None):
@@ -168,7 +178,8 @@ class InsightsWindowsMixin:
          est, tokens91, weekday_totals, session_count, session_avg,
          session_longest, top_channels, ins_daily, ins_first, peak_hour_map,
          cost90, cost_daily90, channels90, apps90, comp90, credits_daily90,
-         channel_today, session30, session_cost30, credits_yday) = data
+         channel_today, session30, session_cost30, credits_yday,
+         credits_accounts, today_by_account) = data
 
         root = tk.Toplevel(self._ui_root)
         root.title(L("洞察中心"))
@@ -1513,10 +1524,16 @@ class InsightsWindowsMixin:
         table_card, table_body = rounded_card(table_wrap, padx=6, pady=6)
         table_card.pack(fill=tk.BOTH, expand=True)
 
-        cols = (L("时间"), L("渠道"), L("模型"), "Token", L("费用"))
+        # 多账号时流水表追加"账号"列（行尾显示槽位号；历史行显示 -）
+        try:
+            multi_account = len(store.query_today_credits_by_account()) > 1
+        except Exception:
+            multi_account = False
+        cols = (L("时间"), L("渠道"), L("模型"), "Token", L("费用")) \
+            + ((L("账号"),) if multi_account else ())
         tree = ttk.Treeview(table_body, columns=cols, show="headings", height=16,
                             style="Insights.Treeview")
-        widths = (90, 90, 220, 110, 90)
+        widths = (90, 90, 220, 110, 90) + ((56,) if multi_account else ())
         for c, w in zip(cols, widths):
             tree.heading(c, text=c)
             tree.column(c, width=w, anchor='w' if c in (L("渠道"), L("模型")) else 'e')
@@ -1595,7 +1612,7 @@ class InsightsWindowsMixin:
 
         def refill(*_):
             tree.delete(*tree.get_children())
-            for ts, model, source, token, cost, credits in filtered_rows():
+            for ts, model, source, token, cost, credits, account in filtered_rows():
                 t = datetime.fromtimestamp(ts)
                 if credits > 0:
                     amount = L("%s 积分") % self._fmt_credits(credits)
@@ -1603,9 +1620,11 @@ class InsightsWindowsMixin:
                     amount = "$%.2f" % cost
                 else:
                     amount = "-"
-                tree.insert("", tk.END, values=(
-                    t.strftime("%H:%M:%S"), store.source_display_name(source), model,
-                    self.fmt_tokens(token), amount))
+                values = [t.strftime("%H:%M:%S"), store.source_display_name(source), model,
+                          self.fmt_tokens(token), amount]
+                if multi_account:
+                    values.append(str(account) if account else "-")
+                tree.insert("", tk.END, values=values)
 
         def refresh_day():
             day = tl_state["day"]
@@ -1655,16 +1674,20 @@ class InsightsWindowsMixin:
             try:
                 with open(path, "w", encoding="utf-8-sig", newline="") as f:
                     writer = csv.writer(f)
-                    writer.writerow([L("时间"), L("模型"), L("渠道"), L("总 Token"), L("费用/积分")])
-                    for ts, model, source, token, cost, credits in rows:
+                    writer.writerow([L("时间"), L("模型"), L("渠道"), L("总 Token"), L("费用/积分")]
+                                    + ([L("账号")] if multi_account else []))
+                    for ts, model, source, token, cost, credits, account in rows:
                         # 与流水页一致：Trae 行导积分，其他源导美元费用
                         if source == "trae":
                             amount = L("%s 积分") % self._fmt_credits(credits)
                         else:
                             amount = "%.4f" % cost
-                        writer.writerow([
+                        values = [
                             datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S"),
-                            model, source, token, amount])
+                            model, source, token, amount]
+                        if multi_account:
+                            values.append(str(account) if account else "-")
+                        writer.writerow(values)
             except OSError as e:
                 messagebox.showerror(L("导出失败"), str(e))
                 return
@@ -1760,6 +1783,17 @@ class InsightsWindowsMixin:
             tk.Label(hrow, text=L("积分"), fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
                      font=Design.FONT_UI_SMALL).pack(side=tk.LEFT, padx=(6, 8))
             delta_badge(hrow, credits_today, credits_yday)
+            # 多账号：今日积分按账号拆分（色点与余额卡一致）
+            if len(today_by_account) > 1:
+                arow = tk.Frame(hbody, bg=Design.CARD_FILL)
+                arow.pack(fill=tk.X)
+                for slot, val in today_by_account:
+                    tk.Label(arow, text="●", fg=Design.SUCCESS if slot == 1 else Design.BRAND,
+                             bg=Design.CARD_FILL, font=Design.FONT_MONO_SMALL).pack(
+                        side=tk.LEFT, padx=(0, 2))
+                    tk.Label(arow, text=format_credits(val), fg=Design.TEXT_SECONDARY,
+                             bg=Design.CARD_FILL, font=Design.FONT_MONO_SMALL).pack(
+                        side=tk.LEFT, padx=(0, 10))
             cred_spark = ImageTk.PhotoImage(
                 self._sparkline_png([v for _l, v in zero_days(7)], Design.SUCCESS,
                                     width=300, height=76))
@@ -1841,6 +1875,19 @@ class InsightsWindowsMixin:
                 tk.Label(lrow, text=L("剩余 %.0f%%") % (remain_ratio * 100),
                          fg=Design.SUCCESS, bg=Design.CARD_FILL,
                          font=Design.FONT_MONO_SMALL).pack(side=tk.RIGHT)
+                # 多账号：分账号余额行（色点区分槽位，与今日积分卡同色系）
+                if len(credits_accounts) > 1:
+                    for slot, acc_consumed, acc_total in credits_accounts:
+                        acc_remain = max(acc_total - acc_consumed, 0.0)
+                        arow = tk.Frame(bbody, bg=Design.CARD_FILL)
+                        arow.pack(fill=tk.X, pady=(2, 0))
+                        tk.Label(arow, text="●", fg=Design.SUCCESS if slot == 1 else Design.BRAND,
+                                 bg=Design.CARD_FILL, font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT)
+                        tk.Label(arow, text=L("剩余 %s / %s") % (
+                                     format_credits(acc_remain), format_credits(acc_total)),
+                                 fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                                 font=Design.FONT_MONO_SMALL, anchor='w').pack(
+                            side=tk.RIGHT)
                 # 耗尽提示压在卡片底部，避免余额卡下半截留一大片空白
                 tk.Label(bbody,
                          text=(L("按今日速率，余额约 %d 天后耗尽") % days_left)

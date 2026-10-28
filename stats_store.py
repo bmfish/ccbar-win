@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS usage_log (
     credits REAL NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     request_count INTEGER NOT NULL DEFAULT 1,
+    account TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (source, request_id)
 )
 """
@@ -194,7 +195,7 @@ class CCSwitchAdapter(SourceAdapter):
         SELECT 'cc-switch' AS source, app_type, model, input_tokens, output_tokens,
                cache_read_tokens, cache_creation_tokens, 0 AS reasoning_tokens,
                CAST(total_cost_usd AS REAL) AS total_cost_usd, 0.0 AS credits,
-               created_at, 1 AS request_count
+               created_at, 1 AS request_count, '' AS account
         FROM {alias}.proxy_request_logs
         WHERE created_at >= {today_start}
         """
@@ -237,7 +238,7 @@ class ZCodeAdapter(SourceAdapter):
                input_tokens, output_tokens,
                0 AS cache_read_tokens, 0 AS cache_creation_tokens,
                reasoning_tokens, 0.0 AS total_cost_usd, 0.0 AS credits,
-               started_at / 1000 AS created_at, 1 AS request_count
+               started_at / 1000 AS created_at, 1 AS request_count, '' AS account
         FROM {alias}.model_usage
         WHERE status != 'running'
           AND started_at >= {today_start} * 1000
@@ -387,6 +388,10 @@ class StatsStore:
                 if "credits" not in cols:
                     self.conn.execute(
                         "ALTER TABLE usage_log ADD COLUMN credits REAL NOT NULL DEFAULT 0")
+                # 多账号归属列：Trae 行写入所属账号 uid，其他源与历史行为空（不可追溯，不参与分账号统计）
+                if "account" not in cols:
+                    self.conn.execute(
+                        "ALTER TABLE usage_log ADD COLUMN account TEXT NOT NULL DEFAULT ''")
                 self.conn.execute(
                     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
                 # 已移除的 Trae 每日签到功能会留下 trae_checkin_* 键，启动时清掉
@@ -509,7 +514,7 @@ class StatsStore:
         parts = ["""
         SELECT source, app_type, model, input_tokens, output_tokens,
                cache_read_tokens, cache_creation_tokens, reasoning_tokens,
-               total_cost_usd, credits, created_at, request_count
+               total_cost_usd, credits, created_at, request_count, account
         FROM usage_log
         """]
         for adapter in self.attached:
@@ -757,7 +762,7 @@ class StatsStore:
             if result.status == "ok":
                 # commit=False：明细写并入下面窗口重算/meta 的同一事务收口，
                 # 每轮同步从 3 次 commit 降到 2 次（rebuild 就地提交是 VACUUM 契约，保留）
-                self.upsert_trae_rows(result.rows, commit=False)
+                self.upsert_trae_rows(result.rows, commit=False, account=resolved_uid)
                 # 今日行由 usage_all 实时可见，daily_agg 只结算完整日（< 今天）
                 today = now_dt.strftime("%Y-%m-%d")
                 self._rebuild_daily_agg_window(
@@ -793,9 +798,10 @@ class StatsStore:
             self.conn.commit()
         return result
 
-    def upsert_trae_rows(self, rows, commit=True):
+    def upsert_trae_rows(self, rows, commit=True, account=""):
         """Trae 明细入库：会话级 UPSERT（同一会话用量随对话推进增长，覆盖旧值）。
 
+        account 为所属账号 uid（多账号归属；空 = 历史行/uid 未解出）。
         与其他源的 INSERT OR IGNORE 不同——Trae 行是"会话聚合快照"而非不可变流水；
         request_count 是会话数口径，更新时不动。cache_write → cache_creation_tokens。
         调用方持锁（内部不再加锁，threading.Lock 非重入）。
@@ -808,8 +814,8 @@ class StatsStore:
         INSERT INTO usage_log
             (source, request_id, app_type, model, input_tokens, output_tokens,
              cache_read_tokens, cache_creation_tokens, reasoning_tokens,
-             total_cost_usd, credits, created_at, request_count)
-        VALUES ('trae', ?, 'trae', ?, ?, ?, ?, ?, 0, ?, ?, ?, 1)
+             total_cost_usd, credits, created_at, request_count, account)
+        VALUES ('trae', ?, 'trae', ?, ?, ?, ?, ?, 0, ?, ?, ?, 1, ?)
         ON CONFLICT(source, request_id) DO UPDATE SET
             model=excluded.model,
             input_tokens=excluded.input_tokens,
@@ -818,7 +824,8 @@ class StatsStore:
             cache_creation_tokens=excluded.cache_creation_tokens,
             total_cost_usd=excluded.total_cost_usd,
             credits=excluded.credits,
-            created_at=excluded.created_at
+            created_at=excluded.created_at,
+            account=excluded.account
         """
         written = 0
         try:
@@ -829,7 +836,7 @@ class StatsStore:
             for row in rows:
                 self.conn.execute(sql, (row.request_id, row.model, row.input, row.output,
                                         row.cache_read, row.cache_write, row.cost_usd,
-                                        row.credits, row.epoch))
+                                        row.credits, row.epoch, account))
                 written += 1
             if commit:
                 self.conn.commit()
@@ -876,6 +883,59 @@ class StatsStore:
             consumed, total = legacy
             per_uid = 1
         return (consumed, total) if per_uid else None
+
+    def _slot_uid_map(self):
+        """uid → 槽位映射（1/2；未认领的 uid 不在表内）"""
+        mapping = {}
+        uid1 = self._meta_get("trae_uid")
+        if uid1:
+            mapping[uid1] = 1
+        uid2 = self._meta_get("trae_uid_2")
+        if uid2:
+            mapping[uid2] = 2
+        return mapping
+
+    def trae_ent_accounts(self):
+        """多账号余额明细（按槽位排序，仅含已拉到账单的账号）：[(slot, consumed, total)]。
+
+        uid 来自各槽认领记录（trae_uid / trae_uid_2），账单在 trae_ent_<uid>。
+        """
+        with self._lock:
+            mapping = self._slot_uid_map()
+            accounts = []
+            for slot in sorted(mapping.values()):
+                uid = next(u for u, s in mapping.items() if s == slot)
+                raw = self._meta_get("trae_ent_%s" % uid)
+                parts = (raw or "").split("|")
+                if len(parts) != 2:
+                    continue
+                try:
+                    accounts.append((slot, float(parts[0]), float(parts[1])))
+                except ValueError:
+                    continue
+        return accounts
+
+    def query_today_credits_by_account(self):
+        """今日各账号积分（按槽位排序，零填充）：来自 usage_log 的 account 归属列。
+
+        历史行 account 为空不参与；未配置账号返回空列表。
+        """
+        with self._lock:
+            if self.conn is None:
+                return []
+            mapping = self._slot_uid_map()
+            if not mapping:
+                return []
+            credits_by_slot = {}
+            rows = self.conn.execute("""
+                SELECT account, COALESCE(SUM(credits), 0) FROM usage_log
+                WHERE source = 'trae' AND created_at >= ? AND COALESCE(account, '') != ''
+                GROUP BY account""", (self.local_midnight(0),)).fetchall()
+        for uid, total in rows:
+            slot = mapping.get(uid or "")
+            if slot:
+                credits_by_slot[slot] = credits_by_slot.get(slot, 0.0) + float(total or 0)
+        return [(slot, credits_by_slot.get(slot, 0.0)) for slot in sorted(mapping.values())]
 
     # ------------------------------------------------------------ WorkBuddy（HTTP 源，独立表）
     # 明细进 workbuddy_usage，**不进 usage_log / daily_agg / usage_all**：
@@ -1333,14 +1393,16 @@ class StatsStore:
         return (mtd, max(now.day, 1), calendar.monthrange(now.year, now.month)[1])
 
     def query_today_timeline(self, limit=500):
-        """今日请求流水（最新在前）：(时间, 模型, 渠道, token, 费用)"""
+        """今日请求流水（最新在前）：(时间, 模型, 渠道, token, 费用, 归属槽位)"""
+        mapping = self._slot_uid_map()
         rows = self.query_all("""
             SELECT created_at, model, source,
                    COALESCE(input_tokens+output_tokens+cache_read_tokens+cache_creation_tokens, 0),
-                   COALESCE(total_cost_usd, 0)
+                   COALESCE(total_cost_usd, 0), COALESCE(account, '')
             FROM usage_all WHERE created_at >= ?
             ORDER BY created_at DESC LIMIT ?""", (self.local_midnight(0), limit))
-        return [(r[0], r[1] or "-", r[2], r[3], r[4]) for r in rows] if rows else []
+        return [(r[0], r[1] or "-", r[2], r[3], r[4], mapping.get(r[5] or "", 0))
+                for r in rows] if rows else []
 
     # ------------------------------------------------------------ 费用 / 积分 / 模型治理
 
@@ -1612,7 +1674,7 @@ class StatsStore:
         return {int(r[0]): r[1] for r in rows} if rows else {}
 
     def query_timeline(self, day=None, limit=800):
-        """指定日期的逐笔流水（最新在前）：(时间, 模型, 渠道, token, 费用, 积分)。
+        """指定日期的逐笔流水（最新在前）：(时间, 模型, 渠道, token, 费用, 积分, 归属槽位)。
 
         day 为 None 或今天走实时视图；历史日期走已同步的 usage_log（本地 0 点起 24 小时）。
         """
@@ -1623,11 +1685,12 @@ class StatsStore:
         else:
             day_str = str(day)
         limit = max(1, limit)
+        mapping = self._slot_uid_map()
 
         cols = """
             SELECT created_at, model, source,
                    COALESCE(input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens, 0),
-                   COALESCE(total_cost_usd, 0), COALESCE(credits, 0)
+                   COALESCE(total_cost_usd, 0), COALESCE(credits, 0), COALESCE(account, '')
         """
         if day_str == datetime.now().strftime("%Y-%m-%d"):
             rows = self.query_all(cols + """
@@ -1641,7 +1704,8 @@ class StatsStore:
             rows = self.query_all(cols + """
             FROM usage_log WHERE created_at >= ? AND created_at < ?
             ORDER BY created_at DESC LIMIT ?""", (start, start + 86400, limit))
-        return [(r[0], r[1] or "-", r[2], r[3], r[4], r[5]) for r in rows] if rows else []
+        return [(r[0], r[1] or "-", r[2], r[3], r[4], r[5], mapping.get(r[6] or "", 0))
+                for r in rows] if rows else []
 
     def query_monthly_totals(self, limit=36):
         """按月汇总 [(month, reqs, token, cache_read)]，月份倒序，最多 limit 个月"""
