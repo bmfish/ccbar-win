@@ -10,7 +10,7 @@ import time
 
 import l10n
 import share_card
-import weekly_report
+import trae_client_credentials
 from l10n import L
 from ui_dispatch import _on_gui
 from ui_tabs import PillTabs
@@ -24,12 +24,14 @@ from ui_kit import (Design, blend, usage_color, today_usage_color,
 
 class InsightsWindowsMixin:
     @_on_gui
-    def show_insights(self, icon=None, item=None, initial_page=None):
-        """洞察中心：费用 / 洞察 / 分享 / 渠道 / 流水 / 积分 + WorkBuddy 七页。
+    def show_insights(self, icon=None, item=None, initial_page=None,
+                      timeline_preset=None):
+        """洞察中心：签到 / 洞察 / 积分 / 流水 / 渠道 / 费用 + WorkBuddy 七页。
 
         前六页与 macOS 版同口径；WorkBuddy 是 Windows 独有的独立源页签，
         数据来自独立表，绝不混进其他页。
-        initial_page 覆盖页签记忆（面板「流水」按钮直达流水页）。
+        initial_page 覆盖页签记忆（面板「流水」按钮直达流水页）；
+        timeline_preset（today/d7/d30/all）同时指定流水页的初始区间。
 
         这一页一次性查 20+ 项，全部丢后台线程；查完再回 GUI 线程建窗口，
         历史数据变长后也不会把界面堵死。
@@ -45,7 +47,8 @@ class InsightsWindowsMixin:
             messagebox.showerror(L("洞察中心加载失败"), str(e))
 
         self._run_async(self._collect_insights_data,
-                        lambda data: self._render_insights(data, initial_page),
+                        lambda data: self._render_insights(
+                            data, initial_page, timeline_preset),
                         failed)
 
     def _collect_insights_data(self):
@@ -161,7 +164,7 @@ class InsightsWindowsMixin:
                 credits_accounts, today_by_account)
 
     @_on_gui
-    def _render_insights(self, data, initial_page=None):
+    def _render_insights(self, data, initial_page=None, initial_timeline_preset=None):
         """洞察中心渲染（GUI 线程；数据已由 _collect_insights_data 备好）"""
         import tkinter as tk
         from tkinter import ttk
@@ -211,12 +214,12 @@ class InsightsWindowsMixin:
         nb = PillTabs(root, vertical=True)
         nb.pack(fill=tk.BOTH, expand=True, padx=(4, 12), pady=(8, 12))
 
-        # 左侧导航图标（页序：洞察/积分/流水/渠道/费用/分享，
+        # 左侧导航图标（页序：签到/洞察/积分/流水/渠道/费用，
         # 之后是 Windows 独有的 WorkBuddy，最底部是设置入口）
         TAB_ICONS = {
             L("费用"): "◷",
+            L("签到"): "✓",
             L("洞察"): "∿",
-            L("分享"): "⇧",
             L("渠道"): "▤",
             L("流水"): "≡",
             L("积分"): "⚡",
@@ -334,11 +337,11 @@ class InsightsWindowsMixin:
 
         money = lambda v: f"${v:.2f}"
 
-        # 先按导航顺序登记页签：洞察 → 积分 → 流水 → 渠道 → 费用 → 分享
+        # 先按导航顺序登记页签：签到 → 洞察 → 积分 → 流水 → 渠道 → 费用
         # → WorkBuddy → 设置。页面内容仍按下方代码区块顺序往里填，互不影响。
         page_frame = {t: tab(t) for t in (
-            L("洞察"), L("积分"), L("流水"), L("渠道"),
-            L("费用"), L("分享"), L("WorkBuddy"), L("设置"))}
+            L("签到"), L("洞察"), L("积分"), L("流水"), L("渠道"),
+            L("费用"), L("WorkBuddy"), L("设置"))}
 
         # ============ 费用 ============
         f_cost = page_frame[L("费用")]
@@ -563,6 +566,157 @@ class InsightsWindowsMixin:
 
         render_cost()
         cost_wheel(cost_page)
+
+        # ============ 签到（Trae 客户端 JWT 通道） ============
+        f_ck = page_frame[L("签到")]
+        ck_page, ck_wheel = scroll_page(f_ck)
+        ck_body = tk.Frame(ck_page, bg=Design.BACKGROUND)
+        ck_body.pack(fill=tk.X)
+
+        def checkin_hour_value():
+            try:
+                return max(0, min(23, int(self.settings.get("trae_checkin_hour") or 9)))
+            except (TypeError, ValueError):
+                return 9
+
+        def render_checkin():
+            for w in ck_body.winfo_children():
+                w.destroy()
+            head = tk.Frame(ck_body, bg=Design.BACKGROUND)
+            head.pack(fill=tk.X, padx=18, pady=(10, 2))
+            hlog = tk.Frame(head, bg=Design.BACKGROUND)
+            hlog.pack(side=tk.LEFT)
+            tk.Label(hlog, text=L("签到"), fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+                     font=("Microsoft YaHei UI", 16, "bold"), anchor='w').pack(anchor='w')
+            tk.Label(hlog, text=L("Trae 客户端凭据自动接入 · 每日整点自动签到"),
+                     fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
+                     font=Design.FONT_UI_SMALL, anchor='w').pack(anchor='w')
+
+            accounts = trae_client_credentials.discover()
+            ent = {}
+            try:
+                for uid, consumed, total in store.trae_ent_by_uid():
+                    ent[uid] = (consumed, total)
+            except Exception:
+                ent = {}
+
+            section(ck_body, L("Trae 账号"))
+            if not accounts:
+                card, body = rounded_card(ck_body, padx=16, pady=14)
+                card.pack(fill=tk.X, padx=10, pady=5)
+                tk.Label(body, text=L("未发现客户端账号：打开一次 Trae 客户端并登录即可自动接入"),
+                         fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                         font=Design.FONT_UI_SMALL, anchor='w',
+                         justify=tk.LEFT, wraplength=820).pack(fill=tk.X)
+            for acc in accounts:
+                card, body = rounded_card(ck_body, padx=16, pady=12)
+                card.pack(fill=tk.X, padx=10, pady=5)
+                row = tk.Frame(body, bg=Design.CARD_FILL)
+                row.pack(fill=tk.X)
+                left = tk.Frame(row, bg=Design.CARD_FILL)
+                left.pack(side=tk.LEFT)
+                uid_text = acc.uid if len(acc.uid) <= 8 else (
+                    acc.uid[:4] + "****" + acc.uid[-4:])
+                tk.Label(left, text="●", fg=Design.SUCCESS, bg=Design.CARD_FILL,
+                         font=Design.FONT_UI_SMALL).pack(side=tk.LEFT)
+                tk.Label(left, text=uid_text, fg=Design.TEXT_PRIMARY, bg=Design.CARD_FILL,
+                         font=("Microsoft YaHei UI", 10, "bold")).pack(side=tk.LEFT, padx=(4, 0))
+                tk.Label(left, text="  " + (acc.source_app or "Trae CN"),
+                         fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                         font=Design.FONT_UI_SMALL).pack(side=tk.LEFT, padx=(2, 0))
+                right = tk.Frame(row, bg=Design.CARD_FILL)
+                right.pack(side=tk.RIGHT)
+                jwt_days = max(0, int((acc.jwt_exp - time.time()) // 86400))
+                tk.Label(right, text=L("JWT 余 %d 天") % jwt_days, fg=Design.TEXT_SECONDARY,
+                         bg=Design.BTN_BG, font=Design.FONT_UI_SMALL, padx=8).pack(side=tk.RIGHT)
+                checked = store.checkin_done_today(acc.uid)
+                tk.Label(right, text=L("今日已签 ✓") if checked else L("今日未签"),
+                         fg=Design.SUCCESS if checked else Design.TEXT_MUTED,
+                         bg=Design.BTN_BG, font=Design.FONT_UI_SMALL,
+                         padx=8).pack(side=tk.RIGHT, padx=(0, 6))
+                if acc.uid in ent:
+                    consumed, total = ent[acc.uid]
+                    remain = max(total - consumed, 0.0)
+                    tk.Label(right, text=L("余额 ") + format_credits(remain),
+                             fg=Design.TEXT_PRIMARY, bg=Design.CARD_FILL,
+                             font=Design.FONT_TREND_VALUE).pack(side=tk.RIGHT, padx=(0, 10))
+
+            section(ck_body, L("签到"))
+            ccard, cbody = rounded_card(ck_body, padx=16, pady=12)
+            ccard.pack(fill=tk.X, padx=10, pady=5)
+            bar = tk.Frame(cbody, bg=Design.CARD_FILL)
+            bar.pack(fill=tk.X)
+            enabled_var = tk.BooleanVar(
+                value=bool(self.settings.get("trae_checkin_enabled", True)))
+            auto_cb = tk.Checkbutton(
+                bar, text=L("每日自动签到"), variable=enabled_var,
+                command=lambda: self.settings.apply(
+                    {"trae_checkin_enabled": bool(enabled_var.get())}),
+                bg=Design.CARD_FILL, fg=Design.TEXT_PRIMARY,
+                activebackground=Design.CARD_FILL, activeforeground=Design.TEXT_PRIMARY,
+                selectcolor=Design.CARD_FILL, bd=0, highlightthickness=0,
+                font=Design.FONT_UI)
+            auto_cb.pack(side=tk.LEFT)
+            hour_box = ttk.Combobox(
+                bar, values=["%02d:00" % h for h in range(24)], state="readonly",
+                width=7, style="Insights.TCombobox")
+            hour_box.set("%02d:00" % checkin_hour_value())
+            hour_box.pack(side=tk.LEFT, padx=(10, 4))
+
+            def on_hour(_event=None):
+                try:
+                    hour = int(hour_box.get().split(":")[0])
+                except (ValueError, IndexError):
+                    return
+                self.settings.apply({"trae_checkin_hour": hour})
+
+            hour_box.bind("<<ComboboxSelected>>", on_hour)
+            tk.Label(bar, text=L("起自动 · 失败 1 小时内重试"), fg=Design.TEXT_MUTED,
+                     bg=Design.CARD_FILL, font=Design.FONT_UI_SMALL).pack(side=tk.LEFT)
+
+            def do_checkin():
+                checkin_btn.configure(state=tk.DISABLED, text=L("签到中…"))
+                hour = checkin_hour_value()
+
+                def work():
+                    return store.trae_checkin_if_needed(
+                        force=True, interactive=True, enabled=True, start_hour=hour)
+
+                def done(_value=None):
+                    render_checkin()
+
+                self._run_async(work, done, lambda _e: render_checkin())
+
+            checkin_btn = flat_button(bar, L("立即签到"), do_checkin, primary=True)
+            checkin_btn.pack(side=tk.RIGHT)
+            if not accounts:
+                checkin_btn.configure(state=tk.DISABLED)
+
+            log = store.checkin_log()
+            if log:
+                lcard, lbody = rounded_card(ck_body, padx=12, pady=10)
+                lcard.pack(fill=tk.X, padx=10, pady=(8, 12))
+                for rec in reversed(log[-12:]):
+                    r = tk.Frame(lbody, bg=Design.CARD_FILL)
+                    r.pack(fill=tk.X, pady=1)
+                    tk.Label(r, text=datetime.fromtimestamp(rec["t"]).strftime(
+                        "%m-%d %H:%M:%S"), fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                        font=Design.FONT_MONO_SMALL, width=14,
+                        anchor='w').pack(side=tk.LEFT)
+                    tk.Label(r, text=rec["uid"], fg=Design.TEXT_SECONDARY,
+                             bg=Design.CARD_FILL,
+                             font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT)
+                    if rec["ok"]:
+                        tk.Label(r, text=L("+%.0f 积分") % rec["credits"],
+                                 fg=Design.SUCCESS, bg=Design.CARD_FILL,
+                                 font=("Microsoft YaHei UI", 9, "bold")).pack(side=tk.RIGHT)
+                    else:
+                        tk.Label(r, text=rec["msg"] or L("签到失败"),
+                                 fg=Design.WARNING, bg=Design.CARD_FILL,
+                                 font=Design.FONT_UI_SMALL).pack(side=tk.RIGHT)
+            ck_wheel(ck_page)
+
+        render_checkin()
 
         # ============ 洞察（使用通查） ============
         f_ins = page_frame[L("洞察")]
@@ -1116,103 +1270,6 @@ class InsightsWindowsMixin:
 
         render_range()
 
-        # ============ 分享 ============
-        f_share = page_frame[L("分享")]
-        share_page, share_wheel = scroll_page(f_share)
-
-        share_head = tk.Frame(share_page, bg=Design.BACKGROUND)
-        share_head.pack(fill=tk.X, padx=18, pady=(10, 2))
-        share_log = tk.Frame(share_head, bg=Design.BACKGROUND)
-        share_log.pack(side=tk.LEFT)
-        tk.Label(share_log, text=L("分享"), fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
-                 font=("Microsoft YaHei UI", 16, "bold"), anchor='w').pack(anchor='w')
-        tk.Label(share_log, text=L("把战报卡与周报导出成图片"), fg=Design.TEXT_MUTED,
-                 bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL,
-                 anchor='w').pack(anchor='w')
-
-        def save_card_image(factory, prefix):
-            from tkinter import filedialog, messagebox
-            path = filedialog.asksaveasfilename(
-                title=L("保存为图片"), defaultextension=".png",
-                initialfile="%s-%s.png" % (prefix, datetime.now().strftime("%Y%m%d")),
-                filetypes=[("PNG", "*.png")])
-            if not path:
-                return
-            try:
-                factory().save(path)
-            except Exception as e:
-                messagebox.showerror(L("保存失败"), str(e))
-                return
-            messagebox.showinfo(L("保存完成"), L("已保存到：\n%s") % path)
-
-        def copy_card_image(factory, prefix):
-            """复制到剪贴板：Windows 走 PowerShell Set-Clipboard，失败退回临时文件"""
-            from tkinter import messagebox
-            import subprocess
-            import tempfile
-
-            path = os.path.join(
-                tempfile.gettempdir(),
-                "%s-%s.png" % (prefix, datetime.now().strftime("%Y%m%d%H%M%S")))
-            try:
-                factory().save(path)
-            except Exception as e:
-                messagebox.showerror(L("复制失败"), str(e))
-                return
-            if os.name == "nt":
-                try:
-                    subprocess.run(["powershell", "-c", "Set-Clipboard -Path '%s'" % path],
-                                   check=True, capture_output=True, timeout=15)
-                    messagebox.showinfo(L("已复制"), L("已复制到剪贴板"))
-                    return
-                except Exception:
-                    pass
-            messagebox.showinfo(L("已复制"), L("剪贴板不可用，已保存到临时文件：\n%s") % path)
-
-        # 战报卡（今日 / 近 7 天 / 近 30 天 / 累计 + 近 7 天趋势）
-        png_label(share_page, self._share_card_png())
-        share_btns = tk.Frame(share_page, bg=Design.BACKGROUND)
-        share_btns.pack(fill=tk.X, padx=16, pady=(2, 8))
-        btn(share_btns, L("保存为图片"),
-            lambda: save_card_image(self._share_card_png, "ccbar-share"),
-            primary=True).pack(side=tk.LEFT)
-        btn(share_btns, L("复制到剪贴板"),
-            lambda: copy_card_image(self._share_card_png, "ccbar-share")).pack(side=tk.LEFT, padx=(8, 0))
-        tk.Label(share_btns, text=L("晒用量就是最好的宣传 ✨"), fg=Design.TEXT_MUTED,
-                 bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL).pack(side=tk.LEFT, padx=(10, 0))
-
-        tk.Frame(share_page, bg=Design.SEPARATOR, height=1).pack(fill=tk.X, padx=16, pady=6)
-        wk_head = tk.Frame(share_page, bg=Design.BACKGROUND)
-        wk_head.pack(fill=tk.X, padx=16, pady=(2, 0))
-        tk.Label(wk_head, text=L("AI 用量周报（上周）"), fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
-                 font=("Microsoft YaHei UI", 10, "bold")).pack(side=tk.LEFT)
-
-        def open_weekly_dir():
-            """打开周报目录（不存在则建），历史周报 PNG 都在这里"""
-            import webbrowser
-            path = weekly_report.directory()
-            try:
-                os.makedirs(path, exist_ok=True)
-            except OSError:
-                pass
-            try:
-                os.startfile(path)          # Windows
-            except AttributeError:
-                webbrowser.open("file://" + path.replace("\\", "/"))
-
-        btn(wk_head, L("打开周报目录"), open_weekly_dir).pack(side=tk.RIGHT)
-        png_label(share_page, self._weekly_card_png())
-        wk_btns = tk.Frame(share_page, bg=Design.BACKGROUND)
-        wk_btns.pack(fill=tk.X, padx=16, pady=(2, 10))
-        btn(wk_btns, L("保存为图片"),
-            lambda: save_card_image(self._weekly_card_png, "ccbar-weekly"),
-            primary=True).pack(side=tk.LEFT)
-        btn(wk_btns, L("复制到剪贴板"),
-            lambda: copy_card_image(self._weekly_card_png, "ccbar-weekly")).pack(side=tk.LEFT, padx=(8, 0))
-        tk.Label(wk_btns, text=L("每周一自动生成到周报目录 🗓"), fg=Design.TEXT_MUTED,
-                 bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL).pack(side=tk.LEFT, padx=(10, 0))
-        share_wheel(share_page)
-
         # ============ 渠道 ============
         f_ch = page_frame[L("渠道")]
         ch_page, ch_wheel = scroll_page(f_ch)
@@ -1483,7 +1540,7 @@ class InsightsWindowsMixin:
         render_channels()
         ch_wheel(ch_page)
 
-        # ============ 流水 ============
+        # ============ 流水（v2：今日按小时折叠 / 多日按天折叠） ============
         f_tl = page_frame[L("流水")]
 
         tl_head = tk.Frame(f_tl, bg=Design.BACKGROUND)
@@ -1492,19 +1549,22 @@ class InsightsWindowsMixin:
         tl_title.pack(side=tk.LEFT)
         tk.Label(tl_title, text=L("流水"), fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
                  font=("Microsoft YaHei UI", 16, "bold"), anchor='w').pack(anchor='w')
-        tk.Label(tl_title, text=L("按天回看每条请求 · 支持导出 CSV"), fg=Design.TEXT_MUTED,
-                 bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL,
-                 anchor='w').pack(anchor='w')
+        tk.Label(tl_title, text=L("今日按小时折叠 · 多日按天折叠 · 点击展开逐笔"),
+                 fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
+                 font=Design.FONT_UI_SMALL, anchor='w').pack(anchor='w')
 
-        # 当日汇总三卡（请求数 / Token / 费用或积分）
+        tl_pills_holder = tk.Frame(tl_head, bg=Design.BACKGROUND)
+        tl_pills_holder.pack(side=tk.RIGHT)
+
+        # 汇总三卡（请求数 / 积分 / Tokens）
         tl_stats = tk.Frame(f_tl, bg=Design.BACKGROUND)
         tl_stats.pack(fill=tk.X, padx=10, pady=(6, 2))
         for _i in range(3):
             tl_stats.grid_columnconfigure(_i, weight=1, uniform="tlstat")
         tl_labels = {}
         for _i, (_key, _title) in enumerate([("reqs", L("请求数")),
-                                             ("tokens", "Token"),
-                                             ("cost", L("费用"))]):
+                                             ("credits", L("积分")),
+                                             ("tokens", "Tokens")]):
             _card, _body = rounded_card(tl_stats, padx=14, pady=8)
             _card.grid(row=0, column=_i, sticky="nsew", padx=6, pady=4)
             tk.Label(_body, text=_title, fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
@@ -1515,39 +1575,34 @@ class InsightsWindowsMixin:
             tl_labels[_key] = _lbl
 
         filter_bar = tk.Frame(f_tl, bg=Design.BACKGROUND)
-        filter_bar.pack(fill=tk.X, padx=12, pady=(10, 0))
-        tk.Label(filter_bar, text=L("筛选"), fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
-                 font=Design.FONT_UI_SMALL).pack(side=tk.LEFT)
+        filter_bar.pack(fill=tk.X, padx=12, pady=(8, 0))
+        day_bar = tk.Frame(filter_bar, bg=Design.BACKGROUND)
+        day_bar.pack(side=tk.LEFT)
+        more_btn = btn(filter_bar, L("加载更早"), lambda: None)
 
         table_wrap = tk.Frame(f_tl, bg=Design.BACKGROUND)
         table_wrap.pack(fill=tk.BOTH, expand=True, padx=10, pady=(6, 10))
         table_card, table_body = rounded_card(table_wrap, padx=6, pady=6)
         table_card.pack(fill=tk.BOTH, expand=True)
 
-        # 多账号时流水表追加"账号"列（行尾显示槽位号；历史行显示 -）
-        try:
-            multi_account = len(store.query_today_credits_by_account()) > 1
-        except Exception:
-            multi_account = False
-        cols = (L("时间"), L("渠道"), L("模型"), "Token", L("费用")) \
-            + ((L("账号"),) if multi_account else ())
-        tree = ttk.Treeview(table_body, columns=cols, show="headings", height=16,
-                            style="Insights.Treeview")
-        widths = (90, 90, 220, 110, 90) + ((56,) if multi_account else ())
-        for c, w in zip(cols, widths):
-            tree.heading(c, text=c)
-            tree.column(c, width=w, anchor='w' if c in (L("渠道"), L("模型")) else 'e')
+        tree = ttk.Treeview(table_body, columns=("reqs", "credits", "tokens"),
+                            show="tree headings", height=16, style="Insights.Treeview")
+        tree.heading("#0", text=L("时段 / 明细"))
+        tree.column("#0", width=420, anchor='w')
+        for col, title, width in (("reqs", L("次数"), 70),
+                                  ("credits", L("积分"), 110),
+                                  ("tokens", "Tokens", 110)):
+            tree.heading(col, text=title)
+            tree.column(col, width=width, anchor='e')
         vsb = ttk.Scrollbar(table_body, orient=tk.VERTICAL, command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         tree.pack(fill=tk.BOTH, expand=True)
 
-        tl_state = {"day": datetime.now().date(), "rows": []}
+        tl_state = {"preset": "today", "day": datetime.now().date(),
+                    "expanded": set(), "loaded_days": 90, "daily": []}
 
-        def is_today(day):
-            return day == datetime.now().date()
-
-        def day_label(day):
+        def tl_day_label(day):
             today = datetime.now().date()
             if day == today:
                 return L("今天")
@@ -1555,16 +1610,200 @@ class InsightsWindowsMixin:
                 return L("昨天")
             return L("%d月%d日") % (day.month, day.day)
 
+        preset_pills, set_preset_active = range_pills(
+            tl_pills_holder,
+            [("today", L("今日")), ("d7", L("近7天")), ("d30", L("近30天")),
+             ("all", L("全部"))],
+            "today", lambda key: apply_preset(key))
+        preset_pills.pack()
+
         export_btn = btn(filter_bar, L("导出 CSV"), lambda: export_timeline_csv())
         export_btn.pack(side=tk.RIGHT)
-        model_box = ttk.Combobox(filter_bar, values=[L("全部模型")], state="readonly",
-                                 width=18, style="Insights.TCombobox")
-        model_box.set(L("全部模型"))
-        model_box.pack(side=tk.RIGHT, padx=(0, 8))
-        src_box = ttk.Combobox(filter_bar, values=[L("全部渠道")], state="readonly",
-                               width=12, style="Insights.TCombobox")
-        src_box.set(L("全部渠道"))
-        src_box.pack(side=tk.RIGHT, padx=(0, 8))
+        more_btn.configure(command=lambda: load_more_days())
+
+        prev_btn = btn(day_bar, L("‹ 前一天"), lambda: step_day(-1))
+        prev_btn.configure(padx=8)
+        day_btn = btn(day_bar, tl_day_label(tl_state["day"]), lambda: choose_day())
+        day_btn.configure(padx=10)
+        next_btn = btn(day_bar, L("后一天 ›"), lambda: step_day(1))
+        next_btn.configure(padx=8)
+        today_chip = btn(day_bar, L("今天"), lambda: set_day(datetime.now().date()))
+        today_chip.configure(fg=Design.BRAND)
+
+        tl_state["group_meta"] = {}
+        tl_state["details"] = {}
+        tl_state["export_rows"] = []
+
+        def hour_text(hour):
+            return "%02d:00 — %02d:00" % (hour, (hour + 1) % 24)
+
+        def amount_text(source, cost, credits):
+            if credits > 0:
+                return format_credits(credits)
+            if source != "trae" and cost > 0:
+                return "$%.2f" % cost
+            return "-"
+
+        def session_text(ts, model, source, account):
+            t = datetime.fromtimestamp(ts)
+            text = "%s  ·  %s  ·  %s" % (
+                t.strftime("%H:%M:%S"), store.source_display_name(source), model)
+            if account:
+                text += "  ·  #%s" % account
+            return text
+
+        def day_rows_cache(day):
+            key = day.strftime("%Y-%m-%d")
+            cached = tl_state["details"].get(key)
+            if cached is None:
+                cached = store.query_timeline(day) or []
+                tl_state["details"][key] = cached
+            return cached
+
+        def fill_hour_children(gid, hour):
+            for child in tree.get_children(gid):
+                tree.delete(child)
+            for ts, model, source, token, cost, credits, account in day_rows_cache(tl_state["day"]):
+                if datetime.fromtimestamp(ts).hour != hour:
+                    continue
+                tree.insert(gid, tk.END, text=session_text(ts, model, source, account),
+                            values=("", amount_text(source, cost, credits),
+                                    self.fmt_tokens(token)))
+
+        def fill_day_children(gid, date_text):
+            for child in tree.get_children(gid):
+                tree.delete(child)
+            try:
+                day = datetime.strptime(date_text, "%Y-%m-%d").date()
+            except ValueError:
+                return
+            for ts, model, source, token, cost, credits, account in day_rows_cache(day):
+                tree.insert(gid, tk.END, text=session_text(ts, model, source, account),
+                            values=("", amount_text(source, cost, credits),
+                                    self.fmt_tokens(token)))
+
+        def update_totals(reqs, credits, tokens):
+            tl_labels["reqs"].configure(text=str(reqs))
+            tl_labels["credits"].configure(text=format_credits(credits))
+            tl_labels["tokens"].configure(text=self.fmt_tokens(tokens))
+
+        def render_single():
+            day = tl_state["day"]
+            rows = store.query_hourly_timeline(day) or []
+            tree.delete(*tree.get_children())
+            tl_state["group_meta"] = {}
+            export = []
+            for hour, reqs, token, credits in rows:
+                gid = tree.insert("", tk.END, text=hour_text(hour),
+                                  values=(str(reqs), format_credits(credits),
+                                          self.fmt_tokens(token)),
+                                  tags=("group",), open=False)
+                tree.insert(gid, tk.END, text="…")   # 占位：让折叠箭头出现
+                tl_state["group_meta"][gid] = ("hour", hour)
+                export.append((day.strftime("%Y-%m-%d"), hour_text(hour), reqs,
+                               credits, token))
+            tl_state["export_rows"] = export
+            update_totals(sum(r[1] for r in rows), sum(r[3] for r in rows),
+                          sum(r[2] for r in rows))
+
+        def render_multi():
+            preset = tl_state["preset"]
+            today = datetime.now().date()
+            if preset == "d7":
+                from_day = (today - timedelta(days=6)).strftime("%Y-%m-%d")
+            elif preset == "d30":
+                from_day = (today - timedelta(days=29)).strftime("%Y-%m-%d")
+            else:
+                from_day = "0000-01-01"
+            to_day = today.strftime("%Y-%m-%d")
+            rows = store.query_timeline_daily(from_day, to_day) or []
+            by_date = {}
+            for date_text, _src, reqs, token, credits in rows:
+                cur = by_date.setdefault(date_text, [0, 0, 0.0])
+                cur[0] += reqs
+                cur[1] += token
+                cur[2] += credits
+            dates = sorted(by_date, reverse=True)
+            if preset == "all":
+                dates = dates[:tl_state["loaded_days"]]
+            tree.delete(*tree.get_children())
+            tl_state["group_meta"] = {}
+            export = []
+            for date_text in dates:
+                reqs, token, credits = by_date[date_text]
+                try:
+                    day = datetime.strptime(date_text, "%Y-%m-%d").date()
+                except ValueError:
+                    continue
+                gid = tree.insert("", tk.END, text=tl_day_label(day),
+                                  values=(str(reqs), format_credits(credits),
+                                          self.fmt_tokens(token)),
+                                  tags=("group",), open=False)
+                tree.insert(gid, tk.END, text="…")
+                tl_state["group_meta"][gid] = ("day", date_text)
+                export.append((date_text, reqs, credits, token))
+            tl_state["export_rows"] = export
+            update_totals(sum(by_date[d][0] for d in dates),
+                          sum(by_date[d][2] for d in dates),
+                          sum(by_date[d][1] for d in dates))
+
+        def fill_group(gid):
+            meta = tl_state["group_meta"].get(gid)
+            if not meta:
+                return
+            if meta[0] == "hour":
+                fill_hour_children(gid, meta[1])
+            else:
+                fill_day_children(gid, meta[1])
+
+        def on_open(_event=None):
+            gid = tree.focus()
+            if gid:
+                fill_group(gid)
+
+        def on_double(event):
+            gid = tree.identify_row(event.y)
+            if gid not in tl_state["group_meta"]:
+                return
+            opening = not bool(tree.item(gid, "open"))
+            tree.item(gid, open=opening)
+            if opening:
+                fill_group(gid)
+
+        def update_nav():
+            single = tl_state["preset"] == "today"
+            for w in (prev_btn, day_btn, next_btn):
+                if single:
+                    w.pack(side=tk.LEFT, padx=(4, 0))
+                else:
+                    w.pack_forget()
+            if single:
+                day = tl_state["day"]
+                day_btn.configure(text=tl_day_label(day),
+                                  fg=Design.BRAND if day == datetime.now().date()
+                                  else Design.TEXT_PRIMARY)
+                if day == datetime.now().date():
+                    today_chip.pack_forget()
+                    next_btn.configure(state=tk.DISABLED)
+                else:
+                    today_chip.pack(side=tk.LEFT, padx=(6, 0))
+                    next_btn.configure(state=tk.NORMAL)
+            else:
+                today_chip.pack_forget()
+            more_btn.pack_forget()
+            if tl_state["preset"] == "all":
+                more_btn.pack(side=tk.RIGHT, padx=(0, 8))
+
+        def apply_preset(key, rerender=True):
+            tl_state["preset"] = key
+            tl_state["details"] = {}
+            if key == "today":
+                tl_state["day"] = datetime.now().date()
+                if rerender:
+                    render_single()
+            elif rerender:
+                render_multi()
+            update_nav()
 
         def step_day(n):
             nxt = tl_state["day"] + timedelta(days=n)
@@ -1587,115 +1826,62 @@ class InsightsWindowsMixin:
                 return
             set_day(min(day, datetime.now().date()))
 
-        prev_btn = btn(filter_bar, L("‹ 前一天"), lambda: step_day(-1))
-        prev_btn.configure(padx=8)
-        prev_btn.pack(side=tk.LEFT)
-        day_btn = btn(filter_bar, day_label(tl_state["day"]), choose_day)
-        day_btn.configure(padx=10)
-        day_btn.pack(side=tk.LEFT, padx=(4, 0))
-        next_btn = btn(filter_bar, L("后一天 ›"), lambda: step_day(1))
-        next_btn.configure(padx=8)
-        next_btn.pack(side=tk.LEFT, padx=(4, 0))
-        today_chip = btn(filter_bar, L("今天"), lambda: set_day(datetime.now().date()))
-        today_chip.configure(fg=Design.BRAND)
-
-        def filtered_rows():
-            src_sel, model_sel = src_box.get(), model_box.get()
-            out = []
-            for r in tl_state["rows"]:
-                if src_sel != L("全部渠道") and store.source_display_name(r[2]) != src_sel:
-                    continue
-                if model_sel != L("全部模型") and r[1] != model_sel:
-                    continue
-                out.append(r)
-            return out
-
-        def refill(*_):
-            tree.delete(*tree.get_children())
-            for ts, model, source, token, cost, credits, account in filtered_rows():
-                t = datetime.fromtimestamp(ts)
-                if credits > 0:
-                    amount = L("%s 积分") % self._fmt_credits(credits)
-                elif cost > 0:
-                    amount = "$%.2f" % cost
-                else:
-                    amount = "-"
-                values = [t.strftime("%H:%M:%S"), store.source_display_name(source), model,
-                          self.fmt_tokens(token), amount]
-                if multi_account:
-                    values.append(str(account) if account else "-")
-                tree.insert("", tk.END, values=values)
-
-        def refresh_day():
-            day = tl_state["day"]
-            tl_state["rows"] = store.query_timeline(day) or []
-            day_btn.configure(text=day_label(day),
-                              fg=Design.BRAND if is_today(day) else Design.TEXT_PRIMARY)
-            if is_today(day):
-                today_chip.pack_forget()
-                next_btn.configure(state=tk.DISABLED)
-            else:
-                today_chip.pack(side=tk.LEFT, padx=(6, 0))
-                next_btn.configure(state=tk.NORMAL)
-            src_box.configure(values=[L("全部渠道")] + sorted(
-                {store.source_display_name(r[2]) for r in tl_state["rows"]}))
-            model_box.configure(values=[L("全部模型")] + sorted({r[1] for r in tl_state["rows"]}))
-            src_box.set(L("全部渠道"))
-            model_box.set(L("全部模型"))
-            refill()
-            rows = tl_state["rows"]
-            tl_labels["reqs"].configure(text=str(len(rows)))
-            tl_labels["tokens"].configure(
-                text=self.fmt_tokens(sum(r[3] for r in rows)))
-            day_cost = sum(r[4] for r in rows)
-            day_credits = sum(r[5] for r in rows)
-            if day_cost > 0:
-                tl_labels["cost"].configure(text="$%.2f" % day_cost)
-            elif day_credits > 0:
-                tl_labels["cost"].configure(text=L("%s 积分") % self._fmt_credits(day_credits))
-            else:
-                tl_labels["cost"].configure(text="-")
-
         def set_day(day):
             tl_state["day"] = day
-            refresh_day()
+            tl_state["details"] = {}
+            render_single()
+            update_nav()
+
+        def load_more_days():
+            tl_state["loaded_days"] += 90
+            render_multi()
+            update_nav()
 
         def export_timeline_csv():
-            """导出当前筛选下的逐笔流水 CSV（带 BOM，Excel 直开）"""
+            """导出当前视图（单日=小时聚合，多日=按日聚合），带 BOM，Excel 直开"""
             from tkinter import filedialog, messagebox
             import csv
-            rows = filtered_rows()
+            rows = tl_state.get("export_rows") or []
+            single = tl_state["preset"] == "today"
             path = filedialog.asksaveasfilename(
                 title=L("导出流水"), defaultextension=".csv",
-                initialfile="ccbar-timeline-%s.csv" % tl_state["day"].strftime("%Y%m%d"),
+                initialfile="ccbar-timeline-%s.csv" % (
+                    tl_state["day"].strftime("%Y%m%d") if single
+                    else tl_state["preset"]),
                 filetypes=[("CSV", "*.csv")])
             if not path:
                 return
             try:
                 with open(path, "w", encoding="utf-8-sig", newline="") as f:
                     writer = csv.writer(f)
-                    writer.writerow([L("时间"), L("模型"), L("渠道"), L("总 Token"), L("费用/积分")]
-                                    + ([L("账号")] if multi_account else []))
-                    for ts, model, source, token, cost, credits, account in rows:
-                        # 与流水页一致：Trae 行导积分，其他源导美元费用
-                        if source == "trae":
-                            amount = L("%s 积分") % self._fmt_credits(credits)
-                        else:
-                            amount = "%.4f" % cost
-                        values = [
-                            datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S"),
-                            model, source, token, amount]
-                        if multi_account:
-                            values.append(str(account) if account else "-")
-                        writer.writerow(values)
+                    if single:
+                        writer.writerow([L("日期"), L("时段"), L("次数"),
+                                         L("积分"), "Tokens"])
+                        for date_text, span, reqs, credits, token in rows:
+                            writer.writerow([date_text, span, reqs,
+                                             format_credits(credits), token])
+                    else:
+                        writer.writerow([L("日期"), L("次数"), L("积分"), "Tokens"])
+                        for date_text, reqs, credits, token in rows:
+                            writer.writerow([date_text, reqs,
+                                             format_credits(credits), token])
             except OSError as e:
                 messagebox.showerror(L("导出失败"), str(e))
                 return
-            messagebox.showinfo(L("导出完成"), L("已导出 %d 行到：\n%s") % (len(rows), path))
+            messagebox.showinfo(L("导出完成"),
+                                L("已导出 %d 行到：\n%s") % (len(rows), path))
 
-        src_box.bind("<<ComboboxSelected>>", refill)
-        model_box.bind("<<ComboboxSelected>>", refill)
-        refresh_day()
+        tree.bind("<<TreeviewOpen>>", on_open)
+        tree.bind("<Double-1>", on_double)
+        _init_preset = initial_timeline_preset or "today"
+        if _init_preset == "yesterday":
+            # 弹窗「昨日」入口：单日视图直接定位昨天
+            apply_preset("today", rerender=False)
+            set_day(datetime.now().date() - timedelta(days=1))
+        else:
+            apply_preset(_init_preset if _init_preset in
+                         ("today", "d7", "d30", "all") else "today")
+        set_preset_active(tl_state["preset"])
 
         # ============ 积分 ============
         f_cred = page_frame[L("积分")]
@@ -1900,6 +2086,49 @@ class InsightsWindowsMixin:
                          fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
                          font=Design.FONT_UI_SMALL, anchor='w',
                          justify=tk.LEFT).pack(fill=tk.X, pady=(10, 0))
+
+            # ---- 积分账本：本月获得 / 本月消耗 + 获得来源（签到记录）----
+            ledger = tk.Frame(cred_area, bg=Design.BACKGROUND)
+            ledger.pack(fill=tk.X, padx=6, pady=(6, 0))
+            for _i in range(2):
+                ledger.grid_columnconfigure(_i, weight=1, uniform="ledger")
+            month_gain = store.checkin_month_gain()
+            month_consume = store.query_credits_mtd()
+            for _i, (_title, _value, _color, _prefix) in enumerate([
+                    (L("本月获得"), month_gain, Design.SUCCESS, "+"),
+                    (L("本月消耗"), month_consume, Design.WARNING, "")]):
+                lcard, lbody = rounded_card(ledger, padx=14, pady=10)
+                lcard.grid(row=0, column=_i, sticky="nsew", padx=6, pady=4)
+                tk.Label(lbody, text=_title, fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                         font=Design.FONT_UI_SMALL, anchor='w').pack(fill=tk.X)
+                tk.Label(lbody, text=_prefix + format_credits(_value),
+                         fg=_color, bg=Design.CARD_FILL,
+                         font=Design.FONT_TREND_VALUE, anchor='w').pack(fill=tk.X)
+
+            gains = store.checkin_gains(30)
+            gcard, gbody = rounded_card(cred_area, padx=16, pady=12)
+            gcard.pack(fill=tk.X, padx=6, pady=(6, 4))
+            tk.Label(gbody, text=L("获得来源（近 30 天）"),
+                     fg=Design.TEXT_PRIMARY, bg=Design.CARD_FILL,
+                     font=Design.FONT_CARD_TITLE, anchor='w').pack(fill=tk.X)
+            if gains:
+                for stamp, uid, credits in gains[:5]:
+                    g_row = tk.Frame(gbody, bg=Design.CARD_FILL)
+                    g_row.pack(fill=tk.X, pady=1)
+                    tk.Label(g_row, text=datetime.fromtimestamp(stamp).strftime(
+                        "%m-%d %H:%M"), fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                        font=Design.FONT_MONO_SMALL).pack(side=tk.LEFT)
+                    tk.Label(g_row, text=L("每日签到") + (
+                        (" · " + uid[:4]) if uid else ""), fg=Design.TEXT_SECONDARY,
+                        bg=Design.CARD_FILL, font=Design.FONT_UI_SMALL).pack(
+                        side=tk.LEFT, padx=(8, 0))
+                    tk.Label(g_row, text="+%.0f" % credits, fg=Design.SUCCESS,
+                             bg=Design.CARD_FILL,
+                             font=("Microsoft YaHei UI", 9, "bold")).pack(side=tk.RIGHT)
+            else:
+                tk.Label(gbody, text=L("暂无获得记录：签到成功后逐笔列在这里"),
+                         fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
+                         font=Design.FONT_UI_SMALL, anchor='w').pack(fill=tk.X, pady=(6, 0))
 
             # ---- 四张指标卡（带迷你走势）----
             c7 = sum_range(7)

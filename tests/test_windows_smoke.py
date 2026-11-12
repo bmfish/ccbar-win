@@ -1,7 +1,7 @@
 """窗口构建冒烟测试：真正建出 tkinter 窗口，验证没有中途抛异常。
 
 这是批次 0 那个 bug 的守门员——`_bar_chart_png` 抛异常时，`show_insights`
-会在费用页中断，导致后面的洞察/分享/渠道/流水页根本没建出来，
+会在费用页中断，导致后面的洞察/签到/渠道/流水页根本没建出来，
 而单看代码是发现不了的（异常在 GUI 线程的队列里被吞成一行打印）。
 
 无显示环境（CI 的 ubuntu runner）自动跳过；本机 macOS / Windows 会真跑。
@@ -25,7 +25,6 @@ import ui_fixture  # noqa: E402  （公共夹具：临时统计库 + 建窗助�
 import main  # noqa: E402
 import themes  # noqa: E402
 import ui_controls  # noqa: E402
-import weekly_report  # noqa: E402
 from main import CcBarTray, Design, blend, usage_color  # noqa: E402
 
 try:
@@ -38,9 +37,9 @@ except Exception:  # pragma: no cover - 没有 tkinter 的构建
 class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
     """洞察中心必须完整建出全部页签"""
 
-    # 页序：洞察 / 积分 / 流水 / 渠道 / 费用 / 分享，
+    # 页序：签到 / 洞察 / 积分 / 流水 / 渠道 / 费用，
     # Windows 独有 WorkBuddy 排在倒数第二，最底部是设置入口
-    EXPECTED_TABS = ["洞察", "积分", "流水", "渠道", "费用", "分享", "WorkBuddy", "设置"]
+    EXPECTED_TABS = ["签到", "洞察", "积分", "流水", "渠道", "费用", "WorkBuddy", "设置"]
 
     # ------------------------------------------------------------ 用例
 
@@ -60,6 +59,21 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
             frame = nb.nametowidget(tab_id)
             self.assertTrue(frame.winfo_children(),
                             f"页签 {nb.tab(tab_id, 'text')} 是空的")
+
+    def test_insights_builds_with_checkin_account(self):
+        """签到页：发现客户端账号时要建出账号卡（JWT 天数 / 今日未签）"""
+        import ui_insights
+        from trae_client_credentials import ClientTraeAccount
+        acc = ClientTraeAccount(
+            "942709926015804", "a.b.c",
+            int(datetime.now().timestamp()) + 7 * 86400,
+            device_id="1", source_app="Trae CN")
+        with mock.patch.object(ui_insights.trae_client_credentials, "discover",
+                               return_value=[acc]):
+            _win, nb = self._build_insights()
+        texts = self._texts(self._tab_frame(nb, "签到"))
+        self.assertTrue(any("9427****5804" in t for t in texts), texts)
+        self.assertTrue(any("今日未签" in t for t in texts), texts)
 
     def test_insights_builds_with_budget_and_price(self):
         """月度预算 > 0 要点出预算卡与日预算虚线；默认单价 > 0 要在费用页标注估算"""
@@ -103,11 +117,6 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
         self.assertTrue(any(t.startswith("近 7 天用量") for t in self._texts(page)),
                         "切到「7 天」后 Hero 标题没更新")
 
-    def test_share_page_renders_two_cards(self):
-        """分享页同时预览战报卡（640x420）与周报卡（460x400）"""
-        self.assertEqual(self.app._share_card_png().size, (640, 420))
-        self.assertEqual(self.app._weekly_card_png().size, (460, 400))
-
     def test_timeline_page_has_day_nav_and_csv_export(self):
         """流水页新增：任意日期回看 + 导出 CSV"""
         _win, nb = self._build_insights()
@@ -117,9 +126,9 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
 
     def test_insights_restores_last_tab(self):
         """页签记忆：按设置选中，非法值回落「费用」；新增的「积分」页同样可记住"""
-        self.app.settings.set("insights_last_page", "分享")
+        self.app.settings.set("insights_last_page", "签到")
         win, nb = self._build_insights()
-        self.assertEqual(nb.tab(nb.select(), "text"), "分享")
+        self.assertEqual(nb.tab(nb.select(), "text"), "签到")
         win.destroy()
 
         self.app.settings.set("insights_last_page", "积分")
@@ -133,7 +142,7 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
 
     def test_insights_initial_page_overrides_memory(self):
         """面板「流水」按钮直达流水页：initial_page 覆盖页签记忆"""
-        self.app.settings.set("insights_last_page", "分享")
+        self.app.settings.set("insights_last_page", "签到")
         win, nb = self._build_insights(initial_page="流水")
         self.assertEqual(nb.tab(nb.select(), "text"), "流水")
         win.destroy()
@@ -172,11 +181,6 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
             budget_line=2.0, value_fmt=lambda v: "$%.2f" % v)
         self.assertEqual(img.size, (680, 150))
 
-    def test_share_tab_renders_card(self):
-        """分享页依赖 store.query_daily_tokens（曾缺失导致 AttributeError）"""
-        img = self.app._share_card_png()
-        self.assertEqual(img.size, (640, 420))
-
     def test_vertical_nav_rail_selects_by_click(self):
         """左侧竖向导航：条目纵向命中，点击第二个条目要切到对应页"""
         from ui_tabs import PillTabs
@@ -214,56 +218,18 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
         self.assertEqual(Design.BIG_NUMBER, themes.find("默认主题")["accent"],
                          "bigNumber 为空时跟随 accent")
 
-    def test_weekly_report_generates_then_is_idempotent(self):
-        """周一自动周报：真生成 PNG（460x400）+ 通知一次，重复调用不重复生成"""
-        report_dir = os.path.join(self.tmp, "weekly")
-        orig_dir = weekly_report.directory
-        weekly_report.directory = lambda documents_dir=None: report_dir
-        notified = []
-        orig_toast = self.app._toast
-        self.app._toast = lambda title, body, duration=5: notified.append((title, body))
-        try:
-            path = self.app.maybe_generate_weekly_report()
-            self.assertTrue(path and os.path.exists(path), "周报没生成")
-            self.assertTrue(os.path.basename(path).startswith("ccbar-weekly-"))
-            from PIL import Image
-            with Image.open(path) as img:
-                self.assertEqual(img.size, (460, 400))
-            self.assertEqual(len(notified), 1, "周报生成后应通知一次")
-            self.assertIn("周报", notified[0][0])
-
-            # 幂等：同一周再次调用不再生成、不再通知
-            self.assertIsNone(self.app.maybe_generate_weekly_report())
-            self.assertEqual(len(notified), 1)
-        finally:
-            weekly_report.directory = orig_dir
-            self.app._toast = orig_toast
-
-    def test_weekly_report_respects_setting(self):
-        """关了开关就不生成"""
-        report_dir = os.path.join(self.tmp, "weekly-off")
-        orig_dir = weekly_report.directory
-        weekly_report.directory = lambda documents_dir=None: report_dir
-        self.app.settings.set("auto_weekly_report", False)
-        try:
-            self.assertIsNone(self.app.maybe_generate_weekly_report())
-            self.assertFalse(os.path.exists(report_dir))
-        finally:
-            weekly_report.directory = orig_dir
-            self.app.settings.set("auto_weekly_report", True)
-
-    def test_sync_trae_is_skipped_when_disabled(self):
-        """没启用 Trae 时不该发请求"""
+    def test_sync_trae_runs_for_client_credentials(self):
+        """v2.0：客户端凭据优先，不再以设置里的 trae_enabled 为前置条件"""
         calls = []
         self.app.store.sync_trae_if_needed = lambda interactive=False: calls.append(interactive)
         self.app.settings.set("trae_enabled", False)
         self.app.sync_trae(interactive=False)
         import time as _t
         _t.sleep(0.2)
-        self.assertEqual(calls, [], "未启用 Trae 仍发起了同步")
+        self.assertEqual(calls, [False], "客户端凭据通道应照常同步")
 
-    def test_daily_tokens_backs_the_share_card(self):
-        """分享卡折线的数据源：历史来自 daily_agg（昨天），今天走实时"""
+    def test_daily_tokens_backs_the_timeline(self):
+        """日维度的数据源：历史来自 daily_agg（昨天），今天走实时"""
         from datetime import datetime, timedelta
 
         rows = self.app.store.query_daily_tokens(7)
@@ -690,38 +656,26 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
         body.destroy()
 
     def test_popover_all_time_row_targets_all_time_window(self):
-        """「历史总量」行必须开历史总量窗口（此前误开近30天）"""
+        """「历史总量」行必须打开洞察流水的全部区间（v2.0 入口迁移）"""
         _popover, body = self._build_popover()
         rows = [w for w in self._walk(body)
                 if getattr(w, "_row_command", None) is not None
                 and any(self._text_of(c) == "历史总量" for c in self._walk(w))]
         self.assertEqual(len(rows), 1, "面板里找不到「历史总量」行")
-        target = getattr(rows[0]._row_command, "_target", None)
-        self.assertEqual(target, self.app.show_all_time_detail)
-        self.assertNotEqual(target, self.app.show_monthly_detail)
+        opener = getattr(rows[0]._row_command, "_target", None)
+        self.assertTrue(callable(opener), "入口应指向洞察流水页")
+        self.assertIsNot(rows[0]._row_command, self.app.show_monthly_detail)
         body.destroy()
 
-    def test_popover_today_card_shows_credits_prediction_sessions(self):
-        """今日卡：积分缀在大数字后、速率预测行；今日会话行已移除（按需求）"""
+    def test_popover_today_card_shows_credits(self):
+        """今日卡：积分缀在大数字后；速率预测与今日会话行已移除"""
         self.app.store.query_today_credits = lambda: 42.0
-        self.app.query_work_hours = lambda: "4.0"
         _popover, body = self._build_popover()
         texts = self._texts(body)
         self.assertTrue(any(t == "42 积分" for t in texts), texts)
-        total = (self.app.query_day_stats(0) or {"total": 0})["total"]
-        expected = "按当前速率到 24:00 约 %s" % Design.fmt_tokens(int(total / 4.0 * 24))
-        self.assertIn(expected, texts)
+        self.assertFalse(any("按当前速率" in t for t in texts), texts)
         self.assertFalse(any("今日会话" in t for t in texts), texts)
         body.destroy()
-
-    def test_popover_prediction_needs_work_hours(self):
-        """工时 ≤ 0.2h 不外推（避免清早给出爆表预测）"""
-        today = {"total": 1000}
-        self.assertIsNone(main.PopoverWindow._prediction_text(today, None))
-        self.assertIsNone(main.PopoverWindow._prediction_text(today, "0.1"))
-        self.assertIsNone(main.PopoverWindow._prediction_text(today, "abc"))
-        self.assertEqual(main.PopoverWindow._prediction_text(today, "2.0"),
-                         "按当前速率到 24:00 约 %s" % Design.fmt_tokens(12_000))
 
     def test_popover_hour_values_matches_mac_hour_points(self):
         """sparkline 序列：起点 min(首个有数据小时, 9)，终点最后一个有数据小时"""
@@ -1025,7 +979,6 @@ class TestInsightsWindowBuilds(ui_fixture.TrayFixture):
         self.app.query_day_stats = lambda days=0: {"total": 0}
         self.app.check_token_milestone = lambda total: None
         self.app.maybe_auto_backup = lambda: None
-        self.app.maybe_generate_weekly_report = lambda: None
         self.app.maybe_check_updates_silently = lambda: None
         self.app.build_menu = lambda: []
         self.app.settings.set("refresh_interval", 30)

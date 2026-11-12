@@ -330,7 +330,7 @@ class PopoverWindow:
 
             # 今日会话小字已按需求移除；页脚改为多账号积分拆分（见下）
 
-            # 页脚：双账号且余额总额非 0 → 各账号今日积分拆分；单账号回落速率预测
+            # 页脚：多账号且余额总额非 0 → 各账号今日积分拆分
             by_account = self._today_credits_by_account()
             if len(by_account) > 1:
                 arow = tk.Frame(body, bg=fill)
@@ -341,15 +341,15 @@ class PopoverWindow:
                     tk.Label(arow, text=format_credits(val), fg=Design.TEXT_SECONDARY,
                              bg=fill, font=Design.FONT_UI_TINY).pack(
                         side=tk.LEFT, padx=(2, 10))
-            else:
-                # 速率预测（mac predictionText：工时 > 0.2h 才给）
-                prediction = self._prediction_text(today, work_hours)
-                if prediction:
-                    tk.Label(body, text=prediction, fg=Design.TEXT_MUTED,
-                             bg=fill, font=Design.FONT_UI_TINY,
-                             anchor='w').pack(fill=tk.X, pady=(2, 0))
 
-            self._bind_card(card, self._open(self.app.show_hourly_detail_today))
+            # 今日签到徽标（签到成功过才出现，不占常驻位置）
+            checkin_credits = self._today_checkin_credits()
+            if checkin_credits > 0:
+                tk.Label(body, text="✓ +%s" % format_credits(checkin_credits),
+                         fg=Design.SUCCESS, bg=fill,
+                         font=Design.FONT_UI_TINY, anchor='w').pack(fill=tk.X, pady=(2, 0))
+
+            self._bind_card(card, self._open_timeline("today"))
         elif self.app.store.attached:
             tk.Label(body, text=L("📊 今日暂无数据"), fg=Design.TEXT_MUTED, bg=fill,
                      font=Design.FONT_UI).pack(fill=tk.X, pady=8)
@@ -378,19 +378,19 @@ class PopoverWindow:
         self._trend_card(grid, 0, 0, L("昨日"), yesterday, trend["prev_day"],
                          series=trend["series_day"],
                          credits=credits.get("day"),
-                         command=self._open(self.app.show_hourly_detail_yesterday))
+                         command=self._open_timeline("yesterday"))
         self._trend_card(grid, 0, 1, L("近7天"), week, trend["prev_week"],
                          series=trend["series_week"],
                          credits=credits.get("week"),
-                         command=self._open(self.app.show_weekly_detail))
+                         command=self._open_timeline("d7"))
         self._trend_card(grid, 1, 0, L("近30天"), month, trend["prev_month"],
                          series=trend["series_month"],
                          credits=credits.get("month"),
-                         command=self._open(self.app.show_monthly_detail))
+                         command=self._open_timeline("d30"))
         self._trend_card(grid, 1, 1, L("历史总量"), total, None,
                          ratio=month_ratio,
                          credits=credits.get("total"),
-                         command=self._open(self.app.show_all_time_detail))
+                         command=self._open_timeline("all"))
 
     def _window_credits(self):
         """四个窗口的积分消耗（拿不到就返回空，卡片不显示积分行）"""
@@ -530,7 +530,7 @@ class PopoverWindow:
                  font=Design.FONT_CHEVRON).pack(side=tk.RIGHT)
         self._bind_row(row, command)
 
-    # ---------------- 今日卡补充（mac TodayCard / hourPoints / predictionText） ----------------
+    # ---------------- 今日卡补充（mac TodayCard / hourPoints） ----------------
 
     def _today_credits(self):
         """今日积分消耗（Trae 口径；取不到按 0 处理）"""
@@ -538,6 +538,18 @@ class PopoverWindow:
             return float(self.app.store.query_today_credits() or 0)
         except Exception:
             return 0.0
+
+    def _today_checkin_credits(self):
+        """今日签到获得的积分（>0 才在今日卡显示「已签 ✓ +N」）"""
+        try:
+            return float(self.app.store.checkin_today_credits() or 0)
+        except Exception:
+            return 0.0
+
+    def _open_timeline(self, preset):
+        """面板入口统一打开洞察「流水」页并定位区间（today/yesterday/d7/d30/all）"""
+        return self._open(lambda: self.app.show_insights(
+            initial_page=L("流水"), timeline_preset=preset))
 
     def _session_text(self):
         """今日会话汇总文案：N 个 · 平均 N 分钟 · 最长 N 分钟（口径同 mac sessionStats）"""
@@ -565,20 +577,6 @@ class PopoverWindow:
         if not ent or ent[1] <= 0:
             return []
         return accounts
-
-    @staticmethod
-    def _prediction_text(today, work_hours):
-        """按当前速率折算到 24:00 的预计用量（工时 ≤ 0.2h 不外推，避免清早爆表）"""
-        if not today or not work_hours:
-            return None
-        try:
-            hours = float(work_hours)
-        except (TypeError, ValueError):
-            return None
-        if hours <= 0.2:
-            return None
-        predicted = today["total"] / hours * 24
-        return L("按当前速率到 24:00 约 %s") % Design.fmt_tokens(int(predicted))
 
     @staticmethod
     def _hour_values(hourly):
@@ -871,9 +869,9 @@ class PopoverWindow:
     # ---------------- 按钮动作 ----------------
 
     def _on_flow(self):
-        """从面板打开洞察中心的「流水」页：先收起面板"""
+        """从面板打开洞察中心的「流水」页（今日小时折叠）：先收起面板"""
         self.close()
-        self.app.show_insights(initial_page=L("流水"))
+        self.app.show_insights(initial_page=L("流水"), timeline_preset="today")
 
     def _on_insights(self):
         """从面板打开洞察中心：先收起面板"""

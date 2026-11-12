@@ -188,7 +188,8 @@ class TestNoDeadSettings(unittest.TestCase):
     BEHAVIOR_KEYS = {
         "refresh_interval", "warning_threshold", "warning_enabled", "notify_interval",
         "trae_enabled", "trae_sessionid", "led_red_threshold",
-        "monthly_budget_usd", "default_token_price", "auto_weekly_report",
+        "monthly_budget_usd", "default_token_price",
+        "trae_checkin_enabled", "trae_checkin_hour",
         "app_language", "theme", "custom_themes", "insights_last_page",
         "last_auto_backup_date", "last_update_check_date", "popover_wide",
     }

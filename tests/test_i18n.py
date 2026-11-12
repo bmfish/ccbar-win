@@ -25,7 +25,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import l10n  # noqa: E402
 import ui_fixture  # noqa: E402  （公共夹具：装好 win_stubs 并真建 tk 窗口）
 import ui_tabs  # noqa: E402
-import weekly_report  # noqa: E402
 from ui_fixture import main  # noqa: E402
 
 try:
@@ -229,11 +228,12 @@ class TestEnglishUi(ui_fixture.TrayFixture):
     def test_insights_center_is_english(self):
         win, nb = self._build_insights()
         labels = [nb.tab(t, "text") for t in nb.tabs()]
-        # 页序固定：洞察 / 积分 / 流水 / 渠道 / 费用 / 分享，
+        # 页序固定：签到 / 洞察 / 积分 / 流水 / 渠道 / 费用，
         # WorkBuddy 倒数第二，最底部是设置入口
         self.assertEqual(labels,
                          [main.L(t) for t in
-                          ("洞察", "积分", "流水", "渠道", "费用", "分享", "WorkBuddy", "设置")])
+                          ("签到", "洞察", "积分", "流水", "渠道", "费用",
+                           "WorkBuddy", "设置")])
         # 最后的「设置」只是导航入口，本身不建页
         for tab_id in nb.tabs()[:-1]:
             self.assertTrue(nb.nametowidget(tab_id).winfo_children(),
@@ -298,27 +298,6 @@ class TestEnglishUi(ui_fixture.TrayFixture):
         self.assertEqual(self.app.get_menu_text(), main.L("未找到数据源"))
         self.assertEqual(self.app.get_tooltip_text(), main.L("ccBar - 未找到数据"))
 
-    def test_weekly_card_preview_range_follows_language(self):
-        """分享页周报卡预览：EN 传下去的是英文区间，ZH 是中文区间"""
-        captured = {}
-
-        def fake_card(date_text, *args, **kwargs):
-            captured["date"] = date_text
-            return None
-
-        with mock.patch.object(main.share_card, "weekly_card_image", fake_card):
-            l10n.set_language("en")
-            self.app._weekly_card_png()
-            self.assertRegex(captured["date"],
-                             r"^[A-Z][a-z]{2} \d{1,2}, \d{4} ~ "
-                             r"[A-Z][a-z]{2} \d{1,2}, \d{4}$")
-            l10n.set_language("zh")
-            self.app._weekly_card_png()
-            self.assertRegex(captured["date"],
-                             r"^\d{4}年\d{1,2}月\d{1,2}日 ~ "
-                             r"\d{4}年\d{1,2}月\d{1,2}日$")
-
-
 class TestLanguageIsGlobalState(unittest.TestCase):
     """语言是全局开关：切 EN/ZH 必须立刻在两个方向都生效（防泄漏）"""
 
@@ -338,26 +317,6 @@ class TestLanguageIsGlobalState(unittest.TestCase):
         self.assertEqual(main.Design.fmt_tokens(2_500_000), "250万")
         self.assertEqual(main.Design.fmt_tokens(1_500_000_000), "15.00亿")
         self.assertEqual(main.CcBarTray.fmt_tokens_static(10_000), "1万")
-
-    def test_weekly_date_range_switches_both_ways(self):
-        monday = datetime(2026, 8, 3)          # 周一：报告周 = 7/27 ~ 8/2
-        self.assertEqual(weekly_report.date_range_text(monday, english=True),
-                         "Jul 27, 2026 ~ Aug 2, 2026")
-        self.assertEqual(weekly_report.date_range_text(monday),
-                         "2026年7月27日 ~ 2026年8月2日")
-
-    def test_share_card_labels_follow_language(self):
-        """卡片文案也要跟着切（英文卡片不能写中文）"""
-        args = (1_000, 2_000, 3_000, 4_000, [])
-        l10n.set_language("en")
-        self.assertEqual(l10n.L("AI 用量战报"), "AI Usage Report")
-        self.assertEqual(l10n.L("今日消耗"), "Today's burn")
-        for key in ("近 7 天", "近 30 天", "累计", "AI 用量周报", "周消耗",
-                    "日均", "峰值", "请求数"):
-            self.assertFalse(CJK.search(l10n.L(key)), key)
-        self.assertIsNotNone(main.share_card.share_card_image(*args))
-        l10n.set_language("zh")
-        self.assertIsNotNone(main.share_card.share_card_image(*args))
 
 
 if __name__ == "__main__":

@@ -513,10 +513,11 @@ def _fetch_sessions(jwt, from_epoch, to_epoch, send, cutoff=None):
 # ---- 主入口 ----
 
 def run(sessionid, auth=None, from_epoch=0, to_epoch=None, fetch_ent=False,
-        post=None, now=None, cutoff=None):
+        post=None, now=None, cutoff=None, jwt=None):
     """完整同步一次。
 
     sessionid 可传 sessionid=…、整段 Cookie、裸值或 X-Cloudide-Session=…；
+    jwt 非空时走客户端凭据通道：直接用该 JWT，不再换签（sessionid 可空）；
     auth 会被就地更新（换签结果），调用方负责持久化；
     post 可注入假 transport（签名同 http_post），测试因此不碰网络；
     fetch_ent=False 时跳过积分账单（它 1 小时刷一次就够，减少无谓请求）；
@@ -525,36 +526,42 @@ def run(sessionid, auth=None, from_epoch=0, to_epoch=None, fetch_ent=False,
     """
     send = post or http_post
     auth = auth if auth is not None else TraeAuth()
-    passport_cookie, cloudide_session = parse_credential(sessionid)
     if to_epoch is None:
         to_epoch = int(_epoch(now))
 
-    if not passport_cookie and not cloudide_session:
-        return TraeResult("not_configured", message="未配置登录")
-    # 用户显式给了新的 X-Cloudide-Session：它对应的 JWT 必须重新换，不能沿用旧账号/旧会话的缓存
-    if cloudide_session and cloudide_session != auth.cloudide_session:
-        auth.cloudide_session = cloudide_session
-        auth.jwt = ""
-        auth.jwt_exp = 0
+    if jwt:
+        jwt2 = jwt
+    else:
+        passport_cookie, cloudide_session = parse_credential(sessionid)
+        if not passport_cookie and not cloudide_session:
+            return TraeResult("not_configured", message="未配置登录")
+        # 用户显式给了新的 X-Cloudide-Session：它对应的 JWT 必须重新换，不能沿用旧账号/旧会话的缓存
+        if cloudide_session and cloudide_session != auth.cloudide_session:
+            auth.cloudide_session = cloudide_session
+            auth.jwt = ""
+            auth.jwt_exp = 0
 
-    # ---- 1. 确保 JWT 可用（无效就换签）----
-    st, val = _ensure_jwt(passport_cookie, auth, send, now)
-    if st == "not_configured":
-        return TraeResult("not_configured", message="未配置登录")
-    if st == "auth_expired":
-        return TraeResult("auth_expired", message=val)
-    if st == "failed":
-        return TraeResult("failed", message=val)
-    jwt = val
+        # ---- 1. 确保 JWT 可用（无效就换签）----
+        st, val = _ensure_jwt(passport_cookie, auth, send, now)
+        if st == "not_configured":
+            return TraeResult("not_configured", message="未配置登录")
+        if st == "auth_expired":
+            return TraeResult("auth_expired", message=val)
+        if st == "failed":
+            return TraeResult("failed", message=val)
+        jwt2 = val
 
     # ---- 2. 拉取会话明细（分页）----
     # 缓存的 JWT 可能被服务端提前作废（如用户在别处重新登录，exp 未到但 1001），
     # 此时强制清掉换一张再试一次，而不是把 cookie 误判成过期
-    jwt2 = jwt
-    st, msg, rows, truncated = _fetch_sessions(jwt, from_epoch, to_epoch, send, cutoff=cutoff)
+    st, msg, rows, truncated = _fetch_sessions(jwt2, from_epoch, to_epoch, send, cutoff=cutoff)
     if st == "failed":
         return TraeResult("failed", message=msg)
     if st == "auth_expired":
+        if jwt:
+            # 客户端 JWT 通道：不在这里换签，交给调用方刷新/等客户端续签
+            return TraeResult("auth_expired",
+                              message="客户端登录已过期，请启动 Trae 客户端后重试")
         # 强制换签（清 JWT；Session 也不行时 _ensure_jwt 内部会走 Login 重造）
         auth.jwt = ""
         auth.jwt_exp = 0

@@ -62,6 +62,9 @@ DEFAULTS = {
     "trae_sessionid": "",                 # Trae 的 passport sessionid cookie
     "trae_sessionid2": "",                # Trae 第二账号凭据（可选，多账号合计展示）
     "trae_bg_interval": DEFAULT_BG_INTERVAL,       # Trae 后台同步间隔（秒），默认 10 分钟
+    # Trae 每日签到（客户端 JWT 通道；默认开，起始小时可调）
+    "trae_checkin_enabled": True,
+    "trae_checkin_hour": 9,               # 每天该整点后自动签到（0–23）
     # WorkBuddy 是 HTTP 源但**独立存放**：只出现在洞察中心的独立页签
     "workbuddy_enabled": False,
     "workbuddy_cookie": "",               # 整条 Cookie（session / session_2）
@@ -69,7 +72,6 @@ DEFAULTS = {
     "led_red_threshold": 100,             # 闪电 LED 红色门槛（万），0=不变红
     "monthly_budget_usd": 0.0,            # 月度预算（$），0=关闭
     "default_token_price": 0.0,           # 未计费渠道默认单价（$/M tokens），0=关闭
-    "auto_weekly_report": True,
     "launch_at_login": False,
     "popover_wide": False,
     "app_language": "system",
@@ -229,6 +231,10 @@ def validate_updates(updates):
         if v is None or not BG_INTERVAL_MIN <= v <= BG_INTERVAL_MAX:
             errors.append("Trae 同步间隔（%d ~ %d 秒）"
                           % (BG_INTERVAL_MIN, BG_INTERVAL_MAX))
+    if "trae_checkin_hour" in u:
+        v = _as_int(u["trae_checkin_hour"])
+        if v is None or not 0 <= v <= 23:
+            errors.append("签到起始小时（0 ~ 23 点）")
     if "workbuddy_bg_interval" in u:
         v = _as_int(u["workbuddy_bg_interval"])
         if v is None or not BG_INTERVAL_MIN <= v <= BG_INTERVAL_MAX:

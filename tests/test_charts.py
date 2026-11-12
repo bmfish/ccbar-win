@@ -73,9 +73,10 @@ class TestChartHelpers(unittest.TestCase):
         self.assertTrue(hasattr(CcBarTray.__dict__["show_settings"], "__wrapped__"),
                         "show_settings 需要 @_on_gui")
 
-    def test_share_card_store_method_exists(self):
-        """_share_card_png 依赖的 store 方法必须存在"""
-        self.assertTrue(hasattr(StatsStore, "query_daily_tokens"))
+    def test_timeline_store_methods_exist(self):
+        """流水 v2 依赖的 store 查询必须存在"""
+        for name in ("query_timeline", "query_timeline_daily", "query_hourly_timeline"):
+            self.assertTrue(hasattr(StatsStore, name), name)
 
 
 if __name__ == "__main__":

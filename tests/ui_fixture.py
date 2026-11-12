@@ -27,7 +27,6 @@ import app_settings  # noqa: E402
 import l10n  # noqa: E402
 import main  # noqa: E402
 import themes  # noqa: E402
-import weekly_report  # noqa: E402
 from main import CcBarTray, Design, blend, usage_color  # noqa: E402
 from stats_store import StatsStore  # noqa: E402
 
@@ -124,11 +123,9 @@ class TrayFixture(unittest.TestCase):
             cache_creation_tokens INTEGER, total_cost_usd REAL, request_count INTEGER
         );
         """)
-        # 上一个完整周窗口内的数据（周报自动生成的测试依赖它；
-        # 窗口随"今天星期几"浮动，所以按窗口边界取，不能写死天数）
-        week_from, _week_to = weekly_report.last_week_window()
+        # 跨周的旧数据（周报功能已移除，这里只保证历史窗口有样本）
         rows = [
-            ("r-week", local_midnight(week_from) + 3600, 5000, 6000, 0, 0, 1.25),
+            ("r-week", local_midnight(8) + 3600, 5000, 6000, 0, 0, 1.25),
             ("r-1", local_midnight(1) + 3600, 1000, 2000, 500, 100, 0.5),
             ("r-2", local_midnight(2) + 7200, 3000, 4000, 100, 50, 0.25),
             ("r-3", max(local_midnight(0) + 60, int(datetime.now().timestamp()) - 60),

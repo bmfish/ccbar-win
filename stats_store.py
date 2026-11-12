@@ -10,9 +10,12 @@ ccbar 自建统计库（~/.ccbar/ccbar.db）为主连接：
 同步、视图、设置界面自动生效。
 """
 import fnmatch
+import json
 import os
 import sqlite3
 import sys
+import threading
+import time
 # Windows 控制台默认 cp1252，中文 print 会抛 UnicodeEncodeError（CI 实锤），统一 UTF-8
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -25,6 +28,8 @@ from pathlib import Path
 
 import trae_sync
 from trae_sync import TraeAuth, TraeResult
+import trae_checkin
+import trae_client_credentials
 import workbuddy_sync
 from workbuddy_sync import WorkBuddyResult
 
@@ -53,6 +58,7 @@ CREATE TABLE IF NOT EXISTS daily_agg (
     output INTEGER NOT NULL DEFAULT 0,
     cache_create INTEGER NOT NULL DEFAULT 0,
     cache_read INTEGER NOT NULL DEFAULT 0,
+    credits REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (date, source)
 )
 """
@@ -262,9 +268,10 @@ TRAE_SPLIT_MIN_SECONDS = 24 * 3600  # 最小粒度一天；仍截断说明单日
 
 
 def _fetch_trae_window(sessionid, auth, from_epoch, to_epoch, fetch_ent, now, cutoff,
-                       depth=0):
+                       depth=0, jwt=None):
     """拉取一个窗口；分页截断时把窗口二分递归重取。
 
+    jwt 非空时走客户端凭据通道（不再用 sessionid 换签）。
     服务端按 usage_time 倒序返回，单窗口最多 MAX_PAGES × PAGE_SIZE 条。首次 90 天
     回填对活跃用户必然撞上限，只拿得到最新一段；此时二分窗口各自分页，直到不再
     截断或到达一天的最小粒度，避免旧会话永久缺失。子窗口结果按 request_id 合并，
@@ -272,7 +279,7 @@ def _fetch_trae_window(sessionid, auth, from_epoch, to_epoch, fetch_ent, now, cu
     """
     result = trae_sync.run(sessionid, auth=auth, from_epoch=from_epoch,
                            to_epoch=to_epoch, fetch_ent=fetch_ent, now=now,
-                           cutoff=cutoff)
+                           cutoff=cutoff, jwt=jwt)
     if result.status != "ok" or not result.truncated:
         return result
     if depth >= TRAE_SPLIT_MAX_DEPTH or to_epoch - from_epoch <= TRAE_SPLIT_MIN_SECONDS:
@@ -280,11 +287,11 @@ def _fetch_trae_window(sessionid, auth, from_epoch, to_epoch, fetch_ent, now, cu
 
     mid = from_epoch + (to_epoch - from_epoch) // 2
     older = _fetch_trae_window(sessionid, auth, from_epoch, mid, False, now, cutoff,
-                               depth + 1)
+                               depth + 1, jwt=jwt)
     if older.status != "ok":
         return older
     newer = _fetch_trae_window(sessionid, auth, mid, to_epoch, False, now, cutoff,
-                               depth + 1)
+                               depth + 1, jwt=jwt)
     if newer.status != "ok":
         return newer
 
@@ -394,8 +401,6 @@ class StatsStore:
                         "ALTER TABLE usage_log ADD COLUMN account TEXT NOT NULL DEFAULT ''")
                 self.conn.execute(
                     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
-                # 已移除的 Trae 每日签到功能会留下 trae_checkin_* 键，启动时清掉
-                self.conn.execute("DELETE FROM meta WHERE key LIKE 'trae_checkin%'")
                 # 换凭据只清 JWT 缓存（新 cookie 需要重新换签，旧 JWT 未过期前会拉旧账号
                 # 数据）。按"身份指纹"比较而非原始串：同一账号换粘贴格式不清缓存。
                 # 游标与明细按 uid 记账、永不删除：同账号换 cookie 指纹不变、
@@ -410,6 +415,14 @@ class StatsStore:
                 # 每日聚合缓存：区间/总量查询直接读它，不再扫明细。
                 # meta 标记控制升级后一次性全量回填。
                 self.conn.execute(DAILY_AGG_DDL)
+                # v2.0 新增 credits 列（积分账本 / 多日流水）；老库 ALTER 迁移，列已存在则跳过
+                agg_cols = [r[1] for r in self.conn.execute(
+                    "PRAGMA table_info(daily_agg)").fetchall()]
+                if "credits" not in agg_cols:
+                    self.conn.execute(
+                        "ALTER TABLE daily_agg ADD COLUMN credits REAL NOT NULL DEFAULT 0")
+                    # 补列后必须重算历史，否则多日积分恒为 0
+                    self.conn.execute("DELETE FROM meta WHERE key='daily_agg_full'")
                 flag = self.conn.execute(
                     "SELECT value FROM meta WHERE key='daily_agg_full'").fetchone()
                 if not flag:
@@ -420,10 +433,12 @@ class StatsStore:
                         hour=0, minute=0, second=0, microsecond=0).timestamp())
                     self.conn.execute("""
                         INSERT OR REPLACE INTO daily_agg
-                            (date, source, reqs, input, output, cache_create, cache_read)
+                            (date, source, reqs, input, output, cache_create, cache_read,
+                             credits)
                         SELECT date(created_at, 'unixepoch', 'localtime'), source,
                                SUM(request_count), SUM(input_tokens), SUM(output_tokens),
-                               SUM(cache_creation_tokens), SUM(cache_read_tokens)
+                               SUM(cache_creation_tokens), SUM(cache_read_tokens),
+                               COALESCE(SUM(credits), 0)
                         FROM usage_log
                         WHERE created_at < ?
                         GROUP BY 1, 2
@@ -452,10 +467,12 @@ class StatsStore:
             # 未出现在 configs 里的注册表源一律视为未启用（设置页要逐源显示状态）
             for adapter in SOURCE_REGISTRY:
                 self.source_status.setdefault(adapter.id, "未启用")
-            # Trae（HTTP 源）：启用但没填 sessionid 时不能算"可用"，也不能算失败
+            # Trae（HTTP 源）：客户端凭据优先（零配置）；没有客户端凭据才看 sessionid。
+            # 未在设置里启用但发现客户端账号时同样算可用源（JWT 通道自动接管）。
+            client_accounts = trae_client_credentials.discover()
             if not self.trae_enabled:
-                self.source_status["trae"] = "未启用"
-            elif not self.trae_sessionid:
+                self.source_status["trae"] = "客户端凭据" if client_accounts else "未启用"
+            elif not self.trae_sessionid and not client_accounts:
                 self.source_status["trae"] = "未配置登录"
             else:
                 self.source_status["trae"] = "连接中…"
@@ -469,7 +486,8 @@ class StatsStore:
 
             # 注意：WorkBuddy **不算**可用数据源——它的数据不参与 usage_all，
             # 算进去会让主界面从"请检查数据源"变成一张空图表。
-            self.has_active_source = bool(self.attached) or self.trae_enabled
+            self.has_active_source = (bool(self.attached) or self.trae_enabled
+                                      or bool(client_accounts))
 
             self._rebuild_view()
 
@@ -601,10 +619,11 @@ class StatsStore:
         # 不再逐行转换整张明细表（历史越长差距越明显）
         self.conn.execute("""
             INSERT OR REPLACE INTO daily_agg
-                (date, source, reqs, input, output, cache_create, cache_read)
+                (date, source, reqs, input, output, cache_create, cache_read, credits)
             SELECT date(created_at, 'unixepoch', 'localtime'), source,
                    SUM(request_count), SUM(input_tokens), SUM(output_tokens),
-                   SUM(cache_creation_tokens), SUM(cache_read_tokens)
+                   SUM(cache_creation_tokens), SUM(cache_read_tokens),
+                   COALESCE(SUM(credits), 0)
             FROM usage_log
             WHERE date(created_at, 'unixepoch', 'localtime') >= ?
               AND date(created_at, 'unixepoch', 'localtime') < ?
@@ -661,25 +680,43 @@ class StatsStore:
     def sync_trae_if_needed(self, now=None, interactive=False):
         """按需同步 Trae 用量（HTTP 源）。返回槽 1 的 TraeResult 或 None（被守卫拦下）。
 
+        凭据通道优先级与 macOS 版一致：客户端 storage.json 里的 JWT 优先（零配置，
+        可多账号），没有客户端凭据时才回落设置里的 sessionid / X-Cloudide-Session。
         interactive=True 是用户点开弹窗的主动刷新，间隔更短（60s vs trae_bg_interval）。
-        夜间静默（0–9 点本地时间）直接返回且**不占**节流窗口：凌晨会话由 9 点后
-        第一次同步的"水位 - 2 天"窗口覆盖，不丢数。
-        多账号：槽 1 主凭据，槽 2 trae_sessionid2（空则跳过）；两槽共用节流时钟串行执行。
+        夜间静默（0–9 点本地时间）直接返回且**不占**节流窗口：凌晨会话由首次同步的
+        "水位 - 2 天"窗口覆盖，不丢数。
         """
         now_epoch = self._now_epoch(now)
         now_dt = datetime.fromtimestamp(now_epoch)
         with self._lock:
             if self.conn is None:
                 return None
-            if not self.trae_enabled:
-                self.source_status["trae"] = "未启用"
-                return None
             sid1, sid2 = self.trae_sessionid, self.trae_sessionid2
+            enabled = self.trae_enabled
+        accounts = trae_client_credentials.discover(now=now_dt)
+        # 客户端凭据存在时即使没在设置里启用 Trae 也照常同步（零配置体验）
+        if not enabled and not accounts:
+            with self._lock:
+                self.source_status["trae"] = "未启用"
+            return None
+        plan = []   # [(槽, sessionid, 客户端账号)]
+        if accounts:
+            plan.append((1, "", accounts[0]))
+            if len(accounts) > 1:
+                plan.append((2, "", accounts[1]))
+            elif sid2:
+                plan.append((2, sid2, None))
+        else:
+            if sid1:
+                plan.append((1, sid1, None))
+            if sid2:
+                plan.append((2, sid2, None))
         result = None
-        if sid1:
-            result = self._sync_trae_slot(1, sid1, now_epoch, now_dt, interactive)
-        if sid2:
-            self._sync_trae_slot(2, sid2, now_epoch, now_dt, interactive)
+        for slot, sessionid, account in plan:
+            slot_result = self._sync_trae_slot(slot, sessionid, now_epoch, now_dt,
+                                               interactive, client_account=account)
+            if slot == 1:
+                result = slot_result
         return result
 
     def _slot_uid(self, slot, sessionid):
@@ -692,12 +729,38 @@ class StatsStore:
             return ""
         return saved
 
-    def _sync_trae_slot(self, slot, sessionid, now_epoch, now_dt, interactive):
-        """单账号同步：游标（水位/剪枝基准/余额）全部按 uid 记账，明细永不删除。"""
-        uid = self._slot_uid(slot, sessionid)
+    def _sync_trae_slot(self, slot, sessionid, now_epoch, now_dt, interactive,
+                        client_account=None):
+        """单账号同步：游标（水位/剪枝基准/余额）全部按 uid 记账，明细永不删除。
+
+        client_account 非空 = 走客户端 JWT 通道（sessionid 可为空）；JWT 快过期
+        时先用 RT + 设备私钥续签，仍失败则报"请启动 Trae 客户端"。
+        """
+        uid = client_account.uid if client_account else self._slot_uid(slot, sessionid)
         auth_key = "trae_auth_2" if slot == 2 else "trae_auth"
         ent_at_key = "trae_ent_at_2" if slot == 2 else "trae_ent_at"
         status_key = "trae_2" if slot == 2 else "trae"
+
+        # 客户端 JWT 过期 → 先就地续签（不写回 storage.json，只用于本轮）
+        client_jwt = None
+        if client_account is not None:
+            if not trae_client_credentials.jwt_usable(client_account, now=now_epoch):
+                refreshed = trae_client_credentials.refresh(client_account, now=now_epoch)
+                if refreshed:
+                    client_account.jwt = refreshed["jwt"]
+                    client_account.jwt_exp = refreshed["jwt_exp"]
+                    if refreshed.get("refresh_token"):
+                        client_account.refresh_token = refreshed["refresh_token"]
+                else:
+                    result = TraeResult(
+                        "auth_expired",
+                        message="客户端 JWT 已过期，请启动一次 Trae 客户端后重试")
+                    with self._lock:
+                        self._last_trae_sync_at[slot] = now_epoch
+                        self.source_status[status_key] = result.message
+                        self.conn.commit()
+                    return result
+            client_jwt = client_account.jwt
 
         # ---- 守卫与拉取窗口（锁内取快照；网络绝不在锁内跑）----
         with self._lock:
@@ -740,7 +803,19 @@ class StatsStore:
         # ---- 网络（锁外）----
         try:
             result = _fetch_trae_window(sessionid, auth, from_epoch,
-                                        to_epoch, fetch_ent, now_epoch, cutoff)
+                                        to_epoch, fetch_ent, now_epoch, cutoff,
+                                        jwt=client_jwt)
+            # 客户端 JWT 被服务端提前作废：续签一次再重试（会话级 1001）
+            if client_jwt and result.status == "auth_expired":
+                refreshed = trae_client_credentials.refresh(client_account, now=now_epoch)
+                if refreshed:
+                    client_account.jwt = refreshed["jwt"]
+                    client_account.jwt_exp = refreshed["jwt_exp"]
+                    if refreshed.get("refresh_token"):
+                        client_account.refresh_token = refreshed["refresh_token"]
+                    result = _fetch_trae_window(sessionid, auth, from_epoch,
+                                                to_epoch, fetch_ent, now_epoch, cutoff,
+                                                jwt=client_account.jwt)
         except Exception as e:   # 注入的 transport 等异常也不许把界面打挂
             result = TraeResult("failed", message=str(e))
 
@@ -750,13 +825,20 @@ class StatsStore:
             self._last_trae_sync_at[slot] = now_epoch
             if self.conn is None:
                 return result
-            # 换签结果（run 就地更新了 auth）必须持久化，重启不丢
-            self._meta_set(auth_key, auth.to_json())
+            # 换签结果（run 就地更新了 auth）必须持久化，重启不丢；
+            # 客户端通道的 JWT 以 storage.json 为准，不写 meta（以免缓存陈旧 JWT）
+            if client_account is None:
+                self._meta_set(auth_key, auth.to_json())
             # uid 认领：换签成功即解出账号 uid 并与凭据指纹绑定（uid 未变则无需重写）。
             resolved_uid = trae_sync.jwt_uid(auth.jwt) or uid
             uid_key = "trae_uid_2" if slot == 2 else "trae_uid"
             cred_key = "trae_uid_cred_2" if slot == 2 else "trae_uid_cred"
-            if resolved_uid and resolved_uid != uid:
+            # 客户端通道的 uid 直接来自 storage.json：登记槽位映射，多账号拆分才有归属
+            if client_account is not None and resolved_uid:
+                if self._meta_get(uid_key) != resolved_uid:
+                    self._meta_set(uid_key, resolved_uid)
+                    self._meta_set(cred_key, "client:" + resolved_uid)
+            elif resolved_uid and resolved_uid != uid:
                 self._meta_set(uid_key, resolved_uid)
                 self._meta_set(cred_key, trae_sync.credential_identity(sessionid))
             if result.status == "ok":
@@ -789,7 +871,9 @@ class StatsStore:
                     self._meta_set(ent_at_key, int(now_epoch))
                 self.source_status[status_key] = "已连接"
             elif result.status == "auth_expired":
-                self.source_status[status_key] = "登录已过期，请重新提供 sessionid 或 X-Cloudide-Session"
+                self.source_status[status_key] = (
+                    result.message if client_account
+                    else "登录已过期，请重新提供 sessionid 或 X-Cloudide-Session")
             elif result.status == "not_configured":
                 self.source_status[status_key] = "未配置登录"
             else:
@@ -895,6 +979,27 @@ class StatsStore:
             mapping[uid2] = 2
         return mapping
 
+    def trae_ent_by_uid(self):
+        """按 uid 的余额明细：[(uid, consumed, total)]（签到页账号卡用，与槽位无关）"""
+        with self._lock:
+            if self.conn is None:
+                return []
+            rows = self.conn.execute(
+                "SELECT key, value FROM meta WHERE key LIKE 'trae_ent_%'").fetchall()
+        out = []
+        for key, raw in rows:
+            if key.startswith("trae_ent_at"):
+                continue
+            uid = key[len("trae_ent_"):]
+            parts = (raw or "").split("|")
+            if not uid or len(parts) != 2:
+                continue
+            try:
+                out.append((uid, float(parts[0]), float(parts[1])))
+            except ValueError:
+                continue
+        return out
+
     def trae_ent_accounts(self):
         """多账号余额明细（按槽位排序，仅含已拉到账单的账号）：[(slot, consumed, total)]。
 
@@ -936,6 +1041,202 @@ class StatsStore:
             if slot:
                 credits_by_slot[slot] = credits_by_slot.get(slot, 0.0) + float(total or 0)
         return [(slot, credits_by_slot.get(slot, 0.0)) for slot in sorted(mapping.values())]
+
+    # ------------------------------------------------------------ Trae 每日签到
+    # 与 macOS 版一致：客户端 JWT 通道；水位 trae_checkin_day_<uid> = 已签日期，
+    # 失败记 trae_checkin_fail_<uid>（1 小时内不重试，不占水位）；记录存 meta JSON。
+    # 奖励金额取 status 的 credits + extra_credits（claim 成功响应不带金额）。
+
+    def checkin_done_today(self, uid, now=None):
+        day = self._now_dt(now).strftime("%Y-%m-%d")
+        with self._lock:
+            return self._meta_get("trae_checkin_day_%s" % uid) == day
+
+    def checkin_log(self):
+        """签到记录（时间升序，最多 50 条）：[{t, uid, ok, credits, msg}]"""
+        with self._lock:
+            raw = self._meta_get("trae_checkin_log")
+        if not raw:
+            return []
+        try:
+            arr = json.loads(raw)
+        except (ValueError, TypeError):
+            return []
+        if not isinstance(arr, list):
+            return []
+        out = []
+        for item in arr:
+            if not isinstance(item, dict):
+                continue
+            out.append({
+                "t": int(item.get("t") or 0),
+                "uid": str(item.get("uid") or ""),
+                "ok": bool(item.get("ok")),
+                "credits": float(item.get("credits") or 0),
+                "msg": str(item.get("msg") or ""),
+            })
+        return out
+
+    def checkin_gains(self, days=30):
+        """近 N 天成功签到获得的积分：[(epoch, uid, credits)]，时间倒序"""
+        since = self.local_midnight(max(0, days - 1))
+        return [(rec["t"], rec["uid"], rec["credits"])
+                for rec in reversed(self.checkin_log())
+                if rec["ok"] and rec["credits"] > 0 and rec["t"] >= since]
+
+    def checkin_month_gain(self):
+        """本月签到获得的积分合计（本地时区月初起）"""
+        first = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        since = int(first.timestamp())
+        return sum(rec["credits"] for rec in self.checkin_log()
+                   if rec["ok"] and rec["credits"] > 0 and rec["t"] >= since)
+
+    def checkin_today_credits(self, now=None):
+        """今日签到获得积分（弹窗「已签 ✓ +N」徽标）"""
+        day = self._now_dt(now).strftime("%Y-%m-%d")
+        total = 0.0
+        for rec in self.checkin_log():
+            if rec["ok"] and rec["credits"] > 0:
+                stamp = datetime.fromtimestamp(rec["t"]).strftime("%Y-%m-%d")
+                if stamp == day:
+                    total += rec["credits"]
+        return total
+
+    @staticmethod
+    def _now_dt(now=None):
+        return datetime.fromtimestamp(StatsStore._now_epoch(now))
+
+    def trae_checkin_if_needed(self, now=None, interactive=False, force=False,
+                               enabled=None, start_hour=None):
+        """每日签到：默认 9 点后（可调）、失败 1 小时内不重试。
+
+        enabled / start_hour 由调用方从设置传入（None = 默认开关开、9 点）；
+        interactive（打开弹窗）与 force（手动「立即签到」）绕过时钟门。
+        """
+        now_epoch = self._now_epoch(now)
+        now_dt = datetime.fromtimestamp(now_epoch)
+        if not force and enabled is False:
+            return False
+        hour = 9 if start_hour is None else int(start_hour)
+        if not force and not interactive and now_dt.hour < hour:
+            return False
+        accounts = trae_client_credentials.discover(now=now_dt)
+        if not accounts:
+            return False
+        today = now_dt.strftime("%Y-%m-%d")
+        acted = False
+        for acc in accounts:
+            with self._lock:
+                if self.conn is None:
+                    return acted
+                done = self._meta_get("trae_checkin_day_%s" % acc.uid)
+                fail_at = self._meta_float("trae_checkin_fail_%s" % acc.uid)
+            if done == today and not force:
+                continue
+            if not force and fail_at > 0 and now_epoch - fail_at < 3600:
+                continue
+            # JWT 过期不硬签：先尝试 RT 续签，仍失败就等客户端自己续
+            if not trae_client_credentials.jwt_usable(acc, now=now_epoch):
+                refreshed = trae_client_credentials.refresh(acc, now=now_epoch)
+                if not refreshed:
+                    continue
+                acc.jwt = refreshed["jwt"]
+                acc.jwt_exp = refreshed["jwt_exp"]
+            st = trae_checkin.status(acc.jwt, acc.uid, acc.device_id)
+            if st.code == 0 and not st.checked_in and not st.enable:
+                continue   # 服务端活动未开启：静默跳过，不计失败
+            if st.code != 0 and not st.checked_in:
+                self._append_checkin_log(acc.uid, False, 0, st.message)
+                with self._lock:
+                    self._meta_set("trae_checkin_fail_%s" % acc.uid, str(int(now_epoch)))
+                    self.conn.commit()
+                acted = True
+                continue
+            reward = st.reward
+            if st.checked_in:
+                with self._lock:
+                    self._meta_set("trae_checkin_day_%s" % acc.uid, today)
+                    self._meta_set("trae_checkin_fail_%s" % acc.uid, "")
+                    self.conn.commit()
+                if done != today:
+                    self._append_checkin_log(
+                        acc.uid, True, reward,
+                        st.message or "今日已签")
+                    print("[ccBar] Trae 签到 uid %s: 今日已签，奖励 +%s" % (acc.uid, reward))
+                else:
+                    # 旧版记录可能记成 +0：手动触发时按 status 修正并合并同日重复
+                    self._fixup_checkin_log(acc.uid, today, reward)
+                acted = True
+                continue
+            cl = trae_checkin.claim(acc.jwt, acc.uid, acc.device_id)
+            with self._lock:
+                if cl.ok:
+                    self._meta_set("trae_checkin_day_%s" % acc.uid, today)
+                    self._meta_set("trae_checkin_fail_%s" % acc.uid, "")
+                else:
+                    self._meta_set("trae_checkin_fail_%s" % acc.uid, str(int(now_epoch)))
+                self.conn.commit()
+            self._append_checkin_log(acc.uid, cl.ok, reward if cl.ok else 0, cl.message)
+            print("[ccBar] Trae 签到 uid %s: %s" % (
+                acc.uid, ("成功 +%s" % reward) if cl.ok else ("失败 " + cl.message)))
+            acted = True
+        return acted
+
+    def _append_checkin_log(self, uid, ok, credits, message):
+        with self._lock:
+            if self.conn is None:
+                return
+            log = []
+            raw = self._meta_get("trae_checkin_log")
+            if raw:
+                try:
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, list):
+                        log = [x for x in parsed if isinstance(x, dict)]
+                except (ValueError, TypeError):
+                    log = []
+            log.append({"t": int(time.time()), "uid": uid, "ok": bool(ok),
+                        "credits": float(credits or 0), "msg": message or ""})
+            if len(log) > 50:
+                log = log[-50:]
+            self._meta_set("trae_checkin_log",
+                           json.dumps(log, ensure_ascii=False, separators=(",", ":")))
+            self.conn.commit()
+
+    def _fixup_checkin_log(self, uid, day, credits):
+        """当日最后一条成功记录补上奖励；删掉同日重复的 +0 成功记录"""
+        with self._lock:
+            if self.conn is None:
+                return
+            raw = self._meta_get("trae_checkin_log")
+            if not raw:
+                return
+            try:
+                log = json.loads(raw)
+            except (ValueError, TypeError):
+                return
+            if not isinstance(log, list):
+                return
+            idx = [i for i, rec in enumerate(log)
+                   if isinstance(rec, dict) and rec.get("uid") == uid and rec.get("ok")
+                   and rec.get("t")
+                   and datetime.fromtimestamp(int(rec["t"])).strftime("%Y-%m-%d") == day]
+            if not idx:
+                return
+            keep = idx[-1]
+            changed = False
+            if credits > 0 and float(log[keep].get("credits") or 0) == 0:
+                log[keep]["credits"] = float(credits)
+                changed = True
+            dupes = [i for i in idx[:-1] if float(log[i].get("credits") or 0) == 0]
+            for i in sorted(dupes, reverse=True):
+                log.pop(i)
+            if dupes:
+                changed = True
+            if changed:
+                self._meta_set("trae_checkin_log",
+                               json.dumps(log, ensure_ascii=False, separators=(",", ":")))
+                self.conn.commit()
 
     # ------------------------------------------------------------ WorkBuddy（HTTP 源，独立表）
     # 明细进 workbuddy_usage，**不进 usage_log / daily_agg / usage_all**：
@@ -1466,6 +1767,21 @@ class StatsStore:
             (self.window_start(days), self.local_midnight(-1)))
         return [(r[0], float(r[1])) for r in rows] if rows else []
 
+    def query_credits_mtd(self):
+        """本月消耗（月初 ~ 今日实时）：daily_agg 结算完整日 + 今日 usage_all"""
+        import calendar
+        now = datetime.now()
+        first = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        last_day = (first.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+        row = self.query_one("""
+            SELECT COALESCE(SUM(credits), 0) FROM daily_agg
+            WHERE date >= ? AND date <= ?""",
+            (first.strftime("%Y-%m-%d"), last_day.strftime("%Y-%m-%d")))
+        today_row = self.query_one(
+            "SELECT COALESCE(SUM(credits), 0) FROM usage_all WHERE created_at >= ?",
+            (self.local_midnight(0),))
+        return (float(row[0]) if row else 0.0) + (float(today_row[0]) if today_row else 0.0)
+
     def query_first_usage_epoch(self):
         """最早一条明细的时间戳（洞察「全部」范围起点；无数据返回 None）"""
         row = self.query_one("SELECT MIN(created_at) FROM usage_all")
@@ -1706,6 +2022,70 @@ class StatsStore:
             ORDER BY created_at DESC LIMIT ?""", (start, start + 86400, limit))
         return [(r[0], r[1] or "-", r[2], r[3], r[4], r[5], mapping.get(r[6] or "", 0))
                 for r in rows] if rows else []
+
+    def query_hourly_timeline(self, day=None):
+        """单日按本地小时聚合：[(hour, reqs, token, credits)]，小时升序。
+
+        与逐笔查询同源（今天走 usage_all 实时，历史走 usage_log），
+        供流水页单日「按小时折叠」使用；今天数据不依赖 daily_agg。
+        """
+        if day is None:
+            day_str = datetime.now().strftime("%Y-%m-%d")
+        elif hasattr(day, "strftime"):
+            day_str = day.strftime("%Y-%m-%d")
+        else:
+            day_str = str(day)
+        offset = int(datetime.now().astimezone().utcoffset().total_seconds())
+        cols = """
+            SELECT ((created_at + ?) % 86400) / 3600 AS h,
+                   COALESCE(SUM(request_count), 0),
+                   COALESCE(SUM(input_tokens + output_tokens
+                                + cache_read_tokens + cache_creation_tokens), 0),
+                   COALESCE(SUM(credits), 0)
+        """
+        if day_str == datetime.now().strftime("%Y-%m-%d"):
+            rows = self.query_all(cols + """
+            FROM usage_all WHERE created_at >= ?
+            GROUP BY 1 ORDER BY 1""", (offset, self.local_midnight(0)))
+        else:
+            try:
+                start = _local_epoch(day_str)
+            except ValueError:
+                return []
+            rows = self.query_all(cols + """
+            FROM usage_log WHERE created_at >= ? AND created_at < ?
+            GROUP BY 1 ORDER BY 1""", (offset, start, start + 86400))
+        return [(int(r[0]), int(r[1]), int(r[2]), float(r[3])) for r in rows] if rows else []
+
+    def query_timeline_daily(self, from_day, to_day):
+        """按 (date, source) 聚合的多日流水：[(date, source, reqs, token, credits)]。
+
+        daily_agg 只结算完整日（≤昨天），今天用 usage_all 实时补齐；日期倒序。
+        """
+        rows = self.query_all("""
+            SELECT date, source, COALESCE(SUM(reqs), 0),
+                   COALESCE(SUM(input + output + cache_create + cache_read), 0),
+                   COALESCE(SUM(credits), 0)
+            FROM daily_agg WHERE date >= ? AND date <= ?
+            GROUP BY 1, 2""", (from_day, to_day))
+        out = {(r[0], r[1]): [int(r[2]), int(r[3]), float(r[4])] for r in rows} if rows else {}
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        if from_day <= today_str <= to_day:
+            today_rows = self.query_all("""
+                SELECT source, COALESCE(SUM(request_count), 0),
+                       COALESCE(SUM(input_tokens + output_tokens
+                                    + cache_read_tokens + cache_creation_tokens), 0),
+                       COALESCE(SUM(credits), 0)
+                FROM usage_all WHERE created_at >= ?
+                GROUP BY 1""", (self.local_midnight(0),))
+            for src, reqs, token, credits in today_rows or []:
+                cur = out.get((today_str, src), [0, 0, 0.0])
+                cur[0] += int(reqs)
+                cur[1] += int(token)
+                cur[2] += float(credits)
+                out[(today_str, src)] = cur
+        return [(d, s, v[0], v[1], v[2]) for (d, s), v in
+                sorted(out.items(), key=lambda kv: kv[0][0], reverse=True)]
 
     def query_monthly_totals(self, limit=36):
         """按月汇总 [(month, reqs, token, cache_read)]，月份倒序，最多 limit 个月"""

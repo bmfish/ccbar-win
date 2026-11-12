@@ -769,4 +769,31 @@ L10N_EN.update({
     "已用 %s · %.0f%%": "Used %s · %.0f%%",
     "按天回看每条请求 · 支持导出 CSV": "Day-by-day requests · CSV export",
     "把战报卡与周报导出成图片": "Export share cards and weekly reports as images",
+    # v2.0 签到 / 流水折叠 / 积分账本
+    "签到": "Check-in",
+    "Trae 账号": "Trae Accounts",
+    "Trae 客户端凭据自动接入 · 每日整点自动签到":
+        "Auto-discovered Trae credentials · daily check-in",
+    "未发现客户端账号：打开一次 Trae 客户端并登录即可自动接入":
+        "No client account yet: open Trae and sign in once to connect automatically",
+    "今日已签 ✓": "Checked in ✓",
+    "今日未签": "Not checked in",
+    "JWT 余 %d 天": "JWT %d days left",
+    "余额 ": "Balance ",
+    "每日自动签到": "Daily auto check-in",
+    "起自动 · 失败 1 小时内重试": " · retry within 1h on failure",
+    "立即签到": "Check in now",
+    "签到中…": "Checking in…",
+    "签到失败": "Check-in failed",
+    "+%.0f 积分": "+%.0f credits",
+    "获得来源（近 30 天）": "Gains (last 30 days)",
+    "本月获得": "Gained this month",
+    "本月消耗": "Spent this month",
+    "暂无获得记录：签到成功后逐笔列在这里":
+        "No gains yet: check-in rewards will be listed here",
+    "今日按小时折叠 · 多日按天折叠 · 点击展开逐笔":
+        "Hourly today · daily for ranges · expand for sessions",
+    "时段 / 明细": "Hour / detail",
+    "次数": "Calls",
+    "加载更早": "Load earlier",
 })

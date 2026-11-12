@@ -64,12 +64,10 @@ import l10n
 import trae_sync
 import workbuddy_sync
 from l10n import L          # 界面文案统一走 L(中文原文)；当前语言由 l10n 维护
-import share_card
 import themes
-import weekly_report
 
 # 当前版本（发布时随 tag 更新）
-APP_VERSION = "1.9.21"   # 与 macOS 版本线对齐
+APP_VERSION = "2.0.0"   # 与 macOS 版本线对齐
 
 # 数据库路径（cc-switch 默认值，可在设置中修改）
 DB_PATH = os.path.expanduser("~/.cc-switch/cc-switch.db")
@@ -258,32 +256,6 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
                            workbuddy_cookie=self.settings.get("workbuddy_cookie") or "",
                            workbuddy_bg_interval=self.settings.get("workbuddy_bg_interval"))
         self.store.sync_if_needed()
-
-    def maybe_generate_weekly_report(self):
-        """周一自动生成上周用量周报；错过周一自动补生成（幂等：文件存在即跳过）"""
-        generate = getattr(weekly_report, "generate_if_needed", None)
-        if generate is None:
-            return None
-        try:
-            return generate(
-                self.store,
-                self._weekly_card_png_bytes,
-                output_dir=weekly_report.directory(),
-                notify=self._notify_weekly_report,
-                auto=bool(self.settings.get("auto_weekly_report", True)),
-                english=l10n.is_english())
-        except Exception as e:
-            print(L("周报生成失败:"), e)
-            return None
-
-    def _weekly_card_png_bytes(self, date_text, total, reqs, peak, trend):
-        """周报渲染回调：与分享页预览用同一套卡片渲染"""
-        return share_card.weekly_card_png(date_text, total, reqs, peak, trend,
-                                         theme=self.theme)
-
-    def _notify_weekly_report(self, title, body):
-        """周报落盘后的系统通知（weekly_report 只给中文原文，显示时过 L）"""
-        self._toast(L(title), L(body))
 
     def _toast(self, title, body, duration=5):
         """Windows 原生 Toast。
@@ -1312,35 +1284,6 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
         avg = sum(durations) // max(len(durations), 1) // 60
         return (len(durations), avg, max(durations) // 60)
 
-    def _share_card_png(self):
-        """用量战报分享卡（与 macOS 版 UsageShareCard 同款版式，含二维码）"""
-        today = self.query_day_stats(0) or {"total": 0}
-        week = self.query_day_stats(7) or {"total": 0}
-        month = self.query_day_stats(30) or {"total": 0}
-        total = self.query_total_stats() or {"total": 0}
-        trend = [(d[5:], t) for d, t in (self.store.query_daily_tokens(7) or [])]
-        try:
-            credits = self.store.query_today_credits()
-        except Exception:
-            credits = 0.0
-        return share_card.share_card_image(
-            today["total"], week["total"], month["total"], total["total"], trend,
-            today_credits=credits, theme=self.theme)
-
-    def _weekly_card_png(self):
-        """用量周报卡（上一个完整周：上周一 ~ 上周日，与 mac weeklyShareCard 同字段）"""
-        now = datetime.now()
-        frm, to = weekly_report.last_week_window(now)
-        stats = self.store.query_window_stats(frm, to) or {}
-        daily = self.store.query_daily_tokens_between(frm, to) or []
-        peak = max((t for _, t in daily), default=0)
-        labels = weekly_report.trend_labels(now)
-        trend = [(labels[i] if i < len(labels) else d, t) for i, (d, t) in enumerate(daily)]
-        return share_card.weekly_card_image(
-            weekly_report.date_range_text(now, l10n.is_english()),
-            int(stats.get("total", 0) or 0),
-            int(stats.get("reqs", 0) or 0), peak, trend, theme=self.theme)
-
     @staticmethod
     def _insight_card(parent, row, col, title, value, sub="", badge=None):
         """洞察页统计卡（两列网格中的一项，mac insightCard）
@@ -1973,8 +1916,6 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
         section(L("行为"))
         warning_var = check_row(L("启用用量预警"), self.settings["warning_enabled"])
         login_var = check_row(L("开机自动启动"), self.settings.get("launch_at_login"))
-        report_var = check_row(L("每周一自动生成用量周报"),
-                               self.settings.get("auto_weekly_report", True))
         wide_var = check_row(L("宽版弹窗（380pt）"), self.settings.get("popover_wide"))
 
         backup_row = tk.Frame(inner, bg=Design.BACKGROUND)
@@ -2064,7 +2005,6 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
             price_entry.insert(0, "0")
             warning_var.set(True)
             login_var.set(False)
-            report_var.set(True)
             wide_var.set(False)
             lang_var.set(LANG_LABELS["system"])
             custom[:] = []
@@ -2091,7 +2031,6 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
                 "default_token_price": price_entry.get(),
                 "warning_enabled": warning_var.get(),
                 "launch_at_login": login_var.get(),
-                "auto_weekly_report": report_var.get(),
                 "popover_wide": wide_var.get(),
                 "app_language": LANG_BY_LABEL.get(lang_var.get(), "system"),
                 "theme": selected_theme().get("id") or themes.default_theme()["id"],
@@ -2264,8 +2203,6 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
                     self.check_token_milestone(today["total"])
                 # 每天首次刷新自动备份统计库（滚动保留 7 份）
                 self.maybe_auto_backup()
-                # 周一自动生成上周用量周报（错过周一下次刷新补生成）
-                self.maybe_generate_weekly_report()
                 # 静默检查更新（3 天一次，只有真有新版才提示）
                 self.maybe_check_updates_silently()
                 # 更新菜单
@@ -2276,15 +2213,21 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
                 logger.warning("refresh error: %s", e)
 
     def sync_trae(self, interactive=False):
-        """跑一次 Trae 同步（网络请求不能堵 GUI/托盘线程，放后台线程）"""
+        """跑一次 Trae 同步 + 每日签到（网络请求放后台线程）
+
+        凭据优先级：客户端 storage.json 的 JWT（零配置）> 设置里的 sessionid。
+        因此不再以 trae_enabled 为前置条件——有客户端账号就自动同步。
+        """
         sync = getattr(self.store, "sync_trae_if_needed", None)
-        if sync is None or not self.settings.get("trae_enabled"):
+        if sync is None:
             return
         # 登录态与后台间隔可能在设置里改过，先同步进统计库
         self.store.trae_sessionid = self.settings.get("trae_sessionid") or ""
         self.store.trae_sessionid2 = self.settings.get("trae_sessionid2") or ""
         self.store.trae_bg_interval = trae_sync.clamp_bg_interval(
             self.settings.get("trae_bg_interval"))
+        checkin_enabled = bool(self.settings.get("trae_checkin_enabled", True))
+        checkin_hour = int(self.settings.get("trae_checkin_hour") or 9)
 
         def worker():
             try:
@@ -2292,6 +2235,12 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
             except Exception as e:
                 print(L("Trae 同步失败:"), e)
                 logger.warning("Trae sync failed: %s", e)
+            try:
+                self.store.trae_checkin_if_needed(
+                    interactive=interactive, enabled=checkin_enabled,
+                    start_hour=checkin_hour)
+            except Exception as e:
+                logger.warning("Trae checkin failed: %s", e)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2424,7 +2373,6 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
 
         try:
             self.maybe_auto_backup()
-            self.maybe_generate_weekly_report()
         except Exception as e:
             logger.warning("startup maintenance failed: %s", e)
         self.sync_trae(interactive=False)

@@ -23,9 +23,10 @@ jobs:
 
     # 只装测试真正需要的：pystray / win10toast 是 Windows 独占，Linux 上装不上，
     # 测试里对它们打桩（见 tests/test_charts.py）。
-    # Pillow 与 requirements 保持一致（Pillow 12 不再支持 3.9）
+    # Pillow 与 requirements 保持一致（Pillow 12 不再支持 3.9）；
+    # cryptography 供 Trae 客户端凭据/签到测试解密 tc 信封
     - name: Install test dependencies
-      run: python -m pip install --upgrade pip "Pillow>=9,<12"
+      run: python -m pip install --upgrade pip "Pillow>=9,<12" "cryptography>=41,<46"
 
     - name: Run tests
       run: python -m unittest discover -s tests -v

@@ -1,7 +1,7 @@
 # ccBar Windows
 
 Windows 系统托盘 AI CLI 用量统计工具，支持**多数据源**聚合——内置 [cc-switch](https://github.com/farion1231/cc-switch)（Claude/Codex 等多应用代理统计）、ZCode 与 Trae，后续可插拔扩展。
-与 macOS 版（[ccbar-native](https://github.com/bmfish/ccbar-native)）**功能对齐**：洞察中心（费用 / 洞察 / 分享 / 渠道 / 流水 / 积分）、用量周报、主题与双语、多机合并等。
+与 macOS 版（[ccbar-native](https://github.com/bmfish/ccbar-native)）**功能对齐**：洞察中心（签到 / 费用 / 洞察 / 渠道 / 流水 / 积分）、Trae 客户端凭据自动接入、每日签到、主题与双语、多机合并等。
 
 ![windows](https://img.shields.io/badge/platform-Windows%2010%2B-blue) ![python](https://img.shields.io/badge/python-3.9%2B-yellow) ![license](https://img.shields.io/badge/license-MIT-green)
 
@@ -18,7 +18,7 @@ Windows 系统托盘 AI CLI 用量统计工具，支持**多数据源**聚合—
 
 ccBar is a Windows system tray app that tracks your AI CLI token usage in real time — today, this week, and all-time — with **pluggable data sources**: [cc-switch](https://github.com/farion1231/cc-switch) (Claude Code / Codex / OpenCode via proxy), ZCode (GLM) and Trae. History is synced daily into a local SQLite store (source databases are opened read-only and never modified), while today's numbers are queried live.
 
-Feature parity with the macOS build ([ccbar-native](https://github.com/bmfish/ccbar-native)): a six-page insights center (cost / insights / share / channels / timeline / credits), an auto-generated weekly usage report, six built-in themes plus importable JSON theme packs, a Chinese/English UI, idempotent CSV export/import, database merging across machines, daily rotating backups, and Trae usage via its official HTTP API.
+Feature parity with the macOS build ([ccbar-native](https://github.com/bmfish/ccbar-native)): a seven-page insights center (check-in / cost / insights / channels / timeline / credits / WorkBuddy), zero-config Trae client credentials, daily check-in, six built-in themes plus importable JSON theme packs, a Chinese/English UI, idempotent CSV export/import, database merging across machines, daily rotating backups, and Trae usage via its official HTTP API.
 
 ## 安装
 
@@ -52,29 +52,33 @@ pyinstaller --onefile --noconsole --name ccBar --icon ccBar.ico --add-data "ccBa
 
 ## 功能
 
-与 macOS 版（[ccbar-native](https://github.com/bmfish/ccbar-native) v1.8.2）功能对齐：
+与 macOS 版（[ccbar-native](https://github.com/bmfish/ccbar-native)）v2.0.0 功能对齐：
 
 - **托盘**：标题实时显示今日 token，图标按用量阈值变色（绿 → 黄 → 橙，超过 8000 万标红）；
   单次刷新增量达到「红色门槛」立即标红（可关）
-- **弹窗面板**：今日卡片（请求数 / 缓存命中 / 工时 / 今日积分）、模型分布、今日每小时折线、
-  趋势（昨日 / 近 7 天 / 近 30 天 / 历史总量）、按当前速率的 24 点预测、今日会话数
+- **弹窗面板**：今日卡片（请求数 / 缓存命中 / 工时 / 今日积分 / 已签徽标）、模型分布、
+  今日每小时折线、趋势（昨日 / 近 7 天 / 近 30 天 / 历史总量）——四个趋势入口统一打开
+  洞察中心「流水」页的对应区间
 - **详情窗口**：每小时 / 近 7 天 / 近 30 天 / 模型分布（按渠道分组）/ **历史总量（按月汇总）**，
   带统计卡、峰值高亮、图表拖选读数、窗口位置记忆，全部支持导出 CSV
-- **洞察中心**（六页）：
+- **洞察中心**（七页）：
+  - **签到**：Trae 客户端账号卡（余额 / 今日已签 / JWT 剩余天数）、每日自动签到开关 +
+    起始小时（00–24 点可调）、立即签到、签到记录（+积分逐笔）
   - 费用：今日 / 7 天 / 30 天费用、**月度预算进度与日预算虚线**、模型费用排行、
     **性价比榜（token / $1）**、**未计费渠道按默认单价估算**（实测 $a · 估算 $b）
   - 洞察：连续使用 / 今日会话 / 本周用量（周环比）/ 日均 / 历史总量 / 单日峰值 / 最活跃时段 /
     最大模型 / 预计本月消耗、**星期分布（近 90 天）**、**90 天用量热力图**（悬停读数）、
     **模型编年史**（含自动 / 手动合并同名模型）、**导出长图**
-  - 分享：**今日战报卡**与**上周周报卡**实时预览，均内嵌 GitHub 二维码，可保存为图片 /
-    复制到剪贴板 / 打开周报目录
   - 渠道：近 30 天渠道与应用堆叠、Token 构成、缓存命中率、今日各渠道
-  - 流水：**任意日期回看**（‹ / 日期 / › / 今天），按渠道与模型筛选，**导出 CSV**
-  - 积分：今日 / 7 天 / 30 天积分、**官方账单余额**、近 30 天积分走势（Trae 口径）
+  - 流水：**今日 / 近 7 天 / 近 30 天 / 全部**四种区间；单日按小时折叠、多日按天折叠，
+    默认全折叠，点击箭头展开逐笔；支持任意日期回看与导出 CSV
+  - 积分：今日 / 7 天 / 30 天积分、**官方账单余额**、**账本四口径（本月获得 / 本月消耗）**、
+    **获得来源（近 30 天签到）**、近 30 天积分走势（Trae 口径）
   - **WorkBuddy**（Windows 独有）：今日 / 7 天 / 30 天 / 历史总积分、按客户端（CodeBuddyIDE / WorkBuddy）
     拆分、模型排行、近 30 天积分走势 —— 该源**独立存表**，其余页签一律不含它的数据
-- **周报**：每周一自动生成上周用量周报 PNG 到 `~/Documents/CCBar 周报/`，
-  周一没开机则下次启动/刷新自动补生成（文件存在即幂等），生成后弹系统通知
+- **Trae 零配置接入**：自动读取本机 Trae 客户端 `storage.json` 里的 JWT（tc 信封解密），
+  多账号自动发现；JWT 过期时先用 RT + 设备私钥续签，失败再回落设置里的 sessionid；
+  每日签到也走同一条客户端 JWT 通道
 - **通知**：用量预警阈值、每累计 N 万 token 里程碑（0 = 关闭，间隔可配）
 - **多数据源**：cc-switch / ZCode / **Trae**，各自可启停、自定义路径；路径保存前即时校验
   Trae 后台同步间隔可在设置里自定义（60 ~ 7200 秒，**默认 10 分钟**）
@@ -143,11 +147,16 @@ python -m unittest discover -s tests -v
 ```
 
 测试覆盖数据层口径（补账/聚合/CSV 幂等/积分/模型合并/多机合并/自动备份）、
-主题包往返、周报幂等、二维码黄金向量（开发期与 PyPI `qrcode` 逐模块比对 122 组）、
+主题包往返、Trae 客户端凭据解密与签到网关口径、流水按小时/按日折叠、
 双语词条，以及真建 tkinter 窗口的冒烟测试（无显示环境自动跳过）。
 
 ## 版本
 
+- **v2.0.0** — 对齐 macOS v2.0 大改版：移除分享页 / 周报 / 速率预测；新增「签到」页
+  （客户端 JWT 自动接入、每日签到、起始小时可调、签到记录、弹窗已签徽标）；
+  Trae 凭据改为客户端 `storage.json` 优先（tc 信封解密 + RT 续签，sessionid 降级）；
+  流水重做（今日按小时折叠 / 多日按天折叠 / 默认全折叠 / 面板入口直达对应区间）；
+  积分账本新增本月获得 / 本月消耗 / 获得来源；`daily_agg` 增加 credits 列
 - **v1.9.21** — 设置页 Trae 凭据旁新增「如何获取？」步骤弹窗（浏览器登录 trae.cn →
   F12 开发者工具 → Cookies 复制 sessionid → 粘贴保存），与 macOS 版同步
 - **v1.9.20** — 版本号与 macOS 对齐；Trae 凭据粘贴更宽容（裸 sessionid、`sessionid=…`、

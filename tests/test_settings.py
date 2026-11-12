@@ -63,7 +63,8 @@ class TestDefaults(SettingsTestCase):
         self.assertEqual(s.get("led_red_threshold"), 100)
         self.assertEqual(s.get("monthly_budget_usd"), 0.0)
         self.assertEqual(s.get("default_token_price"), 0.0)
-        self.assertTrue(s.get("auto_weekly_report"))
+        self.assertTrue(s.get("trae_checkin_enabled"))
+        self.assertEqual(s.get("trae_checkin_hour"), 9)
         self.assertFalse(s.get("launch_at_login"))
         self.assertEqual(s.get("app_language"), "system")
         self.assertEqual(s.get("theme"), "默认主题")
@@ -81,7 +82,8 @@ class TestDefaults(SettingsTestCase):
         required = ("refresh_interval", "warning_threshold", "warning_enabled", "notify_interval",
                     "db_path", "ccswitch_enabled", "zcode_enabled", "zcode_path", "trae_enabled",
                     "trae_sessionid", "led_red_threshold", "monthly_budget_usd",
-                    "default_token_price", "auto_weekly_report", "launch_at_login",
+                    "default_token_price", "launch_at_login",
+                    "trae_checkin_enabled", "trae_checkin_hour",
                     "app_language", "theme", "custom_themes", "insights_last_page",
                     "last_auto_backup_date", "last_update_check_date",
                     "trae_bg_interval", "workbuddy_enabled", "workbuddy_cookie",
@@ -419,7 +421,7 @@ class TestReset(SettingsTestCase):
         s.apply({"refresh_interval": "120", "warning_threshold": "80",
                  "monthly_budget_usd": "20", "default_token_price": "3",
                  "led_red_threshold": "5", "notify_interval": "10",
-                 "auto_weekly_report": False, "trae_enabled": True})
+                 "trae_checkin_enabled": False, "trae_enabled": True})
         s.set("theme", "海蓝")
         s.set("ccswitch_enabled", False)
         s.set("zcode_enabled", True)
@@ -438,7 +440,7 @@ class TestReset(SettingsTestCase):
         self.assertEqual(s.get("led_red_threshold"), 100)
         self.assertEqual(s.get("monthly_budget_usd"), 0.0)
         self.assertEqual(s.get("default_token_price"), 0.0)
-        self.assertTrue(s.get("auto_weekly_report"))
+        self.assertTrue(s.get("trae_checkin_enabled"))
         self.assertEqual(s.get("notify_interval"), 1000)
         self.assertEqual(s.get("trae_bg_interval"), DEFAULTS["trae_bg_interval"])
         self.assertEqual(s.get("theme"), "默认主题")
