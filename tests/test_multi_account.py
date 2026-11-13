@@ -13,8 +13,23 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import trae_sync as ts  # noqa: E402
+import trae_client_credentials  # noqa: E402
 from stats_store import StatsStore  # noqa: E402
 from trae_sync import TraeRow  # noqa: E402
+
+
+_ORIG_STORAGE_OVERRIDE = None
+
+
+def setUpModule():
+    """隔离本机真实 Trae 客户端存储（开发机有登录态时不能影响槽位断言）"""
+    global _ORIG_STORAGE_OVERRIDE
+    _ORIG_STORAGE_OVERRIDE = trae_client_credentials.storage_override
+    trae_client_credentials.storage_override = []
+
+
+def tearDownModule():
+    trae_client_credentials.storage_override = _ORIG_STORAGE_OVERRIDE
 
 
 def make_jwt(uid, numeric=False):

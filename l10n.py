@@ -796,4 +796,5 @@ L10N_EN.update({
     "时段 / 明细": "Hour / detail",
     "次数": "Calls",
     "加载更早": "Load earlier",
+    "客户端凭据": "Client credentials",
 })

@@ -27,6 +27,7 @@ import app_settings  # noqa: E402
 import l10n  # noqa: E402
 import main  # noqa: E402
 import themes  # noqa: E402
+import trae_client_credentials  # noqa: E402
 from main import CcBarTray, Design, blend, usage_color  # noqa: E402
 from stats_store import StatsStore  # noqa: E402
 
@@ -67,6 +68,9 @@ class TrayFixture(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix="ccbar-smoke-")
         self._orig_store_path = StatsStore.store_path
         StatsStore.store_path = staticmethod(lambda: os.path.join(self.tmp, "ccbar.db"))
+        # 不读本机真实 Trae 客户端存储：有登录态的开发机上行为会随环境漂移
+        self._orig_storage_override = trae_client_credentials.storage_override
+        trae_client_credentials.storage_override = []
 
         self.source_path = os.path.join(self.tmp, "cc-switch.db")
         self._make_fixture()
@@ -103,6 +107,7 @@ class TrayFixture(unittest.TestCase):
                 pass
         l10n.set_language("zh")
         CcBarTray._bring_to_front = self._orig_front
+        trae_client_credentials.storage_override = self._orig_storage_override
         self.app.store._close()
         StatsStore.store_path = self._orig_store_path
         shutil.rmtree(self.tmp, ignore_errors=True)

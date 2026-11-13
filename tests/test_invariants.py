@@ -16,6 +16,21 @@ from datetime import datetime, timedelta
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from stats_store import StatsStore, CCSwitchAdapter, ZCodeAdapter  # noqa: E402
+import trae_client_credentials  # noqa: E402
+
+
+_ORIG_STORAGE_OVERRIDE = None
+
+
+def setUpModule():
+    """隔离本机真实 Trae 客户端存储（源库只读断言不受账号发现影响）"""
+    global _ORIG_STORAGE_OVERRIDE
+    _ORIG_STORAGE_OVERRIDE = trae_client_credentials.storage_override
+    trae_client_credentials.storage_override = []
+
+
+def tearDownModule():
+    trae_client_credentials.storage_override = _ORIG_STORAGE_OVERRIDE
 
 
 def local_midnight(days_ago=0):

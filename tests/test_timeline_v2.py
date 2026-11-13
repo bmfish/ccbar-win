@@ -13,6 +13,20 @@ from stats_store import StatsStore
 from trae_sync import TraeRow
 
 
+_ORIG_STORAGE_OVERRIDE = None
+
+
+def setUpModule():
+    """隔离本机真实 Trae 客户端存储（签到 / 流水断言不随开发机登录态漂移）"""
+    global _ORIG_STORAGE_OVERRIDE
+    _ORIG_STORAGE_OVERRIDE = tcc.storage_override
+    tcc.storage_override = []
+
+
+def tearDownModule():
+    tcc.storage_override = _ORIG_STORAGE_OVERRIDE
+
+
 class TestTimelineV2(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="ccbar-tl2-")

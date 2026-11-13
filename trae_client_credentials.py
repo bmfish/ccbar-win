@@ -88,6 +88,32 @@ def _now_epoch(now=None):
     return float(now)
 
 
+def _credential_epoch(value):
+    """客户端时间字段 → epoch 秒。
+
+    客户端版本之间格式不一致：mac 版存毫秒数，Windows 新版存 ISO 8601 字符串
+    （如 2027-05-05T09:00:41.313Z）。解析失败一律返回 0，不能因为一个可选
+    字段就让整个凭据发现（进而应用启动）崩掉。
+    """
+    if isinstance(value, bool) or value is None:
+        return 0
+    if isinstance(value, (int, float)):
+        seconds = float(value)
+        return int(seconds // 1000) if seconds > 1e12 else int(seconds)
+    text = str(value).strip()
+    if not text:
+        return 0
+    try:
+        seconds = float(text)
+    except ValueError:
+        try:
+            return int(datetime.fromisoformat(
+                text[:-1] + "+00:00" if text.endswith("Z") else text).timestamp())
+        except ValueError:
+            return 0
+    return int(seconds // 1000) if seconds > 1e12 else int(seconds)
+
+
 def discover(now=None):
     """扫描双客户端并按 uid 去重（同账号保留 JWT 更新的一份）"""
     if not _CRYPTO_AVAILABLE:
@@ -112,13 +138,16 @@ def discover(now=None):
         app_name = os.path.basename(os.path.dirname(os.path.dirname(
             os.path.dirname(path))))
         uid, exp = parsed
-        account = ClientTraeAccount(
-            uid=uid, jwt=jwt, jwt_exp=exp,
-            refresh_token=cloudide.get("refreshToken") or "",
-            refresh_exp=int((cloudide.get("refreshExpiredAt") or 0) / 1000),
-            device_id=(device or {}).get("device_id", ""),
-            device_key_pem=(device or {}).get("private_key_pem", ""),
-            source_app=app_name)
+        try:
+            account = ClientTraeAccount(
+                uid=uid, jwt=jwt, jwt_exp=exp,
+                refresh_token=cloudide.get("refreshToken") or "",
+                refresh_exp=_credential_epoch(cloudide.get("refreshExpiredAt")),
+                device_id=(device or {}).get("device_id", ""),
+                device_key_pem=(device or {}).get("private_key_pem", ""),
+                source_app=app_name)
+        except (TypeError, ValueError):
+            continue
         old = by_uid.get(uid)
         if old is None or old.jwt_exp <= account.jwt_exp:
             by_uid[uid] = account

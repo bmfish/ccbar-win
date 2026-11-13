@@ -17,10 +17,25 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import trae_sync  # noqa: E402
 import workbuddy_sync  # noqa: E402
 import stats_store  # noqa: E402
+import trae_client_credentials  # noqa: E402
 from stats_store import (StatsStore, CCSwitchAdapter, ZCodeAdapter, DAILY_AGG_DDL,
                         USAGE_LOG_DDL, _local_epoch, validate_db)  # noqa: E402
 from trae_sync import TraeAuth, TraeResult, TraeRow  # noqa: E402
 from workbuddy_sync import WorkBuddyResult, WorkBuddyRow  # noqa: E402
+
+
+_ORIG_STORAGE_OVERRIDE = None
+
+
+def setUpModule():
+    """隔离本机真实 Trae 客户端存储：否则有登录态的开发机上状态/账单断言不可控"""
+    global _ORIG_STORAGE_OVERRIDE
+    _ORIG_STORAGE_OVERRIDE = trae_client_credentials.storage_override
+    trae_client_credentials.storage_override = []
+
+
+def tearDownModule():
+    trae_client_credentials.storage_override = _ORIG_STORAGE_OVERRIDE
 
 
 class _FakeWorkBuddyRunner:
