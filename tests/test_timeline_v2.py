@@ -94,10 +94,37 @@ class TestTimelineV2(unittest.TestCase):
         self.assertAlmostEqual(self.store.checkin_month_gain(), 300)
         self.assertEqual(len(self.store.checkin_gains(30)), 1)
 
-    def test_checkin_engine_respects_hour_gate(self):
-        # 没有客户端账号时直接返回 False（本机 macOS 测试环境无 Trae 存储）
-        self.assertFalse(self.store.trae_checkin_if_needed(
-            now=datetime.now().replace(hour=8), enabled=True, start_hour=9))
+    def test_checkin_engine_respects_scheduled_minute(self):
+        """起始小时后按账号随机一个分钟：未到点不发请求，到点才签"""
+        acc = self._fake_account()
+        today = datetime.now().strftime("%Y-%m-%d")
+        minute = self.store._checkin_slot_minute("u1", today)
+        status = trae_checkin.CheckinStatus(
+            enable=True, checked_in=True, credits=0, code=0)
+        with mock.patch.object(stats_store.trae_client_credentials, "discover",
+                               return_value=[acc]), \
+                mock.patch.object(stats_store.trae_checkin, "status",
+                                  return_value=status) as status_mock, \
+                mock.patch.object(stats_store.trae_checkin, "claim") as claim:
+            early = datetime.now().replace(hour=8, minute=minute, second=0,
+                                           microsecond=0)
+            self.assertFalse(self.store.trae_checkin_if_needed(
+                now=early, enabled=True, start_hour=9))
+            status_mock.assert_not_called()
+            due = early.replace(hour=9)
+            self.assertTrue(self.store.trae_checkin_if_needed(
+                now=due, enabled=True, start_hour=9))
+            status_mock.assert_called_once()
+            claim.assert_not_called()
+
+    def test_checkin_is_skipped_while_another_run_is_active(self):
+        """签到互斥：另一轮还在跑时直接返回，避免并发重复 claim"""
+        self.store._checkin_guard.acquire()
+        try:
+            self.assertFalse(self.store.trae_checkin_if_needed(
+                force=True, enabled=True, start_hour=9))
+        finally:
+            self.store._checkin_guard.release()
 
     def _fake_account(self):
         return tcc.ClientTraeAccount(
@@ -139,6 +166,43 @@ class TestTimelineV2(unittest.TestCase):
         log = self.store.checkin_log()
         self.assertEqual(len(log), 1, "同一天只记一笔")
         self.assertEqual(log[0]["credits"], 300)
+
+    def test_checkin_skips_when_already_done_today(self):
+        """今日已有签到水位时，即使手动 force 也不再请求 status/claim"""
+        today = datetime.now().strftime("%Y-%m-%d")
+        self.store._meta_set("trae_checkin_day_u1", today)
+        self.store.conn.commit()
+        with mock.patch.object(stats_store.trae_client_credentials, "discover",
+                               return_value=[self._fake_account()]), \
+                mock.patch.object(stats_store.trae_checkin, "status") as status, \
+                mock.patch.object(stats_store.trae_checkin, "claim") as claim:
+            self.assertFalse(self.store.trae_checkin_if_needed(
+                force=True, enabled=True, start_hour=9))
+            status.assert_not_called()
+            claim.assert_not_called()
+        self.assertEqual(self.store.checkin_log(), [], "已签账号不得再写签到记录")
+
+    def test_claim_already_does_not_log_duplicate_reward(self):
+        """服务端已签（跨进程/跨设备）只补水位，重复触发也只保留一笔奖励"""
+        status = trae_checkin.CheckinStatus(
+            enable=True, checked_in=False, credits=200, extra_credits=100,
+            code=0, message="success")
+        claim = trae_checkin.CheckinClaim(
+            True, code=9095, message="当前设备今日已经签到，请明日再来哦～",
+            already=True)
+        with mock.patch.object(stats_store.trae_client_credentials, "discover",
+                               return_value=[self._fake_account()]), \
+                mock.patch.object(stats_store.trae_checkin, "status",
+                                  return_value=status), \
+                mock.patch.object(stats_store.trae_checkin, "claim",
+                                  return_value=claim):
+            self.store.trae_checkin_if_needed(force=True, enabled=True, start_hour=9)
+            self.assertEqual(len(self.store.checkin_log()), 1)
+            # 模拟另一端已签、本地水位被清：再跑一次也不能重复记奖励
+            self.store._meta_set("trae_checkin_day_u1", "")
+            self.store.conn.commit()
+            self.store.trae_checkin_if_needed(force=True, enabled=True, start_hour=9)
+        self.assertEqual(len(self.store.checkin_log()), 1, "成功后不得重复记奖励")
 
 
 if __name__ == "__main__":

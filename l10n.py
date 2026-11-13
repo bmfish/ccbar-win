@@ -782,7 +782,7 @@ L10N_EN.update({
     "JWT 余 %d 天": "JWT %d days left",
     "余额 ": "Balance ",
     "每日自动签到": "Daily auto check-in",
-    "起自动 · 失败 1 小时内重试": " · retry within 1h on failure",
+    "起，随机分钟签到 · 失败 1 小时内重试": " onward, random minute · retry within 1h",
     "立即签到": "Check in now",
     "签到中…": "Checking in…",
     "签到失败": "Check-in failed",

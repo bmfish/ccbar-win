@@ -39,15 +39,17 @@ class CheckinStatus:
 
 
 class CheckinClaim:
-    def __init__(self, ok, code=None, message="", credits=0.0):
+    def __init__(self, ok, code=None, message="", credits=0.0, already=False):
         self.ok = ok
         self.code = code
         self.message = message
         self.credits = credits
+        # 服务端返回「今日已经签到」：本次没有真正领取，不应再记一笔奖励
+        self.already = already
 
     def __repr__(self):
-        return "CheckinClaim(ok=%r, code=%r, message=%r)" % (
-            self.ok, self.code, self.message)
+        return "CheckinClaim(ok=%r, code=%r, message=%r, already=%r)" % (
+            self.ok, self.code, self.message, self.already)
 
 
 def _seeded(uid, seed, n):
@@ -147,4 +149,4 @@ def claim(jwt, uid, device_id, send=None):
     already = ("已经签到" in message) or ("already checked in" in message)
     auth_rejected = "not able to authenticate" in message.lower()
     ok = (code in (0, None)) and not auth_rejected
-    return CheckinClaim(ok or already, code=code, message=message)
+    return CheckinClaim(ok or already, code=code, message=message, already=already)

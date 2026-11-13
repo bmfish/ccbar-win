@@ -10,6 +10,7 @@ ccbar 自建统计库（~/.ccbar/ccbar.db）为主连接：
 同步、视图、设置界面自动生效。
 """
 import fnmatch
+import hashlib
 import json
 import os
 import sqlite3
@@ -315,6 +316,8 @@ class StatsStore:
         self.attached = []      # 已 ATTACH 且表齐全的适配器
         self._view_day = ""     # usage_all 视图构建日期（跨零点重建用）
         self._lock = threading.Lock()
+        # 签到互斥：后台自动签到与手动「立即签到」可能并发，串行化避免重复 claim
+        self._checkin_guard = threading.Lock()
         # Trae 是 HTTP 源（不走 ATTACH）：rebuild 时把启用状态与凭据快照进来
         self.trae_enabled = False
         self.trae_sessionid = ""
@@ -1106,24 +1109,43 @@ class StatsStore:
     def _now_dt(now=None):
         return datetime.fromtimestamp(StatsStore._now_epoch(now))
 
+    @staticmethod
+    def _checkin_slot_minute(uid, day):
+        """当天签到分钟（0–59）：按账号 + 日期确定性派生，重启/多轮同步不会重掷"""
+        raw = hashlib.sha256(("%s:%s" % (uid, day)).encode("utf-8")).digest()
+        return int.from_bytes(raw[:4], "big") % 60
+
     def trae_checkin_if_needed(self, now=None, interactive=False, force=False,
                                enabled=None, start_hour=None):
-        """每日签到：默认 9 点后（可调）、失败 1 小时内不重试。
+        """每日签到：起始小时后的随机分钟（0–59）自动签，失败 1 小时内不重试。
 
         enabled / start_hour 由调用方从设置传入（None = 默认开关开、9 点）；
-        interactive（打开弹窗）与 force（手动「立即签到」）绕过时钟门。
+        自动签到会在 [start_hour, start_hour+1) 内按账号随机一个分钟，避免每天
+        整点准点签到；force（手动「立即签到」）绕过时间门与失败节流，但不绕过
+        「今日已签」——已签账号不再请求签到网关。
         """
+        # 同一时刻只允许一个签到流程在跑：自动/手动并发时不重复 claim
+        if not self._checkin_guard.acquire(blocking=False):
+            return False
+        try:
+            return self._trae_checkin_run(now=now, force=force,
+                                          enabled=enabled, start_hour=start_hour)
+        finally:
+            self._checkin_guard.release()
+
+    def _trae_checkin_run(self, now=None, force=False, enabled=None, start_hour=None):
+        """签到实际执行体（调用方已持有 _checkin_guard）"""
         now_epoch = self._now_epoch(now)
         now_dt = datetime.fromtimestamp(now_epoch)
         if not force and enabled is False:
             return False
-        hour = 9 if start_hour is None else int(start_hour)
-        if not force and not interactive and now_dt.hour < hour:
-            return False
+        start_hour = 9 if start_hour is None else max(0, min(23, int(start_hour)))
         accounts = trae_client_credentials.discover(now=now_dt)
         if not accounts:
             return False
         today = now_dt.strftime("%Y-%m-%d")
+        day_start = int(now_dt.replace(hour=0, minute=0, second=0,
+                                       microsecond=0).timestamp())
         acted = False
         for acc in accounts:
             with self._lock:
@@ -1131,7 +1153,13 @@ class StatsStore:
                     return acted
                 done = self._meta_get("trae_checkin_day_%s" % acc.uid)
                 fail_at = self._meta_float("trae_checkin_fail_%s" % acc.uid)
-            if done == today and not force:
+            # 今日已签就彻底跳过（手动强制也一样）：避免再次请求 status/claim
+            if done == today:
+                continue
+            # 每天在起始小时后随机一个分钟签到（多账号各自不同）
+            slot_epoch = (day_start + start_hour * 3600
+                          + self._checkin_slot_minute(acc.uid, today) * 60)
+            if not force and now_epoch < slot_epoch:
                 continue
             if not force and fail_at > 0 and now_epoch - fail_at < 3600:
                 continue
@@ -1158,16 +1186,15 @@ class StatsStore:
                     self._meta_set("trae_checkin_day_%s" % acc.uid, today)
                     self._meta_set("trae_checkin_fail_%s" % acc.uid, "")
                     self.conn.commit()
-                if done != today:
-                    self._append_checkin_log(
-                        acc.uid, True, reward,
-                        st.message or "今日已签")
-                    print("[ccBar] Trae 签到 uid %s: 今日已签，奖励 +%s" % (acc.uid, reward))
-                else:
-                    # 旧版记录可能记成 +0：手动触发时按 status 修正并合并同日重复
-                    self._fixup_checkin_log(acc.uid, today, reward)
+                self._record_checkin_once(acc.uid, today, reward,
+                                          st.message or "今日已签")
+                print("[ccBar] Trae 签到 uid %s: 今日已签，奖励 +%s" % (acc.uid, reward))
                 acted = True
                 continue
+            # status 期间可能已被另一处（另一进程/另一轮）签到，claim 前再核一次水位
+            with self._lock:
+                if self._meta_get("trae_checkin_day_%s" % acc.uid) == today:
+                    continue
             cl = trae_checkin.claim(acc.jwt, acc.uid, acc.device_id)
             with self._lock:
                 if cl.ok:
@@ -1176,11 +1203,33 @@ class StatsStore:
                 else:
                     self._meta_set("trae_checkin_fail_%s" % acc.uid, str(int(now_epoch)))
                 self.conn.commit()
-            self._append_checkin_log(acc.uid, cl.ok, reward if cl.ok else 0, cl.message)
-            print("[ccBar] Trae 签到 uid %s: %s" % (
-                acc.uid, ("成功 +%s" % reward) if cl.ok else ("失败 " + cl.message)))
+            if cl.ok:
+                # 服务端返回「今日已签」时只补水位，不再重复记奖励
+                self._record_checkin_once(acc.uid, today, reward,
+                                          cl.message or "今日已签")
+                print("[ccBar] Trae 签到 uid %s: %s" % (
+                    acc.uid, ("已签 +%s" % reward) if cl.already else ("成功 +%s" % reward)))
+            else:
+                self._append_checkin_log(acc.uid, False, 0, cl.message)
+                print("[ccBar] Trae 签到 uid %s: 失败 %s" % (acc.uid, cl.message))
             acted = True
         return acted
+
+    def _checkin_logged_today(self, uid, day):
+        """今天是否已有该账号的成功签到记录（跨进程重复 claim 的兜底）"""
+        for rec in self.checkin_log():
+            if not rec["ok"] or rec["uid"] != uid or not rec["t"]:
+                continue
+            if datetime.fromtimestamp(rec["t"]).strftime("%Y-%m-%d") == day:
+                return True
+        return False
+
+    def _record_checkin_once(self, uid, day, credits, message):
+        """成功记录只写一笔；已有记录时只按 status 修正金额（旧版 +0）"""
+        if self._checkin_logged_today(uid, day):
+            self._fixup_checkin_log(uid, day, credits)
+        else:
+            self._append_checkin_log(uid, True, credits, message)
 
     def _append_checkin_log(self, uid, ok, credits, message):
         with self._lock:

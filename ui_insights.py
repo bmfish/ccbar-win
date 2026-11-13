@@ -641,6 +641,9 @@ class InsightsWindowsMixin:
                              fg=Design.TEXT_PRIMARY, bg=Design.CARD_FILL,
                              font=Design.FONT_TREND_VALUE).pack(side=tk.RIGHT, padx=(0, 10))
 
+            done_today = bool(accounts) and all(
+                store.checkin_done_today(acc.uid) for acc in accounts)
+
             section(ck_body, L("签到"))
             ccard, cbody = rounded_card(ck_body, padx=16, pady=12)
             ccard.pack(fill=tk.X, padx=10, pady=5)
@@ -671,10 +674,15 @@ class InsightsWindowsMixin:
                 self.settings.apply({"trae_checkin_hour": hour})
 
             hour_box.bind("<<ComboboxSelected>>", on_hour)
-            tk.Label(bar, text=L("起自动 · 失败 1 小时内重试"), fg=Design.TEXT_MUTED,
+            tk.Label(bar, text=L("起，随机分钟签到 · 失败 1 小时内重试"), fg=Design.TEXT_MUTED,
                      bg=Design.CARD_FILL, font=Design.FONT_UI_SMALL).pack(side=tk.LEFT)
 
             def do_checkin():
+                # 今日全部账号已签：不再发请求，直接刷新成已签状态
+                if bool(accounts) and all(
+                        store.checkin_done_today(a.uid) for a in accounts):
+                    render_checkin()
+                    return
                 checkin_btn.configure(state=tk.DISABLED, text=L("签到中…"))
                 hour = checkin_hour_value()
 
@@ -687,9 +695,11 @@ class InsightsWindowsMixin:
 
                 self._run_async(work, done, lambda _e: render_checkin())
 
-            checkin_btn = flat_button(bar, L("立即签到"), do_checkin, primary=True)
+            checkin_btn = flat_button(
+                bar, L("今日已签 ✓") if done_today else L("立即签到"),
+                do_checkin, primary=True)
             checkin_btn.pack(side=tk.RIGHT)
-            if not accounts:
+            if not accounts or done_today:
                 checkin_btn.configure(state=tk.DISABLED)
 
             log = store.checkin_log()
