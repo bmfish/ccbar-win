@@ -18,7 +18,7 @@ Windows 系统托盘 AI CLI 用量统计工具，支持**多数据源**聚合—
 
 ccBar is a Windows system tray app that tracks your AI CLI token usage in real time — today, this week, and all-time — with **pluggable data sources**: [cc-switch](https://github.com/farion1231/cc-switch) (Claude Code / Codex / OpenCode via proxy), ZCode (GLM) and Trae. History is synced daily into a local SQLite store (source databases are opened read-only and never modified), while today's numbers are queried live.
 
-Feature parity with the macOS build ([ccbar-native](https://github.com/bmfish/ccbar-native)): a seven-page insights center (check-in / cost / insights / channels / timeline / credits / WorkBuddy), zero-config Trae client credentials, daily check-in, six built-in themes plus importable JSON theme packs, a Chinese/English UI, idempotent CSV export/import, database merging across machines, daily rotating backups, and Trae usage via its official HTTP API.
+Feature parity with the macOS build ([ccbar-native](https://github.com/bmfish/ccbar-native)): a seven-page insights center (check-in / cost / insights / channels / timeline / credits / WorkBuddy), zero-config Trae client credentials, daily check-in, seven built-in themes plus importable JSON theme packs, a Chinese/English UI, idempotent CSV export/import, database merging across machines, daily rotating backups, and Trae usage via its official HTTP API.
 
 ## 安装
 
@@ -82,7 +82,7 @@ pyinstaller --onefile --noconsole --name ccBar --icon ccBar.ico --add-data "ccBa
 - **通知**：用量预警阈值、每累计 N 万 token 里程碑（0 = 关闭，间隔可配）
 - **多数据源**：cc-switch / ZCode / **Trae**，各自可启停、自定义路径；路径保存前即时校验
   Trae 后台同步间隔可在设置里自定义（60 ~ 7200 秒，**默认 10 分钟**）
-- **主题**：6 套内置配色（默认 / 卡哇伊 01 / 海蓝 / 翠绿 / 星空紫 / CRT 终端），
+- **主题**：7 套内置配色（默认 / 卡哇伊 01 / 海蓝 / 翠绿 / 星空紫 / CRT 终端 / 荧光绿），
   JSON 主题包导入 / 导出 / 重命名 / 删除，与 macOS 版主题包互通
 - **双语界面**：中文 / English / 跟随系统
 - **数据安全**：每天自动备份统计库（滚动保留 7 份）+ 一键手动备份；

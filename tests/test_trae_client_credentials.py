@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -115,6 +116,13 @@ class TestDiscover(unittest.TestCase):
             f.write("{not json")
         tcc.storage_override = [os.path.join(self.dir, "nope.json"), bad]
         self.assertEqual(tcc.discover(), [])
+
+    def test_storage_urls_include_home_second_client(self):
+        """第二客户端用 --user-data-dir 放在主目录（如 ~/TraeCN2）时也要能发现"""
+        path = self._write("TraeCN2", make_storage_json(make_jwt("42", 99)))
+        with mock.patch.object(tcc.os.path, "expanduser", return_value=self.dir):
+            urls = tcc.storage_urls()
+        self.assertIn(path, urls)
 
 
 class TestProofAndRefresh(unittest.TestCase):

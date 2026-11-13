@@ -1,4 +1,4 @@
-"""主题系统：内置 6 套 + JSON 主题包导入导出 + tkinter 令牌换算。
+"""主题系统：内置 7 套 + JSON 主题包导入导出 + tkinter 令牌换算。
 
 色值全部对照 macOS 版 Design.swift 的内置主题（id 即显示名，老偏好无需迁移）。
 """
@@ -13,11 +13,12 @@ import themes  # noqa: E402
 
 
 class TestBuiltinThemes(unittest.TestCase):
-    def test_six_builtins(self):
+    def test_seven_builtins(self):
         self.assertEqual([t["id"] for t in themes.BUILTIN_THEMES],
-                         ["默认主题", "卡哇伊 01", "海蓝", "翠绿", "星空紫", "CRT 终端"])
+                         ["默认主题", "卡哇伊 01", "海蓝", "翠绿", "星空紫", "CRT 终端",
+                          "荧光绿"])
         names = [t["name"] for t in themes.BUILTIN_THEMES]
-        self.assertEqual(len(set(names)), 6, "主题名不得重复（同名会被当成同一套）")
+        self.assertEqual(len(set(names)), 7, "主题名不得重复（同名会被当成同一套）")
 
     def test_builtin_integrity(self):
         """每套主题：6 个模型色、3 个趋势色、色值合法、alpha 在 0~1"""
@@ -49,6 +50,10 @@ class TestBuiltinThemes(unittest.TestCase):
         self.assertEqual(crt["accent"], "#4DF28C")
         self.assertTrue(crt["scanlines"])
         self.assertEqual(crt["cardBorderAlpha"], 0.20)
+
+        neon = themes.find("荧光绿")
+        self.assertEqual(neon["accent"], "#32F08C")
+        self.assertFalse(neon["scanlines"])
 
     def test_find_falls_back_to_default(self):
         self.assertEqual(themes.find("不存在的主题")["id"], "默认主题")
@@ -191,7 +196,7 @@ class TestCustomThemes(unittest.TestCase):
         custom = themes.upsert_custom(
             [], themes.theme_from_json('{"format":"ccbar-theme","name":"自定义"}'))
         listing = themes.all_themes(custom)
-        self.assertEqual(len(listing), 7)
+        self.assertEqual(len(listing), 8)
         self.assertEqual(listing[-1]["name"], "自定义")
         self.assertEqual(listing[0]["id"], "默认主题")
 

@@ -1,4 +1,4 @@
-"""主题系统（6 套内置 + 自定义 JSON 主题包）——与 macOS 版 Design.swift 同款。
+"""主题系统（7 套内置 + 自定义 JSON 主题包）——与 macOS 版 Design.swift 同款。
 
 主题字典的键名刻意沿用 macOS 主题包的 JSON 字段名（accent / data / bigNumber /
 trend / models / glowRadius / ...），这样社区主题包在两端可以互相导入导出，
@@ -79,6 +79,15 @@ BUILTIN_THEMES = [
         "glowRadius": 12, "glowAlpha": 0.40, "cardFillAlpha": 0.05,
         "cardBorderAlpha": 0.20, "separatorAlpha": 0.10,
         "bigNumberWeight": "bold", "scanlines": True,
+    },
+    {
+        "id": "荧光绿", "name": "荧光绿",
+        "accent": "#32F08C", "data": "#7CFFB8", "bigNumber": "#32F08C",
+        "trend": ["#32F08C", "#4DD9B3", "#A6E64D"],
+        "models": ["#32F08C", "#33BF7A", "#7CFFB8", "#4DD9B3", "#D9E64D", "#26996B"],
+        "glowRadius": 16, "glowAlpha": 0.35, "cardFillAlpha": 0.06,
+        "cardBorderAlpha": 0.12, "separatorAlpha": 0.10,
+        "bigNumberWeight": "bold", "scanlines": False,
     },
 ]
 

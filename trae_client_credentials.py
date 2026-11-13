@@ -72,12 +72,26 @@ class ClientTraeAccount:
 
 
 def storage_urls():
-    """双客户端存储路径（Windows 普通应用数据目录）"""
+    """客户端存储路径：标准双客户端 + 主目录下的便携/第二客户端数据目录。"""
     if storage_override is not None:
         return list(storage_override)
     appdata = os.environ.get("APPDATA") or os.path.expanduser("~/AppData/Roaming")
-    return [os.path.join(appdata, name, "User", "globalStorage", "storage.json")
-            for name in ("Trae CN", "Trae CN 2")]
+    paths = [os.path.join(appdata, name, "User", "globalStorage", "storage.json")
+             for name in ("Trae CN", "Trae CN 2")]
+    # 第二客户端可能用 --user-data-dir 把数据放在用户主目录（如 ~/TraeCN2），
+    # 这类安装不在 %APPDATA% 下，只扫一层目录即可覆盖，避免全盘搜索。
+    home = os.path.expanduser("~")
+    try:
+        names = os.listdir(home)
+    except OSError:
+        names = []
+    for name in names:
+        if not name.lower().startswith("trae"):
+            continue
+        path = os.path.join(home, name, "User", "globalStorage", "storage.json")
+        if os.path.isfile(path) and path not in paths:
+            paths.append(path)
+    return paths
 
 
 def _now_epoch(now=None):

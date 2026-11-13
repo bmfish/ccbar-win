@@ -573,6 +573,7 @@ L10N_EN.update({
     "翠绿": "Forest",
     "星空紫": "Purple",
     "CRT 终端": "CRT Terminal",
+    "荧光绿": "Neon Green",
     "已导出 %d 行明细到：\\n%s": "Exported %d rows to:\\n%s",
     "%d时": "%02d:00",
     "按当前速率到 24:00 约 %s": "At this rate, ~%s by 24:00",
