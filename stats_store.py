@@ -17,6 +17,7 @@ import sqlite3
 import sys
 import threading
 import time
+import uuid
 # Windows 控制台默认 cp1252，中文 print 会抛 UnicodeEncodeError（CI 实锤），统一 UTF-8
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -80,6 +81,7 @@ CREATE TABLE IF NOT EXISTS usage_log (
     created_at INTEGER NOT NULL,
     request_count INTEGER NOT NULL DEFAULT 1,
     account TEXT NOT NULL DEFAULT '',
+    origin TEXT NOT NULL DEFAULT 'local',
     PRIMARY KEY (source, request_id)
 )
 """
@@ -161,7 +163,8 @@ class CCSwitchAdapter(SourceAdapter):
             cache_creation_tokens=excluded.cache_creation_tokens,
             total_cost_usd=excluded.total_cost_usd,
             created_at=excluded.created_at,
-            request_count=excluded.request_count
+            request_count=excluded.request_count,
+            origin='local'
         """
         # 历史聚合（早于本地已有明细最早一天的）展开成"每天每模型一行"的伪明细，
         # created_at 取"该日期的本地正午"：先按 UTC 零点取 epoch，再补偿本地时区偏移 +12h，
@@ -191,7 +194,8 @@ class CCSwitchAdapter(SourceAdapter):
             cache_creation_tokens=excluded.cache_creation_tokens,
             total_cost_usd=excluded.total_cost_usd,
             created_at=excluded.created_at,
-            request_count=excluded.request_count
+            request_count=excluded.request_count,
+            origin='local'
         """
         return [detail, rollups]
 
@@ -225,7 +229,7 @@ class ZCodeAdapter(SourceAdapter):
         from_epoch = _local_epoch(from_day)
         today_epoch = _local_epoch(today)
         detail = f"""
-        INSERT OR IGNORE INTO usage_log
+        INSERT INTO usage_log
             (source, request_id, app_type, model, input_tokens, output_tokens,
              cache_read_tokens, cache_creation_tokens, reasoning_tokens, total_cost_usd,
              created_at, request_count)
@@ -236,6 +240,7 @@ class ZCodeAdapter(SourceAdapter):
         FROM {alias}.model_usage
         WHERE status != 'running'
           AND started_at >= {from_epoch} * 1000 AND started_at < {today_epoch} * 1000
+        ON CONFLICT(source, request_id) DO UPDATE SET origin='local'
         """
         return [detail]
 
@@ -402,6 +407,14 @@ class StatsStore:
                 if "account" not in cols:
                     self.conn.execute(
                         "ALTER TABLE usage_log ADD COLUMN account TEXT NOT NULL DEFAULT ''")
+                # 云同步来源列：本机产生 = local（会上传），其他设备拉回 = cloud（绝不上传）。
+                # 老库全部按 local 迁移（此前的数据本来都是本机产生的）。
+                if "origin" not in cols:
+                    self.conn.execute(
+                        "ALTER TABLE usage_log ADD COLUMN origin TEXT NOT NULL DEFAULT 'local'")
+                self.conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_usage_origin_source_created "
+                    "ON usage_log(origin, source, created_at)")
                 self.conn.execute(
                     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
                 # 换凭据只清 JWT 缓存（新 cookie 需要重新换签，旧 JWT 未过期前会拉旧账号
@@ -680,6 +693,195 @@ class StatsStore:
         except (TypeError, ValueError):
             return default
 
+    # ------------------------------------------------------------ 多设备用量云同步
+    # 与 macOS 版 UsageSync / cc-service usage_event 对齐：
+    # 本机行 origin=local 才会上传；拉回的其他设备行 origin=cloud，绝不上传（防回声）。
+    # 服务端按 (user, source, request_id) 去重，同一用户多台机器自然汇总。
+
+    def usage_sync_meta(self, key, default=""):
+        """读云同步 meta（缺失返回 default）"""
+        with self._lock:
+            value = self._meta_get(key)
+            return value if value != "" else default
+
+    def set_usage_sync_meta(self, key, value):
+        """写云同步 meta 并提交"""
+        with self._lock:
+            if self.conn is None:
+                return
+            self._meta_set(key, value)
+            self.conn.commit()
+
+    def usage_device_id(self):
+        """本机稳定设备 ID（首次生成后持久化，用于服务端登记设备）"""
+        with self._lock:
+            if self.conn is None:
+                return ""
+            device_id = self._meta_get("cloud_device_id")
+            if not device_id:
+                device_id = str(uuid.uuid4()).upper()
+                self._meta_set("cloud_device_id", device_id)
+                self.conn.commit()
+            return device_id
+
+    def usage_local_sources(self):
+        """本机产生过的数据源及时间范围（只统计 origin=local）"""
+        with self._lock:
+            if self.conn is None:
+                return []
+            rows = self.conn.execute(
+                "SELECT source, MIN(created_at), MAX(created_at), COUNT(*) "
+                "FROM usage_log WHERE origin='local' GROUP BY source").fetchall()
+            return [{"source": row[0], "min": int(row[1] or 0),
+                     "max": int(row[2] or 0), "count": int(row[3] or 0)}
+                    for row in rows]
+
+    def usage_local_batch(self, source, after=None, limit=500):
+        """按 (created_at, request_id) 键集分页读本机行，供上传。
+
+        after=(created_at, request_id)；None 表示从头开始。
+        """
+        with self._lock:
+            if self.conn is None:
+                return []
+            sql = (
+                "SELECT source, request_id, app_type, model, input_tokens, output_tokens, "
+                "cache_read_tokens, cache_creation_tokens, reasoning_tokens, total_cost_usd, "
+                "credits, created_at, request_count, account "
+                "FROM usage_log WHERE origin='local' AND source=?")
+            params = [source]
+            if after is not None:
+                sql += " AND (created_at > ? OR (created_at = ? AND request_id > ?))"
+                params += [int(after[0]), int(after[0]), str(after[1])]
+            sql += " ORDER BY created_at, request_id LIMIT ?"
+            params.append(int(limit))
+            rows = self.conn.execute(sql, params).fetchall()
+            return [{
+                "source": row[0], "request_id": row[1], "app_type": row[2],
+                "model": row[3], "input_tokens": int(row[4] or 0),
+                "output_tokens": int(row[5] or 0),
+                "cache_read_tokens": int(row[6] or 0),
+                "cache_creation_tokens": int(row[7] or 0),
+                "reasoning_tokens": int(row[8] or 0),
+                "total_cost_usd": float(row[9] or 0),
+                "credits": float(row[10] or 0),
+                "created_at": int(row[11]),
+                "request_count": int(row[12] or 1),
+                "account": row[13] or "",
+            } for row in rows]
+
+    def apply_usage_cloud_events(self, events):
+        """写入其他设备拉回的用量（origin=cloud）。
+
+        同主键的本机行优先，绝不覆盖；历史日期只登记待重算窗口，
+        由 flush_usage_cloud_agg() 在整轮下载结束后一次性重算，避免逐页重建。
+        """
+        if not events:
+            return 0
+        sql = """
+        INSERT INTO usage_log
+            (source, request_id, app_type, model, input_tokens, output_tokens,
+             cache_read_tokens, cache_creation_tokens, reasoning_tokens, total_cost_usd,
+             credits, created_at, request_count, account, origin)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'cloud')
+        ON CONFLICT(source, request_id) DO UPDATE SET
+            app_type=excluded.app_type, model=excluded.model,
+            input_tokens=excluded.input_tokens, output_tokens=excluded.output_tokens,
+            cache_read_tokens=excluded.cache_read_tokens,
+            cache_creation_tokens=excluded.cache_creation_tokens,
+            reasoning_tokens=excluded.reasoning_tokens,
+            total_cost_usd=excluded.total_cost_usd, credits=excluded.credits,
+            created_at=excluded.created_at, request_count=excluded.request_count,
+            account=excluded.account, origin='cloud'
+        WHERE usage_log.origin='cloud'
+        """
+        today = datetime.now().strftime("%Y-%m-%d")
+        with self._lock:
+            if self.conn is None:
+                return 0
+            for event in events:
+                self.conn.execute(sql, (
+                    event["source"], event["request_id"], event.get("app_type", ""),
+                    event.get("model", ""), int(event.get("input_tokens", 0)),
+                    int(event.get("output_tokens", 0)), int(event.get("cache_read_tokens", 0)),
+                    int(event.get("cache_creation_tokens", 0)),
+                    int(event.get("reasoning_tokens", 0)),
+                    float(event.get("total_cost_usd", 0)), float(event.get("credits", 0)),
+                    int(event["created_at"]), int(event.get("request_count", 1)),
+                    event.get("account", "")))
+                try:
+                    day = datetime.fromtimestamp(int(event["created_at"])).strftime("%Y-%m-%d")
+                except (OSError, OverflowError, ValueError):
+                    continue
+                if day < today:
+                    dirty = self._meta_get("cloud_agg_dirty_from")
+                    if not dirty or day < dirty:
+                        self._meta_set("cloud_agg_dirty_from", day)
+            self.conn.commit()
+        return len(events)
+
+    def flush_usage_cloud_agg(self):
+        """整轮下载结束后重算被云数据影响的历史日聚合（含崩溃后的遗留标记）"""
+        with self._lock:
+            if self.conn is None:
+                return
+            dirty = self._meta_get("cloud_agg_dirty_from")
+            if not dirty:
+                return
+            today = datetime.now().strftime("%Y-%m-%d")
+            if dirty < today:
+                self._rebuild_daily_agg_window(dirty, today)
+            self.conn.execute(
+                "DELETE FROM meta WHERE key='cloud_agg_dirty_from'")
+            self.conn.commit()
+
+    def reset_usage_cloud_state(self):
+        """切换登录用户时清掉其他账号拉回的数据、游标和水位（本机 local 行保留）"""
+        with self._lock:
+            if self.conn is None:
+                return
+            cloud_rows = self.conn.execute(
+                "SELECT COUNT(*) FROM usage_log WHERE origin='cloud'").fetchone()[0]
+            if cloud_rows:
+                self.conn.execute("DELETE FROM usage_log WHERE origin='cloud'")
+                # daily_agg 全量重建，确保删掉的历史聚合不残留
+                self.conn.execute("DELETE FROM daily_agg")
+                self._rebuild_daily_agg_window("1970-01-01", datetime.now().strftime("%Y-%m-%d"))
+            self.conn.execute(
+                "DELETE FROM meta WHERE key LIKE 'cloud_usage_%'")
+            self.conn.commit()
+
+    def usage_sync_status(self):
+        """设置页展示的云同步状态快照"""
+        with self._lock:
+            if self.conn is None:
+                return {}
+            local_rows = self.conn.execute(
+                "SELECT COUNT(*) FROM usage_log WHERE origin='local'").fetchone()[0]
+            cloud_rows = self.conn.execute(
+                "SELECT COUNT(*) FROM usage_log WHERE origin='cloud'").fetchone()[0]
+            return {
+                "device_id": self._meta_get("cloud_device_id"),
+                "identity": self._meta_get("cloud_usage_identity"),
+                "seq": int(self._meta_float("cloud_usage_seq", 0)),
+                "last_sync": self._meta_get("cloud_usage_last_sync"),
+                "last_status": self._meta_get("cloud_usage_last_status"),
+                "last_error": self._meta_get("cloud_usage_last_error"),
+                "local_rows": int(local_rows),
+                "cloud_rows": int(cloud_rows),
+            }
+
+    def set_usage_sync_status(self, text, error=""):
+        """记录最近一次同步结果（设置页轮询展示）"""
+        with self._lock:
+            if self.conn is None:
+                return
+            self._meta_set("cloud_usage_last_sync",
+                           datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            self._meta_set("cloud_usage_last_status", text)
+            self._meta_set("cloud_usage_last_error", error)
+            self.conn.commit()
+
     def sync_trae_if_needed(self, now=None, interactive=False):
         """按需同步 Trae 用量（HTTP 源）。返回槽 1 的 TraeResult 或 None（被守卫拦下）。
 
@@ -912,7 +1114,8 @@ class StatsStore:
             total_cost_usd=excluded.total_cost_usd,
             credits=excluded.credits,
             created_at=excluded.created_at,
-            account=excluded.account
+            account=excluded.account,
+            origin='local'
         """
         written = 0
         try:

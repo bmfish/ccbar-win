@@ -80,6 +80,11 @@ DEFAULTS = {
     "insights_last_page": "费用",
     "last_auto_backup_date": "",
     "last_update_check_date": "",
+    # 多设备用量云同步（登录后只保存会话 Token，绝不保存密码）
+    "usage_sync_enabled": False,
+    "usage_sync_url": "http://139.196.108.26/api",
+    "usage_sync_username": "",
+    "usage_sync_token": "",
 }
 
 # 源的启用键 / 库路径键（db_path 是旧版单路径设置，对应 ccswitch 源）

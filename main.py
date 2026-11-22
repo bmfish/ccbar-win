@@ -62,6 +62,7 @@ import app_settings
 import autostart
 import l10n
 import trae_sync
+import usage_sync
 import workbuddy_sync
 from l10n import L          # 界面文案统一走 L(中文原文)；当前语言由 l10n 维护
 import themes
@@ -99,6 +100,8 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
         self.theme = None
         # 自建统计库：历史每日补账 + 今日实时查询（对源库只读）
         self.store = StatsStore()
+        # 多设备用量云同步（用户名密码登录；密码不落盘）
+        self.usage_sync = usage_sync.UsageSync(self.store, self.settings)
 
         # GUI 线程：所有 tkinter 窗口都跑在这个线程上，避免卡住托盘消息循环
         self._ui_queue = queue.Queue()
@@ -1936,6 +1939,96 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
 
         small_btn(backup_row, L("打开备份目录"), open_backup_dir).pack(side=tk.RIGHT)
 
+        # ------------------------------------------------------------ 云同步
+        section(L("云同步"))
+        sync_enabled_var = check_row(
+            L("启用多设备用量云同步"), self.settings.get("usage_sync_enabled"))
+        sync_url_entry = field_row(L("服务地址:"), L("cc-service 地址，含 /api"))
+        sync_url_entry.insert(0, self.settings.get("usage_sync_url", "") or "")
+        sync_user_entry = field_row(L("用户名:"), L("与后台管理创建的用户一致"))
+        sync_user_entry.insert(0, self.settings.get("usage_sync_username", "") or "")
+        sync_pass_entry = field_row(L("密码:"), L("仅登录时使用，不保存"))
+        sync_pass_entry.configure(show="*")
+
+        sync_status = self.store.usage_sync_status() or {}
+        initial_status = sync_status.get("last_status") or L("未同步")
+
+        sync_actions = tk.Frame(inner, bg=Design.BACKGROUND)
+        sync_actions.pack(fill=tk.X, padx=24, pady=(10, 0))
+        sync_status_label = tk.Label(
+            sync_actions, text=initial_status, fg=Design.TEXT_MUTED,
+            bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL)
+        sync_status_label.pack(side=tk.LEFT)
+
+        def usage_sync_error():
+            messagebox.showerror(L("同步失败"), L("请先填写服务地址、用户名和密码"))
+
+        def do_usage_login():
+            username = sync_user_entry.get().strip()
+            password = sync_pass_entry.get()
+            base_url = sync_url_entry.get().strip()
+            if not username or not password or not base_url:
+                usage_sync_error()
+                return
+            sync_enabled_var.set(True)
+            sync_status_label.configure(text=L("登录并同步中…"))
+
+            def work():
+                token, error = self.usage_sync.login_and_save(username, password, base_url)
+                if not token:
+                    return ("login_error", error)
+                return ("done", self.usage_sync.run(force=True))
+
+            def done(value):
+                kind, payload = value
+                try:
+                    sync_pass_entry.delete(0, tk.END)
+                except Exception:
+                    pass
+                if kind == "login_error":
+                    sync_status_label.configure(text=payload)
+                    messagebox.showerror(L("登录失败"), payload)
+                    return
+                sync_status_label.configure(text=payload.message())
+                if payload.error:
+                    messagebox.showerror(L("同步失败"), payload.error)
+                else:
+                    messagebox.showinfo(L("同步完成"), payload.message())
+                    self._refresh_tray()
+
+            self._run_async(work, done=done,
+                            on_error=lambda e: sync_status_label.configure(text=str(e)))
+
+        def do_usage_sync():
+            username = sync_user_entry.get().strip()
+            if username != (self.settings.get("usage_sync_username", "") or "").strip():
+                messagebox.showerror(L("同步失败"), L("用户名已修改，请先点击「登录并同步」"))
+                return
+            if not (self.settings.get("usage_sync_token", "") or "").strip():
+                messagebox.showerror(L("同步失败"), L("请先登录云同步账号"))
+                return
+            # 手动同步先把当前表单写入设置，避免用的是旧地址
+            self.settings.apply({
+                "usage_sync_enabled": sync_enabled_var.get(),
+                "usage_sync_url": sync_url_entry.get().strip(),
+                "usage_sync_username": username,
+            })
+            sync_status_label.configure(text=L("同步中…"))
+
+            def done(result):
+                sync_status_label.configure(text=result.message())
+                if result.error:
+                    messagebox.showerror(L("同步失败"), result.error)
+                else:
+                    self._refresh_tray()
+
+            self._run_async(lambda: self.usage_sync.run(force=True), done=done,
+                            on_error=lambda e: sync_status_label.configure(text=str(e)))
+
+        small_btn(sync_actions, L("立即同步"), do_usage_sync).pack(side=tk.RIGHT)
+        small_btn(sync_actions, L("登录并同步"), do_usage_login,
+                  primary=True).pack(side=tk.RIGHT, padx=(0, 8))
+
         # ------------------------------------------------------------ 数据
         section(L("数据"))
 
@@ -2032,6 +2125,9 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
                 "warning_enabled": warning_var.get(),
                 "launch_at_login": login_var.get(),
                 "popover_wide": wide_var.get(),
+                "usage_sync_enabled": sync_enabled_var.get(),
+                "usage_sync_url": sync_url_entry.get().strip(),
+                "usage_sync_username": sync_user_entry.get().strip(),
                 "app_language": LANG_BY_LABEL.get(lang_var.get(), "system"),
                 "theme": selected_theme().get("id") or themes.default_theme()["id"],
                 "custom_themes": custom,
@@ -2053,6 +2149,10 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
             updates["workbuddy_cookie"] = (workbuddy_sync.normalize_cookie(wb_raw)
                                            or wb_raw.strip())
             updates["workbuddy_bg_interval"] = wb_interval_entry.get()
+            # 用户名改了但没重新登录时清掉旧 Token，避免把数据传到上一个账号
+            if (sync_user_entry.get().strip()
+                    != (self.settings.get("usage_sync_username", "") or "").strip()):
+                updates["usage_sync_token"] = ""
             return updates
 
         def save():
@@ -2195,6 +2295,8 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
                 self.sync_trae(interactive=False)
                 # WorkBuddy（独立表）：同样按自己的间隔节流，0-9 点静默
                 self.sync_workbuddy(interactive=False)
+                # 多设备用量云同步：9-18 点每小时一次，手动同步不受限
+                self.sync_usage(interactive=False)
                 # 按用量更新图标颜色
                 self.update_icon_color()
                 # 检查里程碑（每1000万token冒泡通知）
@@ -2243,6 +2345,23 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
                 logger.warning("Trae checkin failed: %s", e)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def sync_usage(self, interactive=False):
+        """跑一次多设备用量云同步（网络请求放后台线程）。"""
+        if not interactive and not self.settings.get("usage_sync_enabled"):
+            return
+        sync = getattr(self, "usage_sync", None)
+        if sync is None:
+            return
+
+        def worker():
+            try:
+                sync.run(force=interactive)
+            except Exception as e:
+                print(L("用量云同步失败:"), e)
+                logger.warning("usage sync failed: %s", e)
+
+        threading.Thread(target=worker, daemon=True, name="usage-sync").start()
 
     def sync_workbuddy(self, interactive=False):
         """跑一次 WorkBuddy 同步（独立表，不参与主界面；同样放后台线程）"""
@@ -2377,6 +2496,7 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
             logger.warning("startup maintenance failed: %s", e)
         self.sync_trae(interactive=False)
         self.sync_workbuddy(interactive=False)
+        self.sync_usage(interactive=False)
         self._refresh_tray()
 
     def _refresh_tray(self):

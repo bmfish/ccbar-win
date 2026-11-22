@@ -309,3 +309,37 @@ def http_post(url, headers=None, body=None, timeout=DEFAULT_TIMEOUT,
             return result
         time.sleep(_retry_delay(attempt, resp_headers))
     return result
+
+
+def _http_get_once(url, headers, timeout):
+    req = urllib.request.Request(url, method="GET")
+    for key, value in (headers or {}).items():
+        req.add_header(key, value)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            status = getattr(resp, "status", None) or resp.getcode()
+            return (status, dict(resp.headers.items()), raw.decode("utf-8", "replace"))
+    except urllib.error.HTTPError as e:
+        try:
+            raw = e.read()
+        except Exception:
+            raw = b""
+        headers_out = dict(e.headers.items()) if e.headers else None
+        return (e.code, headers_out, raw.decode("utf-8", "replace"))
+    except Exception:
+        return (0, None, None)
+
+
+def http_get(url, headers=None, timeout=DEFAULT_TIMEOUT, retries=RETRY_ATTEMPTS):
+    """GET → (status, headers_dict, text)，重试策略与 http_post 一致。"""
+    result = (0, None, None)
+    for attempt in range(retries + 1):
+        result = _http_get_once(url, headers, timeout)
+        status, resp_headers, _text = result
+        if status != 0 and status not in RETRY_STATUSES:
+            return result
+        if attempt >= retries:
+            return result
+        time.sleep(_retry_delay(attempt, resp_headers))
+    return result
