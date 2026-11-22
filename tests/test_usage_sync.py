@@ -98,10 +98,9 @@ class TestUsageSync(unittest.TestCase):
         self.assertEqual(
             int(self.store.usage_sync_meta("cloud_usage_watermark_trae")), recent)
 
-        # 第二轮：60 秒并发兜底会重传水位附近的行，10 天前的行不再上传；cloud 行始终不上传
+        # 第二轮：内容没变，不会再上传；cloud 行始终不上传
         self.sync.run(force=True)
-        second_batch = self.server.uploaded[2:]
-        self.assertEqual([e["requestId"] for e in second_batch], ["recent-local"])
+        self.assertEqual(self.server.uploaded[2:], [])
 
     def test_changed_row_reuploads_by_updated_at(self):
         recent = int(time.time()) - 3600

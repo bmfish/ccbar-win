@@ -1,7 +1,7 @@
 """多设备用量云同步（与 macOS 版 UsageSync / cc-service usage_event 对齐）。
 
-- 上传：只读本机 origin=local 的明细，按数据源 updated_at 水位增量上报，
-  保留 1 分钟并发兜底；整批 2xx 后才推进水位。
+- 上传：只读本机 origin=local 的明细，按数据源 (updated_at, request_id) 精确游标增量上报，
+  整批 2xx 后才推进游标。
 - 下载：按服务端 seq 游标拉取其他设备的行，写入本机 usage_log（origin=cloud）；
   同主键的本机行优先，绝不被覆盖；cloud 行绝不上传，避免回声。
 - 登录：用户名 + 密码换会话 Token；密码只在登录请求里出现，绝不落盘。
@@ -14,7 +14,6 @@ import http_common
 from l10n import L
 
 BATCH = 500
-CONCURRENCY_OVERLAP = 60
 MAX_PAGES = 400
 DEFAULT_BASE_URL = "http://139.196.108.26/api"
 
@@ -177,9 +176,11 @@ class UsageSync:
         for item in sources:
             source = item["source"]
             watermark = self._meta_int("cloud_usage_watermark_" + source)
+            last_request = (self.store.usage_sync_meta(
+                "cloud_usage_watermark_last_" + source, "") or "")
             after = None
             if watermark > 0:
-                after = (max(watermark - CONCURRENCY_OVERLAP, 0), "")
+                after = (watermark, last_request)
 
             pages = 0
             while True:
@@ -197,9 +198,10 @@ class UsageSync:
                 uploaded += len(events)
                 last = rows[-1]
                 last_updated = int(last.get("updated_at") or 0)
-                if last_updated > self._meta_int("cloud_usage_watermark_" + source):
-                    self.store.set_usage_sync_meta(
-                        "cloud_usage_watermark_" + source, str(last_updated))
+                self.store.set_usage_sync_meta(
+                    "cloud_usage_watermark_" + source, str(last_updated))
+                self.store.set_usage_sync_meta(
+                    "cloud_usage_watermark_last_" + source, last["request_id"])
 
                 after = (last_updated, last["request_id"])
                 pages += 1
