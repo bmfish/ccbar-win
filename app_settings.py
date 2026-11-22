@@ -74,6 +74,7 @@ DEFAULTS = {
     "default_token_price": 0.0,           # 未计费渠道默认单价（$/M tokens），0=关闭
     "launch_at_login": False,
     "popover_wide": False,
+    "primary_metric": "tokens",           # 托盘与弹窗主指标：tokens / credits
     "app_language": "system",
     "theme": "默认主题",
     "custom_themes": [],
@@ -245,6 +246,8 @@ def validate_updates(updates):
         if v is None or not BG_INTERVAL_MIN <= v <= BG_INTERVAL_MAX:
             errors.append("WorkBuddy 同步间隔（%d ~ %d 秒）"
                           % (BG_INTERVAL_MIN, BG_INTERVAL_MAX))
+    if "primary_metric" in u and u["primary_metric"] not in ("tokens", "credits"):
+        errors.append("主指标（Token / 积分）")
     return errors
 
 

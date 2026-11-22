@@ -295,6 +295,13 @@ class PopoverWindow:
 
     # ---------------- 今日 Hero 卡 ----------------
 
+    def _credits_primary(self):
+        """主指标是否为积分（读不到设置时退回 Token）"""
+        try:
+            return self.app.settings.get("primary_metric") == "credits"
+        except Exception:
+            return False
+
     def _hero_card(self, parent, today, work_hours):
         """今日用量整块收进一张带品牌底色的圆角卡（替代原来的分隔线拼贴）"""
         import tkinter as tk
@@ -311,14 +318,23 @@ class PopoverWindow:
                  font=Design.FONT_CHEVRON).pack(side=tk.RIGHT)
 
         if today:
-            # 大数字 + 今日积分（mac TodayCard：大数字后透出当日积分）
+            # 大数字 + 小字：按主指标决定 Token / 积分谁是主值
+            credits = self._today_credits()
+            credits_primary = self._credits_primary()
             big_row = tk.Frame(body, bg=fill)
             big_row.pack(fill=tk.X, pady=(4, 2))
-            tk.Label(big_row, text=Design.fmt_tokens(today["total"]),
-                     fg=today_usage_color(today["total"]), bg=fill,
+            tk.Label(big_row,
+                     text=(format_credits(credits) if credits_primary
+                           else Design.fmt_tokens(today["total"])),
+                     fg=(Design.TEXT_PRIMARY if credits_primary
+                         else today_usage_color(today["total"])), bg=fill,
                      font=Design.FONT_BIG, anchor='w').pack(side=tk.LEFT)
-            credits = self._today_credits()
-            if credits > 0:
+            if credits_primary:
+                tk.Label(big_row, text=Design.fmt_tokens(today["total"]) + " Token",
+                         fg=Design.TEXT_SECONDARY, bg=fill,
+                         font=Design.FONT_UI_SMALL, anchor='w').pack(
+                             side=tk.LEFT, padx=(8, 2), pady=(0, 2))
+            elif credits > 0:
                 tk.Label(big_row, text=L("%s 积分") % format_credits(credits),
                          fg=Design.TEXT_SECONDARY, bg=fill,
                          font=Design.FONT_UI_SMALL, anchor='w').pack(
@@ -429,16 +445,24 @@ class PopoverWindow:
             tk.Label(head, text=badge[0], fg=badge[1], bg=Design.CARD_FILL,
                      font=Design.FONT_UI_TINY, anchor='e').pack(side=tk.RIGHT)
 
-        tk.Label(body, text=Design.fmt_tokens(value) if stats else "-",
-                 fg=Design.TEXT_PRIMARY, bg=Design.CARD_FILL,
-                 font=Design.FONT_VALUE, anchor='w').pack(fill=tk.X, pady=(2, 0))
-
         try:
             credits = float(credits or 0)
         except (TypeError, ValueError):
             credits = 0.0
-        if credits > 0:
-            tk.Label(body, text=L("%s 积分") % format_credits(credits),
+        credits_primary = self._credits_primary()
+        if stats:
+            primary_text = (format_credits(credits) if credits_primary
+                            else Design.fmt_tokens(value))
+            secondary_text = (Design.fmt_tokens(value) + " Token" if credits_primary
+                              else (L("%s 积分") % format_credits(credits)
+                                    if credits > 0 else ""))
+        else:
+            primary_text, secondary_text = "-", ""
+        tk.Label(body, text=primary_text,
+                 fg=Design.TEXT_PRIMARY, bg=Design.CARD_FILL,
+                 font=Design.FONT_VALUE, anchor='w').pack(fill=tk.X, pady=(2, 0))
+        if secondary_text:
+            tk.Label(body, text=secondary_text,
                      fg=Design.TEXT_MUTED, bg=Design.CARD_FILL,
                      font=Design.FONT_UI_TINY, anchor='w').pack(fill=tk.X)
 

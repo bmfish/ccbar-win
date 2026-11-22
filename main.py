@@ -1616,6 +1616,25 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
         tk.Label(lang_row, text=L("重开窗口后生效"), fg=Design.TEXT_MUTED, bg=Design.BACKGROUND,
                  font=Design.FONT_UI_SMALL).pack(side=tk.LEFT, padx=(10, 0))
 
+        # 主指标：托盘提示、今日大数字与趋势卡优先展示 Token 还是积分
+        metric_row = tk.Frame(inner, bg=Design.BACKGROUND)
+        metric_row.pack(fill=tk.X, padx=24, pady=(10, 0))
+        tk.Label(metric_row, text=L("主指标"), fg=Design.TEXT_PRIMARY, bg=Design.BACKGROUND,
+                 font=Design.FONT_UI, width=18, anchor='w').pack(side=tk.LEFT)
+        metric_options = {"tokens": "Token", "credits": L("积分")}
+        metric_var = tk.StringVar(value=metric_options.get(
+            self.settings.get("primary_metric"), "Token"))
+        metric_menu = tk.OptionMenu(metric_row, metric_var, *metric_options.values())
+        metric_menu.configure(bg=Design.CARD_FILL, fg=Design.TEXT_PRIMARY, relief="flat", bd=0,
+                              activebackground=Design.BTN_BG_HOVER,
+                              activeforeground=Design.TEXT_PRIMARY, highlightthickness=0,
+                              font=Design.FONT_UI_SMALL, width=12)
+        metric_menu["menu"].configure(bg=Design.CARD_FILL, fg=Design.TEXT_PRIMARY,
+                                      activebackground=Design.BRAND, font=Design.FONT_UI_SMALL)
+        metric_menu.pack(side=tk.LEFT)
+        tk.Label(metric_row, text=L("托盘提示与弹窗主值"), fg=Design.TEXT_MUTED,
+                 bg=Design.BACKGROUND, font=Design.FONT_UI_SMALL).pack(side=tk.LEFT, padx=(10, 0))
+
         interval_entry = field_row(L("刷新间隔 (秒):"), L("范围 5 - 3000"))
         interval_entry.insert(0, str(self.settings["refresh_interval"]))
 
@@ -2125,6 +2144,8 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
                 "warning_enabled": warning_var.get(),
                 "launch_at_login": login_var.get(),
                 "popover_wide": wide_var.get(),
+                "primary_metric": next(
+                    (k for k, v in metric_options.items() if v == metric_var.get()), "tokens"),
                 "usage_sync_enabled": sync_enabled_var.get(),
                 "usage_sync_url": sync_url_entry.get().strip(),
                 "usage_sync_username": sync_user_entry.get().strip(),
@@ -2422,18 +2443,21 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
         threading.Thread(target=worker, daemon=True).start()
 
     def get_tooltip_text(self):
-        """托盘悬停提示：只显示今日用量；有积分才追加今日积分"""
+        """托盘悬停提示：按主指标决定今日用量与积分的先后"""
         today = self.query_day_stats(0)
         if not today:
             return L("ccBar - 未找到数据")
-        text = L("今日用量：%s") % self.fmt_tokens(today["total"])
+        token_line = L("今日用量：%s") % self.fmt_tokens(today["total"])
         try:
             credits = float(self.store.query_today_credits() or 0)
         except Exception:
             credits = 0.0
+        credit_line = L("今日积分：%s") % format_credits(credits)
+        if self.settings.get("primary_metric") == "credits":
+            return credit_line + "\n" + token_line
         if credits > 0:
-            text += "\n" + L("今日积分：%s") % format_credits(credits)
-        return text
+            return token_line + "\n" + credit_line
+        return token_line
 
     def run(self):
         """运行应用"""
