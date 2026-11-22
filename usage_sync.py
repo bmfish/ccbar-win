@@ -1,7 +1,7 @@
 """多设备用量云同步（与 macOS 版 UsageSync / cc-service usage_event 对齐）。
 
-- 上传：只读本机 origin=local 的明细，按数据源水位 + 3 天重叠窗口增量上报；
-  每 24 小时把窗口扩到 30 天对账。整批 2xx 后才推进水位。
+- 上传：只读本机 origin=local 的明细，按数据源 updated_at 水位增量上报，
+  保留 1 分钟并发兜底；整批 2xx 后才推进水位。
 - 下载：按服务端 seq 游标拉取其他设备的行，写入本机 usage_log（origin=cloud）；
   同主键的本机行优先，绝不被覆盖；cloud 行绝不上传，避免回声。
 - 登录：用户名 + 密码换会话 Token；密码只在登录请求里出现，绝不落盘。
@@ -14,9 +14,7 @@ import http_common
 from l10n import L
 
 BATCH = 500
-OVERLAP_SECONDS = 3 * 86400
-RECONCILE_SECONDS = 30 * 86400
-RECONCILE_INTERVAL = 86400
+CONCURRENCY_OVERLAP = 60
 MAX_PAGES = 400
 DEFAULT_BASE_URL = "http://139.196.108.26/api"
 
@@ -119,17 +117,16 @@ class UsageSync:
         force=True 用于设置页手动同步。"""
         if not force and not bool(self.settings.get("usage_sync_enabled", False)):
             return SyncOutcome(skipped=True)
-        now_epoch = float(now) if now is not None else datetime.now().timestamp()
 
         if not self._run_lock.acquire(blocking=False):
             return SyncOutcome(skipped=True)
 
         try:
-            return self._run_locked(now_epoch)
+            return self._run_locked()
         finally:
             self._run_lock.release()
 
-    def _run_locked(self, now_epoch):
+    def _run_locked(self):
         username = (self.settings.get("usage_sync_username", "") or "").strip()
         token = (self.settings.get("usage_sync_token", "") or "").strip()
         if not username or not token:
@@ -149,7 +146,7 @@ class UsageSync:
             self.store.set_usage_sync_meta("cloud_usage_identity", username)
 
             device_id = self.store.usage_device_id()
-            uploaded = self._upload(base, token, device_id, now_epoch)
+            uploaded = self._upload(base, token, device_id)
             pulled = self._download(base, token)
             outcome = SyncOutcome(uploaded=uploaded, pulled=pulled)
             self.store.set_usage_sync_status(outcome.message(), "")
@@ -170,13 +167,11 @@ class UsageSync:
 
     # ------------------------------------------------------------ 上传
 
-    def _upload(self, base, token, device_id, now_epoch):
+    def _upload(self, base, token, device_id):
         sources = self.store.usage_local_sources()
         if not sources:
             return 0
 
-        reconcile_at = self._meta_float("cloud_usage_reconcile_at")
-        reconcile = now_epoch - reconcile_at >= RECONCILE_INTERVAL
         uploaded = 0
 
         for item in sources:
@@ -184,8 +179,7 @@ class UsageSync:
             watermark = self._meta_int("cloud_usage_watermark_" + source)
             after = None
             if watermark > 0:
-                overlap = RECONCILE_SECONDS if reconcile else OVERLAP_SECONDS
-                after = (max(watermark - overlap, 0), "")
+                after = (max(watermark - CONCURRENCY_OVERLAP, 0), "")
 
             pages = 0
             while True:
@@ -202,21 +196,18 @@ class UsageSync:
 
                 uploaded += len(events)
                 last = rows[-1]
-                last_created = int(last["created_at"])
-                if last_created > self._meta_int("cloud_usage_watermark_" + source):
+                last_updated = int(last.get("updated_at") or 0)
+                if last_updated > self._meta_int("cloud_usage_watermark_" + source):
                     self.store.set_usage_sync_meta(
-                        "cloud_usage_watermark_" + source, str(last_created))
+                        "cloud_usage_watermark_" + source, str(last_updated))
 
-                after = (last_created, last["request_id"])
+                after = (last_updated, last["request_id"])
                 pages += 1
                 if len(rows) < BATCH:
                     break
                 if pages >= MAX_PAGES:
                     raise _Abort("上传分页过多，已中止")
 
-        if reconcile:
-            self.store.set_usage_sync_meta(
-                "cloud_usage_reconcile_at", str(int(now_epoch)))
         return uploaded
 
     @staticmethod

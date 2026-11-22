@@ -19,7 +19,7 @@ from usage_sync import UsageSync  # noqa: E402
 COLUMNS = (
     "source, request_id, app_type, model, input_tokens, output_tokens, "
     "cache_read_tokens, cache_creation_tokens, reasoning_tokens, total_cost_usd, "
-    "credits, created_at, request_count, account, origin")
+    "credits, created_at, request_count, account, origin, updated_at")
 
 
 class FakeServer:
@@ -76,9 +76,9 @@ class TestUsageSync(unittest.TestCase):
     def _insert(self, request_id, created_at, origin="local", source="trae",
                 tokens=100, account="u1", credits=1.5):
         self.store.conn.execute(
-            "INSERT INTO usage_log (%s) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)" % COLUMNS,
+            "INSERT INTO usage_log (%s) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)" % COLUMNS,
             (source, request_id, "trae", "model-a", tokens, tokens,
-             0, 0, 0, 0.01, credits, created_at, 1, account, origin))
+             0, 0, 0, 0.01, credits, created_at, 1, account, origin, created_at))
         self.store.conn.commit()
 
     def test_upload_only_local_and_advance_watermark(self):
@@ -98,10 +98,26 @@ class TestUsageSync(unittest.TestCase):
         self.assertEqual(
             int(self.store.usage_sync_meta("cloud_usage_watermark_trae")), recent)
 
-        # 第二轮：水位回看 3 天，10 天前的行不再上传；cloud 行始终不上传
+        # 第二轮：60 秒并发兜底会重传水位附近的行，10 天前的行不再上传；cloud 行始终不上传
         self.sync.run(force=True)
         second_batch = self.server.uploaded[2:]
         self.assertEqual([e["requestId"] for e in second_batch], ["recent-local"])
+
+    def test_changed_row_reuploads_by_updated_at(self):
+        recent = int(time.time()) - 3600
+        self._insert("row", recent)
+        self.sync.run(force=True)
+        self.assertEqual(len(self.server.uploaded), 1)
+
+        self.store.conn.execute(
+            "UPDATE usage_log SET input_tokens=?, updated_at=? WHERE request_id=?",
+            (200, int(time.time()), "row"))
+        self.store.conn.commit()
+
+        self.sync.run(force=True)
+        self.assertEqual(len(self.server.uploaded), 2)
+        self.assertEqual(self.server.uploaded[-1]["requestId"], "row")
+        self.assertEqual(self.server.uploaded[-1]["inputTokens"], 200)
 
     def test_download_cloud_rows_and_respect_local_priority(self):
         now = int(time.time())

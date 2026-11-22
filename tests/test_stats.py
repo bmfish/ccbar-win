@@ -1042,6 +1042,19 @@ class TestStatsStore(unittest.TestCase):
             "SELECT COUNT(*) FROM usage_log").fetchone()[0], 1)
         self.assertEqual(self.store.upsert_trae_rows([]), 0, "空列表不写库")
 
+        # updated_at 只在内容变化时推进：同内容重复同步不刷新，内容变化才刷新
+        self.store.conn.execute("UPDATE usage_log SET updated_at = 100")
+        self.store.conn.commit()
+        self.store.upsert_trae_rows([grown])
+        self.assertEqual(self.store.conn.execute(
+            "SELECT updated_at FROM usage_log").fetchone()[0], 100,
+            "同内容重复同步不应刷新 updated_at")
+        changed = TraeRow("sess-1", "gpt-5", 999, 600, 70, 80, 1.25, 9.5, epoch + 60)
+        self.store.upsert_trae_rows([changed])
+        self.assertGreater(self.store.conn.execute(
+            "SELECT updated_at FROM usage_log").fetchone()[0], 100,
+            "内容变化必须刷新 updated_at")
+
     def test_trae_credits_visible_in_queries(self):
         """积分/费用查询必须把 Trae 行算进去（今日实时走 usage_all）"""
         self._trae_store()

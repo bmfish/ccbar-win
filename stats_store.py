@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS usage_log (
     total_cost_usd REAL NOT NULL DEFAULT 0,
     credits REAL NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL DEFAULT 0,
     request_count INTEGER NOT NULL DEFAULT 1,
     account TEXT NOT NULL DEFAULT '',
     origin TEXT NOT NULL DEFAULT 'local',
@@ -147,11 +148,11 @@ class CCSwitchAdapter(SourceAdapter):
         INSERT INTO usage_log
             (source, request_id, app_type, model, input_tokens, output_tokens,
              cache_read_tokens, cache_creation_tokens, reasoning_tokens, total_cost_usd,
-             created_at, request_count)
+             created_at, updated_at, request_count)
         SELECT
             'cc-switch', request_id, app_type, model, input_tokens, output_tokens,
             cache_read_tokens, cache_creation_tokens, 0,
-            CAST(total_cost_usd AS REAL), created_at, 1
+            CAST(total_cost_usd AS REAL), created_at, strftime('%s','now'), 1
         FROM {alias}.proxy_request_logs
         WHERE created_at >= {from_epoch} AND created_at < {today_epoch}
         ON CONFLICT(source, request_id) DO UPDATE SET
@@ -163,8 +164,19 @@ class CCSwitchAdapter(SourceAdapter):
             cache_creation_tokens=excluded.cache_creation_tokens,
             total_cost_usd=excluded.total_cost_usd,
             created_at=excluded.created_at,
+            updated_at=strftime('%s','now'),
             request_count=excluded.request_count,
             origin='local'
+        WHERE usage_log.app_type IS NOT excluded.app_type
+           OR usage_log.model IS NOT excluded.model
+           OR usage_log.input_tokens IS NOT excluded.input_tokens
+           OR usage_log.output_tokens IS NOT excluded.output_tokens
+           OR usage_log.cache_read_tokens IS NOT excluded.cache_read_tokens
+           OR usage_log.cache_creation_tokens IS NOT excluded.cache_creation_tokens
+           OR usage_log.reasoning_tokens IS NOT excluded.reasoning_tokens
+           OR usage_log.total_cost_usd IS NOT excluded.total_cost_usd
+           OR usage_log.created_at IS NOT excluded.created_at
+           OR usage_log.request_count IS NOT excluded.request_count
         """
         # 历史聚合（早于本地已有明细最早一天的）展开成"每天每模型一行"的伪明细，
         # created_at 取"该日期的本地正午"：先按 UTC 零点取 epoch，再补偿本地时区偏移 +12h，
@@ -173,7 +185,7 @@ class CCSwitchAdapter(SourceAdapter):
         INSERT INTO usage_log
             (source, request_id, app_type, model, input_tokens, output_tokens,
              cache_read_tokens, cache_creation_tokens, reasoning_tokens, total_cost_usd,
-             created_at, request_count)
+             created_at, updated_at, request_count)
         SELECT
             'cc-switch-rollup',
             'rollup|' || date || '|' || provider_id || '|' || model || '|' || request_model || '|' || pricing_model,
@@ -181,6 +193,7 @@ class CCSwitchAdapter(SourceAdapter):
             cache_read_tokens, cache_creation_tokens, 0,
             CAST(total_cost_usd AS REAL),
             CAST(strftime('%s', date || ' 00:00:00') - (strftime('%s', 'now', 'localtime') - strftime('%s', 'now')) + 43200 AS INTEGER),
+            strftime('%s','now'),
             request_count
         FROM {alias}.usage_daily_rollups
         WHERE date < (SELECT date(MIN(created_at), 'unixepoch', 'localtime')
@@ -194,8 +207,19 @@ class CCSwitchAdapter(SourceAdapter):
             cache_creation_tokens=excluded.cache_creation_tokens,
             total_cost_usd=excluded.total_cost_usd,
             created_at=excluded.created_at,
+            updated_at=strftime('%s','now'),
             request_count=excluded.request_count,
             origin='local'
+        WHERE usage_log.app_type IS NOT excluded.app_type
+           OR usage_log.model IS NOT excluded.model
+           OR usage_log.input_tokens IS NOT excluded.input_tokens
+           OR usage_log.output_tokens IS NOT excluded.output_tokens
+           OR usage_log.cache_read_tokens IS NOT excluded.cache_read_tokens
+           OR usage_log.cache_creation_tokens IS NOT excluded.cache_creation_tokens
+           OR usage_log.reasoning_tokens IS NOT excluded.reasoning_tokens
+           OR usage_log.total_cost_usd IS NOT excluded.total_cost_usd
+           OR usage_log.created_at IS NOT excluded.created_at
+           OR usage_log.request_count IS NOT excluded.request_count
         """
         return [detail, rollups]
 
@@ -232,11 +256,11 @@ class ZCodeAdapter(SourceAdapter):
         INSERT INTO usage_log
             (source, request_id, app_type, model, input_tokens, output_tokens,
              cache_read_tokens, cache_creation_tokens, reasoning_tokens, total_cost_usd,
-             created_at, request_count)
+             created_at, updated_at, request_count)
         SELECT
             'zcode', id, 'zcode', model_id, input_tokens, output_tokens,
             0, 0, reasoning_tokens, 0,
-            started_at / 1000, 1
+            started_at / 1000, strftime('%s','now'), 1
         FROM {alias}.model_usage
         WHERE status != 'running'
           AND started_at >= {from_epoch} * 1000 AND started_at < {today_epoch} * 1000
@@ -412,11 +436,26 @@ class StatsStore:
                 if "origin" not in cols:
                     self.conn.execute(
                         "ALTER TABLE usage_log ADD COLUMN origin TEXT NOT NULL DEFAULT 'local'")
+                # 云同步增量水位：每次插入/更新都刷新，上传只取 updated_at > 上次水位
+                if "updated_at" not in cols:
+                    self.conn.execute(
+                        "ALTER TABLE usage_log ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0")
+                self.conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_usage_updated ON usage_log(updated_at)")
                 self.conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_usage_origin_source_created "
                     "ON usage_log(origin, source, created_at)")
                 self.conn.execute(
                     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+                # 首次升级到 updated_at 水位：回填旧行，并清掉旧的 created_at 水位让下次同步重跑
+                if self._meta_get("usage_updated_at_version") != "1":
+                    self.conn.execute(
+                        "UPDATE usage_log SET updated_at = created_at WHERE updated_at = 0")
+                    self.conn.execute(
+                        "DELETE FROM meta WHERE key LIKE 'cloud_usage_watermark_%' "
+                        "OR key = 'cloud_usage_reconcile_at'")
+                    self._meta_set("usage_updated_at_version", "1")
+                    self.conn.commit()
                 # 换凭据只清 JWT 缓存（新 cookie 需要重新换签，旧 JWT 未过期前会拉旧账号
                 # 数据）。按"身份指纹"比较而非原始串：同一账号换粘贴格式不清缓存。
                 # 游标与明细按 uid 记账、永不删除：同账号换 cookie 指纹不变、
@@ -737,9 +776,9 @@ class StatsStore:
                     for row in rows]
 
     def usage_local_batch(self, source, after=None, limit=500):
-        """按 (created_at, request_id) 键集分页读本机行，供上传。
+        """按 (updated_at, request_id) 键集分页读本机行，供增量上传。
 
-        after=(created_at, request_id)；None 表示从头开始。
+        after=(updated_at, request_id)；None 表示从头开始。
         """
         with self._lock:
             if self.conn is None:
@@ -747,13 +786,13 @@ class StatsStore:
             sql = (
                 "SELECT source, request_id, app_type, model, input_tokens, output_tokens, "
                 "cache_read_tokens, cache_creation_tokens, reasoning_tokens, total_cost_usd, "
-                "credits, created_at, request_count, account "
+                "credits, created_at, request_count, account, updated_at "
                 "FROM usage_log WHERE origin='local' AND source=?")
             params = [source]
             if after is not None:
-                sql += " AND (created_at > ? OR (created_at = ? AND request_id > ?))"
+                sql += " AND (updated_at > ? OR (updated_at = ? AND request_id > ?))"
                 params += [int(after[0]), int(after[0]), str(after[1])]
-            sql += " ORDER BY created_at, request_id LIMIT ?"
+            sql += " ORDER BY updated_at, request_id LIMIT ?"
             params.append(int(limit))
             rows = self.conn.execute(sql, params).fetchall()
             return [{
@@ -768,6 +807,7 @@ class StatsStore:
                 "created_at": int(row[11]),
                 "request_count": int(row[12] or 1),
                 "account": row[13] or "",
+                "updated_at": int(row[14] or 0),
             } for row in rows]
 
     def apply_usage_cloud_events(self, events):
@@ -782,8 +822,8 @@ class StatsStore:
         INSERT INTO usage_log
             (source, request_id, app_type, model, input_tokens, output_tokens,
              cache_read_tokens, cache_creation_tokens, reasoning_tokens, total_cost_usd,
-             credits, created_at, request_count, account, origin)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'cloud')
+             credits, created_at, updated_at, request_count, account, origin)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s','now'), ?, ?, 'cloud')
         ON CONFLICT(source, request_id) DO UPDATE SET
             app_type=excluded.app_type, model=excluded.model,
             input_tokens=excluded.input_tokens, output_tokens=excluded.output_tokens,
@@ -791,9 +831,22 @@ class StatsStore:
             cache_creation_tokens=excluded.cache_creation_tokens,
             reasoning_tokens=excluded.reasoning_tokens,
             total_cost_usd=excluded.total_cost_usd, credits=excluded.credits,
-            created_at=excluded.created_at, request_count=excluded.request_count,
+            created_at=excluded.created_at, updated_at=strftime('%s','now'),
+            request_count=excluded.request_count,
             account=excluded.account, origin='cloud'
         WHERE usage_log.origin='cloud'
+          AND (usage_log.app_type IS NOT excluded.app_type
+            OR usage_log.model IS NOT excluded.model
+            OR usage_log.input_tokens IS NOT excluded.input_tokens
+            OR usage_log.output_tokens IS NOT excluded.output_tokens
+            OR usage_log.cache_read_tokens IS NOT excluded.cache_read_tokens
+            OR usage_log.cache_creation_tokens IS NOT excluded.cache_creation_tokens
+            OR usage_log.reasoning_tokens IS NOT excluded.reasoning_tokens
+            OR usage_log.total_cost_usd IS NOT excluded.total_cost_usd
+            OR usage_log.credits IS NOT excluded.credits
+            OR usage_log.created_at IS NOT excluded.created_at
+            OR usage_log.request_count IS NOT excluded.request_count
+            OR usage_log.account IS NOT excluded.account)
         """
         today = datetime.now().strftime("%Y-%m-%d")
         with self._lock:
@@ -1103,8 +1156,8 @@ class StatsStore:
         INSERT INTO usage_log
             (source, request_id, app_type, model, input_tokens, output_tokens,
              cache_read_tokens, cache_creation_tokens, reasoning_tokens,
-             total_cost_usd, credits, created_at, request_count, account)
-        VALUES ('trae', ?, 'trae', ?, ?, ?, ?, ?, 0, ?, ?, ?, 1, ?)
+             total_cost_usd, credits, created_at, updated_at, request_count, account)
+        VALUES ('trae', ?, 'trae', ?, ?, ?, ?, ?, 0, ?, ?, ?, strftime('%s','now'), 1, ?)
         ON CONFLICT(source, request_id) DO UPDATE SET
             model=excluded.model,
             input_tokens=excluded.input_tokens,
@@ -1114,8 +1167,18 @@ class StatsStore:
             total_cost_usd=excluded.total_cost_usd,
             credits=excluded.credits,
             created_at=excluded.created_at,
+            updated_at=strftime('%s','now'),
             account=excluded.account,
             origin='local'
+        WHERE usage_log.model IS NOT excluded.model
+           OR usage_log.input_tokens IS NOT excluded.input_tokens
+           OR usage_log.output_tokens IS NOT excluded.output_tokens
+           OR usage_log.cache_read_tokens IS NOT excluded.cache_read_tokens
+           OR usage_log.cache_creation_tokens IS NOT excluded.cache_creation_tokens
+           OR usage_log.total_cost_usd IS NOT excluded.total_cost_usd
+           OR usage_log.credits IS NOT excluded.credits
+           OR usage_log.created_at IS NOT excluded.created_at
+           OR usage_log.account IS NOT excluded.account
         """
         written = 0
         try:
@@ -2086,7 +2149,8 @@ class StatsStore:
             return 0
         try:
             cur = self.conn.execute(
-                "UPDATE usage_log SET model = ? WHERE model = ?", (to_model, from_model))
+                "UPDATE usage_log SET model = ?, updated_at = strftime('%s','now') "
+                "WHERE model = ?", (to_model, from_model))
         except sqlite3.Error as e:
             print(f"合并模型失败: {e}")
             return 0
@@ -2166,10 +2230,10 @@ class StatsStore:
                     INSERT OR IGNORE INTO usage_log
                         (source, request_id, app_type, model, input_tokens, output_tokens,
                          cache_read_tokens, cache_creation_tokens, reasoning_tokens, total_cost_usd,
-                         created_at, request_count)
+                         created_at, updated_at, request_count)
                     SELECT source, request_id, app_type, model, input_tokens, output_tokens,
                            cache_read_tokens, cache_creation_tokens, reasoning_tokens, total_cost_usd,
-                           created_at, request_count
+                           created_at, strftime('%s','now'), request_count
                     FROM merge_src.usage_log
                 """)
                 inserted = self.conn.total_changes - base
@@ -2466,8 +2530,8 @@ class StatsStore:
                     INSERT OR IGNORE INTO usage_log
                         (source, request_id, app_type, model, input_tokens, output_tokens,
                          cache_read_tokens, cache_creation_tokens, reasoning_tokens, total_cost_usd,
-                         credits, created_at, request_count)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""", parsed)
+                         credits, created_at, request_count, updated_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%s','now'))""", parsed)
                 inserted = self.conn.total_changes - base
                 skipped += read - inserted
                 self.conn.commit()
