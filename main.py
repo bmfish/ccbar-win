@@ -2295,8 +2295,7 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
                 self.sync_trae(interactive=False)
                 # WorkBuddy（独立表）：同样按自己的间隔节流，0-9 点静默
                 self.sync_workbuddy(interactive=False)
-                # 多设备用量云同步：9-18 点每小时一次，手动同步不受限
-                self.sync_usage(interactive=False)
+                # 多设备用量云同步跟随 Trae 拉取触发，不再独立轮询
                 # 按用量更新图标颜色
                 self.update_icon_color()
                 # 检查里程碑（每1000万token冒泡通知）
@@ -2332,8 +2331,9 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
         checkin_hour = int(self.settings.get("trae_checkin_hour") or 9)
 
         def worker():
+            result = None
             try:
-                sync(interactive=interactive)
+                result = sync(interactive=interactive)
             except Exception as e:
                 print(L("Trae 同步失败:"), e)
                 logger.warning("Trae sync failed: %s", e)
@@ -2343,12 +2343,15 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
                     start_hour=checkin_hour)
             except Exception as e:
                 logger.warning("Trae checkin failed: %s", e)
+            # 每次 Trae 真实拉取后，顺带把本机用量与积分同步到后台
+            if result is not None:
+                self.sync_usage()
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def sync_usage(self, interactive=False):
+    def sync_usage(self):
         """跑一次多设备用量云同步（网络请求放后台线程）。"""
-        if not interactive and not self.settings.get("usage_sync_enabled"):
+        if not self.settings.get("usage_sync_enabled"):
             return
         sync = getattr(self, "usage_sync", None)
         if sync is None:
@@ -2356,7 +2359,7 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
 
         def worker():
             try:
-                sync.run(force=interactive)
+                sync.run()
             except Exception as e:
                 print(L("用量云同步失败:"), e)
                 logger.warning("usage sync failed: %s", e)
@@ -2496,7 +2499,6 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
             logger.warning("startup maintenance failed: %s", e)
         self.sync_trae(interactive=False)
         self.sync_workbuddy(interactive=False)
-        self.sync_usage(interactive=False)
         self._refresh_tray()
 
     def _refresh_tray(self):

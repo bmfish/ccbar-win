@@ -17,8 +17,6 @@ BATCH = 500
 OVERLAP_SECONDS = 3 * 86400
 RECONCILE_SECONDS = 30 * 86400
 RECONCILE_INTERVAL = 86400
-MIN_INTERVAL = 3600
-ACTIVE_HOURS = range(9, 18)
 MAX_PAGES = 400
 DEFAULT_BASE_URL = "http://139.196.108.26/api"
 
@@ -53,7 +51,7 @@ class SyncOutcome:
         if self.error:
             return self.error
         if self.skipped:
-            return L("同步间隔未到")
+            return L("同步跳过")
         return L("已同步：上传 %d 条 · 拉取 %d 条") % (self.uploaded, self.pulled)
 
 
@@ -70,7 +68,6 @@ class UsageSync:
         self._post = post or http_common.http_post
         self._get = get or http_common.http_get
         self._run_lock = threading.Lock()
-        self._last_attempt = 0.0
 
     # ------------------------------------------------------------ 登录
 
@@ -118,22 +115,16 @@ class UsageSync:
     # ------------------------------------------------------------ 调度
 
     def run(self, force=False, now=None):
-        """执行一轮同步。force=True 绕过开关、时段与小时节流（手动同步）。"""
+        """执行一轮同步。自动调用跟随 Trae 拉取节奏，由 sync_trae 在拉取后触发；
+        force=True 用于设置页手动同步。"""
         if not force and not bool(self.settings.get("usage_sync_enabled", False)):
             return SyncOutcome(skipped=True)
         now_epoch = float(now) if now is not None else datetime.now().timestamp()
-        now_dt = datetime.fromtimestamp(now_epoch)
-        if not force:
-            if now_dt.hour not in ACTIVE_HOURS:
-                return SyncOutcome(skipped=True)
-            if now_epoch - self._last_attempt < MIN_INTERVAL:
-                return SyncOutcome(skipped=True)
 
         if not self._run_lock.acquire(blocking=False):
             return SyncOutcome(skipped=True)
 
         try:
-            self._last_attempt = now_epoch
             return self._run_locked(now_epoch)
         finally:
             self._run_lock.release()
