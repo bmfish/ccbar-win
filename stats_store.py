@@ -1307,6 +1307,40 @@ class StatsStore:
                     continue
         return accounts
 
+    def trae_quota_snapshots(self):
+        """云同步用：当前槽位的官方账单快照。
+
+        返回 [{account, slot, consumed, total, updated_at}]；只包含已认领槽位且
+        已拉到账单的账号，历史账号不会重复上报。
+        """
+        with self._lock:
+            if self.conn is None:
+                return []
+            mapping = self._slot_uid_map()
+            out = []
+            for uid, slot in sorted(mapping.items(), key=lambda item: item[1]):
+                raw = self._meta_get("trae_ent_%s" % uid)
+                parts = (raw or "").split("|")
+                if len(parts) != 2:
+                    continue
+                try:
+                    consumed, total = float(parts[0]), float(parts[1])
+                except ValueError:
+                    continue
+                at_key = "trae_ent_at_2" if slot == 2 else "trae_ent_at"
+                try:
+                    updated_at = int(float(self._meta_get(at_key) or 0))
+                except ValueError:
+                    updated_at = 0
+                out.append({
+                    "account": uid,
+                    "slot": slot,
+                    "consumed": consumed,
+                    "total": total,
+                    "updated_at": updated_at,
+                })
+            return out
+
     def query_today_credits_by_account(self):
         """今日各账号积分（按槽位排序，零填充）：来自 usage_log 的 account 归属列。
 

@@ -25,6 +25,7 @@ COLUMNS = (
 class FakeServer:
     def __init__(self):
         self.uploaded = []
+        self.quotas = []
         self.download_pages = []
         self.get_count = 0
         self.last_headers = None
@@ -34,6 +35,10 @@ class FakeServer:
         if url.endswith("/auth/login"):
             return 200, {}, json.dumps({"token": "test-token"})
         self.last_headers = headers
+        if url.endswith("/usage/quota"):
+            quotas = payload.get("quotas") or []
+            self.quotas.extend(quotas)
+            return 200, {}, json.dumps({"received": len(quotas), "saved": len(quotas)})
         events = payload.get("events") or []
         self.uploaded.extend(events)
         return 200, {}, json.dumps({"received": len(events), "saved": len(events)})
@@ -117,6 +122,24 @@ class TestUsageSync(unittest.TestCase):
         self.assertEqual(len(self.server.uploaded), 2)
         self.assertEqual(self.server.uploaded[-1]["requestId"], "row")
         self.assertEqual(self.server.uploaded[-1]["inputTokens"], 200)
+
+    def test_uploads_trae_quota_snapshots(self):
+        self.store._meta_set("trae_uid", "u1")
+        self.store._meta_set("trae_ent_u1", "100|500")
+        self.store._meta_set("trae_ent_at", "1700000000")
+        self.store._meta_set("trae_uid_2", "u2")
+        self.store._meta_set("trae_ent_u2", "50|300")
+        self.store._meta_set("trae_ent_at_2", "1700000100")
+        self._insert("row", int(time.time()) - 60, account="u1")
+
+        result = self.sync.run(force=True)
+        self.assertTrue(result.ok, result.error)
+        quotas = {q["account"]: q for q in self.server.quotas}
+        self.assertEqual(quotas["u1"]["consumed"], 100.0)
+        self.assertEqual(quotas["u1"]["total"], 500.0)
+        self.assertEqual(quotas["u1"]["updatedAt"], 1700000000)
+        self.assertEqual(quotas["u2"]["slot"], 2)
+        self.assertEqual(quotas["u2"]["updatedAt"], 1700000100)
 
     def test_download_cloud_rows_and_respect_local_priority(self):
         now = int(time.time())

@@ -146,6 +146,11 @@ class UsageSync:
 
             device_id = self.store.usage_device_id()
             uploaded = self._upload(base, token, device_id)
+            try:
+                self._upload_quota(base, token, device_id)
+            except Exception as e:
+                # 积分账单失败不影响用量明细同步
+                print("[ccBar] 积分账单上传失败: %s" % e)
             pulled = self._download(base, token)
             outcome = SyncOutcome(uploaded=uploaded, pulled=pulled)
             self.store.set_usage_sync_status(outcome.message(), "")
@@ -211,6 +216,25 @@ class UsageSync:
                     raise _Abort("上传分页过多，已中止")
 
         return uploaded
+
+    def _upload_quota(self, base, token, device_id):
+        """把本机 Trae 官方账单（已用 / 总额）上报到云端。"""
+        snapshots = self.store.trae_quota_snapshots()
+        if not snapshots:
+            return 0
+        now = int(datetime.now().timestamp())
+        quotas = [{
+            "account": snapshot["account"],
+            "slot": snapshot["slot"],
+            "consumed": snapshot["consumed"],
+            "total": snapshot["total"],
+            "updatedAt": snapshot["updated_at"] or now,
+        } for snapshot in snapshots]
+        result = self._call(base + "/usage/quota", token, {
+            "deviceId": device_id,
+            "quotas": quotas,
+        })
+        return int(result.get("saved") or 0)
 
     @staticmethod
     def _event_payload(row):
