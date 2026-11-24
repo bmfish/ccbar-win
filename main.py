@@ -68,7 +68,7 @@ from l10n import L          # 界面文案统一走 L(中文原文)；当前语�
 import themes
 
 # 当前版本（发布时随 tag 更新）
-APP_VERSION = "2.0.0"   # 与 macOS 版本线对齐
+APP_VERSION = "2.0.1"   # 与 macOS 版本线对齐
 
 # 数据库路径（cc-switch 默认值，可在设置中修改）
 DB_PATH = os.path.expanduser("~/.cc-switch/cc-switch.db")
