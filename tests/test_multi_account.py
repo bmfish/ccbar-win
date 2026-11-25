@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -123,6 +124,31 @@ class MultiAccountStoreTests(unittest.TestCase):
     def test_ent_summary_none_when_empty(self):
         self.assertIsNone(self.store.trae_ent_summary())
 
+    def test_quota_snapshot_uses_per_uid_timestamp_and_name(self):
+        self.store._meta_set("trae_uid", "u1")
+        self.store._meta_set("trae_ent_u1", "10|100")
+        self.store._meta_set("trae_ent_at_u1", 1700000123)
+        self.store._meta_set("trae_name_u1", "小明")
+        self.store._meta_set("trae_uid_2", "u2")
+        self.store._meta_set("trae_ent_u2", "20|200")
+        self.store._meta_set("trae_ent_at_2", 1700000456)   # 旧槽位键，须能回落
+        snapshots = {s["account"]: s for s in self.store.trae_quota_snapshots()}
+        self.assertEqual(snapshots["u1"]["updated_at"], 1700000123)
+        self.assertEqual(snapshots["u1"]["name"], "小明")
+        self.assertEqual(snapshots["u2"]["updated_at"], 1700000456)
+        self.assertEqual(snapshots["u2"]["name"], "")
+
+    def test_reset_quota_cache_clears_ent_name_and_throttle(self):
+        self.store._meta_set("trae_ent_u1", "1|2")
+        self.store._meta_set("trae_ent_at_u1", 123)
+        self.store._meta_set("trae_name_u1", "小明")
+        self.store.conn.commit()
+        self.assertGreaterEqual(self.store.reset_trae_quota_cache(), 3)
+        self.assertEqual(self.store._meta_get("trae_ent_u1"), "")
+        self.assertEqual(self.store._meta_get("trae_ent_at_u1"), "")
+        self.assertEqual(self.store._meta_get("trae_name_u1"), "")
+        self.assertIsNone(self.store.trae_ent_summary())
+
     def test_credential_change_keeps_rows_and_clears_auth(self):
         self._insert(credits=2.5)
         self.store.rebuild(configs=[],
@@ -182,6 +208,58 @@ class ClientUidAttributionTests(unittest.TestCase):
                          "100.0|900.0")
         self.assertEqual(self.store._meta_get("trae_ent_%s" % stale_uid), "",
                          "账单不得写到旧 sessionid 账号名下")
+
+    def _sync_slot_with_account(self, slot, acc, result):
+        """直连单槽同步（绕过凭据发现），便于构造槽位冲突场景"""
+        now = int(time.time())
+        with mock.patch.object(stats_mod, "_fetch_trae_window",
+                               return_value=result):
+            self.store._sync_trae_slot(slot, "", now,
+                                       datetime.fromtimestamp(now), True,
+                                       client_account=acc)
+
+    def test_same_uid_not_registered_in_two_slots(self):
+        now = int(time.time())
+        uid = "942709926015804"
+        self.store._meta_set("trae_uid", uid)
+        self.store._meta_set("trae_uid_cred", "client:" + uid)
+        self.store.conn.commit()
+        acc = trae_client_credentials.ClientTraeAccount(
+            uid, make_jwt(uid), now + 86400, device_id="1", source_app="Trae CN 2")
+        self._sync_slot_with_account(
+            2, acc, ts.TraeResult("ok", rows=[], consumed=10.0, total=100.0))
+        self.assertEqual(self.store._meta_get("trae_uid_2"), "",
+                         "同一 uid 不得登记到第二个槽位")
+
+    def test_slot_conflict_keeps_other_slot_ent_intact(self):
+        now = int(time.time())
+        uid_a = "942709926015804"
+        uid_b = "3172552512377002"
+        self.store._meta_set("trae_uid", uid_a)
+        self.store._meta_set("trae_uid_2", uid_b)
+        self.store._meta_set("trae_ent_%s" % uid_b, "1.0|2.0")
+        self.store.conn.commit()
+        # 第二客户端也登录了 A（与槽 1 同账号）：槽 2 不能改登记，也不能写账单
+        acc = trae_client_credentials.ClientTraeAccount(
+            uid_a, make_jwt(uid_a), now + 86400, device_id="1", source_app="Trae CN 2")
+        self._sync_slot_with_account(
+            2, acc, ts.TraeResult("ok", rows=[], consumed=100.0, total=900.0))
+        self.assertEqual(self.store._meta_get("trae_uid_2"), uid_b,
+                         "槽 2 登记不得被改成与槽 1 相同")
+        self.assertEqual(self.store._meta_get("trae_ent_%s" % uid_b), "1.0|2.0",
+                         "账单归属不一致时必须跳过写入")
+
+    def test_screen_name_saved_under_uid(self):
+        now = int(time.time())
+        uid = "942709926015804"
+        acc = trae_client_credentials.ClientTraeAccount(
+            uid, make_jwt(uid), now + 86400, device_id="1", source_app="Trae CN")
+        with mock.patch.object(stats_mod.trae_sync, "fetch_screen_name",
+                               return_value="笑语家的小鱼儿"):
+            self._sync_slot_with_account(
+                1, acc, ts.TraeResult("ok", rows=[], consumed=1.0, total=2.0))
+        self.assertEqual(self.store._meta_get("trae_name_%s" % uid),
+                         "笑语家的小鱼儿")
 
 
 if __name__ == "__main__":

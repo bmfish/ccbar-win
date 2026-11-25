@@ -175,6 +175,15 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
         """左键点托盘：开关面板"""
         self._ui(self.popover.toggle)
 
+    def reset_quota_cache(self, icon=None, item=None):
+        """托盘入口：清空账单缓存，下一轮同步强制重拉官方账单"""
+        try:
+            self.store.reset_trae_quota_cache()
+            self._toast(L("ccBar"), L("已重置积分账单缓存，下一轮同步将重新拉取"))
+        except Exception as e:
+            logger.warning("reset quota cache failed: %s", e)
+            self._toast(L("ccBar"), L("重置积分账单缓存失败: ") + str(e))
+
     @staticmethod
     def _bring_to_front(win):
         """把窗口提到最前
@@ -735,6 +744,9 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
         menu_items.extend(self._menu_stat_rows(
             [(m["model"], m["total"])
              for m in (self.query_model_breakdown() or [])]))
+        menu_items.append(pystray.Menu.SEPARATOR)
+        menu_items.append(pystray.MenuItem(L("重置积分账单缓存"),
+                                           self.reset_quota_cache))
         return menu_items
 
     def _menu_stat_rows(self, pairs):

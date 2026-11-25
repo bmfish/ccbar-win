@@ -1014,7 +1014,10 @@ class StatsStore:
         """
         uid = client_account.uid if client_account else self._slot_uid(slot, sessionid)
         auth_key = "trae_auth_2" if slot == 2 else "trae_auth"
-        ent_at_key = "trae_ent_at_2" if slot == 2 else "trae_ent_at"
+        # 账单节流按 uid 记账：同一账号换槽位/换 cookie 时不会重复拉，也不会被
+        # 另一个槽位的时间戳误挡；uid 未知（首次/解不出）回落旧槽位键。
+        legacy_ent_at_key = "trae_ent_at_2" if slot == 2 else "trae_ent_at"
+        ent_at_key = ("trae_ent_at_%s" % uid) if uid else legacy_ent_at_key
         status_key = "trae_2" if slot == 2 else "trae"
 
         # 客户端 JWT 过期 → 先就地续签（不写回 storage.json，只用于本轮）
@@ -1095,6 +1098,14 @@ class StatsStore:
         except Exception as e:   # 注入的 transport 等异常也不许把界面打挂
             result = TraeResult("failed", message=str(e))
 
+        # ---- 账号昵称（锁外）：与账单同频（1 小时）刷新，用于多账号可读标识与
+        # 云端上报；失败留空，绝不影响用量/账单主流程 ----
+        screen_name = ""
+        if fetch_ent:
+            info_jwt = (client_account.jwt if client_account is not None else auth.jwt)
+            if info_jwt:
+                screen_name = trae_sync.fetch_screen_name(info_jwt)
+
         # ---- 入库 + 状态（锁内）。节流时间戳在所有出口都推进：
         # 失败/过期也占掉窗口，防弹窗反复开关把接口打爆（下次后台周期自然重试）
         with self._lock:
@@ -1114,14 +1125,25 @@ class StatsStore:
                 resolved_uid = trae_sync.jwt_uid(auth.jwt) or uid
             uid_key = "trae_uid_2" if slot == 2 else "trae_uid"
             cred_key = "trae_uid_cred_2" if slot == 2 else "trae_uid_cred"
+            # 槽位唯一性：同一 uid 只能登记在一个槽位。两个槽位撞同一账号时
+            # 后台/界面会出现两个同名账号，且账单归属失去意义——后来的槽位不登记。
+            other_uid = self._meta_get("trae_uid" if slot == 2 else "trae_uid_2")
+            slot_uid_conflict = bool(resolved_uid and other_uid
+                                     and resolved_uid == other_uid)
+            if slot_uid_conflict:
+                print("[ccBar] Trae 槽%d 与另一槽位是同一账号 %s，跳过槽位登记" %
+                      (slot, resolved_uid))
             # 客户端通道的 uid 直接来自 storage.json：登记槽位映射，多账号拆分才有归属
-            if client_account is not None and resolved_uid:
+            elif client_account is not None and resolved_uid:
                 if self._meta_get(uid_key) != resolved_uid:
                     self._meta_set(uid_key, resolved_uid)
                     self._meta_set(cred_key, "client:" + resolved_uid)
             elif resolved_uid and resolved_uid != uid:
                 self._meta_set(uid_key, resolved_uid)
                 self._meta_set(cred_key, trae_sync.credential_identity(sessionid))
+            # 昵称跟着 uid 记账（trae_name_<uid>），槽位变动不影响已拉到的昵称
+            if screen_name and resolved_uid and not slot_uid_conflict:
+                self._meta_set("trae_name_%s" % resolved_uid, screen_name)
             if result.status == "ok":
                 # commit=False：明细写并入下面窗口重算/meta 的同一事务收口，
                 # 每轮同步从 3 次 commit 降到 2 次（rebuild 就地提交是 VACUUM 契约，保留）
@@ -1147,9 +1169,20 @@ class StatsStore:
                     print("[ccBar] Trae 槽%d 本窗口仍不完整，水位保持 %s" %
                           (slot, water or "空"))
                 if result.consumed is not None and result.total is not None:
-                    ent_key = ("trae_ent_%s" % resolved_uid) if resolved_uid else "trae_ent"
-                    self._meta_set(ent_key, "%s|%s" % (result.consumed, result.total))
-                    self._meta_set(ent_at_key, int(now_epoch))
+                    # 写入前校验归属：槽位登记的账号必须就是本次拉账单的账号，
+                    # 不一致（串号/槽位冲突）宁可漏写一轮，也不能把余额记到别人头上。
+                    owner_uid = self._meta_get(uid_key)
+                    if resolved_uid and owner_uid and owner_uid != resolved_uid:
+                        print("[ccBar] Trae 槽%d 账单 uid %s 与槽位账号 %s 不一致，"
+                              "跳过账单写入" % (slot, resolved_uid, owner_uid))
+                    else:
+                        ent_key = (("trae_ent_%s" % resolved_uid) if resolved_uid
+                                   else "trae_ent")
+                        self._meta_set(ent_key, "%s|%s" %
+                                       (result.consumed, result.total))
+                        at_key = (("trae_ent_at_%s" % resolved_uid) if resolved_uid
+                                  else legacy_ent_at_key)
+                        self._meta_set(at_key, int(now_epoch))
                 self.source_status[status_key] = "已连接"
             elif result.status == "auth_expired":
                 self.source_status[status_key] = (
@@ -1332,19 +1365,42 @@ class StatsStore:
                     consumed, total = float(parts[0]), float(parts[1])
                 except ValueError:
                     continue
-                at_key = "trae_ent_at_2" if slot == 2 else "trae_ent_at"
+                at_key = "trae_ent_at_%s" % uid
                 try:
                     updated_at = int(float(self._meta_get(at_key) or 0))
                 except ValueError:
                     updated_at = 0
+                if not updated_at:
+                    # 兼容旧版本写的槽位级时间戳（新版本按 uid 记账）
+                    legacy_key = "trae_ent_at_2" if slot == 2 else "trae_ent_at"
+                    try:
+                        updated_at = int(float(self._meta_get(legacy_key) or 0))
+                    except ValueError:
+                        updated_at = 0
                 out.append({
                     "account": uid,
+                    "name": self._meta_get("trae_name_%s" % uid),
                     "slot": slot,
                     "consumed": consumed,
                     "total": total,
                     "updated_at": updated_at,
                 })
             return out
+
+    def reset_trae_quota_cache(self):
+        """清空账单缓存 / 账号昵称 / 拉取时间戳，下一轮同步强制重拉。
+
+        排障入口：余额串号或长期不更新时，清掉缓存即可从官方接口重新取一份，
+        不必手工改库。
+        """
+        with self._lock:
+            if self.conn is None:
+                return 0
+            cursor = self.conn.execute(
+                "DELETE FROM meta WHERE key LIKE 'trae_ent%' "
+                "OR key LIKE 'trae_name_%'")
+            self.conn.commit()
+            return cursor.rowcount or 0
 
     def query_today_credits_by_account(self):
         """今日各账号积分（按槽位排序，零填充）：来自 usage_log 的 account 归属列。

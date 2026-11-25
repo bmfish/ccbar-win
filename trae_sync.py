@@ -37,6 +37,8 @@ LOGIN_PATH = "/cloudide/api/v3/trae/Login"
 TOKEN_PATH = "/cloudide/api/v3/common/GetUserToken"
 USAGE_PATH = "/trae/api/v1/pay/query_user_usage_group_by_session"
 ENT_USAGE_PATH = "/trae/api/v2/pay/ide_user_ent_usage"
+# 账号信息（昵称 ScreenName / 脱敏手机号等）；鉴权头是 X-Cloudide-Token，不是 Authorization
+USER_INFO_PATH = "/cloudide/api/v3/trae/GetUserInfo"
 
 # 拉取窗口：首次 90 天全量回填，之后水位 - 2 天回看
 FIRST_FETCH_DAYS = 90
@@ -209,6 +211,37 @@ def jwt_uid(token):
     if uid is None or isinstance(uid, bool):
         return ""
     return str(uid).strip()
+
+
+def fetch_screen_name(jwt, post=None):
+    """用 Cloud-IDE-JWT 拉账号昵称（GetUserInfo 的 ScreenName），失败返回 ""。
+
+    多账号在云端/界面里需要人可读的标识，光有 uid 分不清是谁。
+    这个接口鉴权头是 X-Cloudide-Token（实测 Authorization: Cloud-IDE-JWT 返回
+    401 "not logged in"）；昵称拿不到不影响用量/账单同步，失败一律静默降级。
+    """
+    if not jwt:
+        return ""
+    send = post or (lambda url, headers, body: http_common.http_post(
+        url, headers=headers, body=body, timeout=10))
+    try:
+        status, _headers, text = send(API_BASE + USER_INFO_PATH, {
+            "Content-Type": "application/json",
+            "X-Cloudide-Token": jwt,
+        }, "{}")
+    except Exception:
+        return ""
+    if status != 200 or not text:
+        return ""
+    try:
+        obj = json.loads(text)
+    except (ValueError, TypeError):
+        return ""
+    result = obj.get("Result") if isinstance(obj, dict) else None
+    if not isinstance(result, dict):
+        return ""
+    name = result.get("ScreenName") or ""
+    return str(name).strip()
 
 
 def credential_identity(text):

@@ -150,6 +150,18 @@ python -m unittest discover -s tests -v
 主题包往返、Trae 客户端凭据解密与签到网关口径、流水按小时/按日折叠、
 双语词条，以及真建 tkinter 窗口的冒烟测试（无显示环境自动跳过）。
 
+### 多账号改动纪律
+
+Trae 双槽账号靠 uid 串联：`trae_uid` / `trae_uid_2` 登记槽位，账单、节流与同步水位
+一律按 uid 记账（`trae_ent_<uid>` / `trae_ent_at_<uid>` / `trae_synced_*_<uid>`）。
+涉及账号归属的改动（凭据解析、同步、账单写入、云端上报）必须：
+
+1. 同步更新 [test_multi_account.py](tests/test_multi_account.py)（uid 认领 / 槽位唯一 /
+   账单归属守卫）与 [test_usage_sync.py](tests/test_usage_sync.py)（quota 上报字段与串号自检）；
+2. 跑全量 `python -m unittest discover -s tests`；
+3. 在真机双账号环境确认两个槽位的已用/总额互不相同且与官方接口一致后再发版——
+   只跑单账号测试发现不了串号，历史上正是这样把两个账号的余额写反的。
+
 ## 版本
 
 - **v2.0.0** — 对齐 macOS v2.0 大改版：移除分享页 / 周报 / 速率预测；新增「签到」页

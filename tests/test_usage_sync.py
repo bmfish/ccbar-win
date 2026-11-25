@@ -126,6 +126,7 @@ class TestUsageSync(unittest.TestCase):
     def test_uploads_trae_quota_snapshots(self):
         self.store._meta_set("trae_uid", "u1")
         self.store._meta_set("trae_ent_u1", "100|500")
+        self.store._meta_set("trae_name_u1", "小明")
         self.store._meta_set("trae_ent_at", "1700000000")
         self.store._meta_set("trae_uid_2", "u2")
         self.store._meta_set("trae_ent_u2", "50|300")
@@ -137,9 +138,35 @@ class TestUsageSync(unittest.TestCase):
         quotas = {q["account"]: q for q in self.server.quotas}
         self.assertEqual(quotas["u1"]["consumed"], 100.0)
         self.assertEqual(quotas["u1"]["total"], 500.0)
+        self.assertEqual(quotas["u1"]["name"], "小明")
         self.assertEqual(quotas["u1"]["updatedAt"], 1700000000)
         self.assertEqual(quotas["u2"]["slot"], 2)
+        self.assertEqual(quotas["u2"]["name"], "")
         self.assertEqual(quotas["u2"]["updatedAt"], 1700000100)
+
+    def test_skips_quota_upload_when_accounts_look_swapped(self):
+        # 两个不同账号的已用/总额完全一致 = 历史串号的典型表征，本轮不上报
+        self.store._meta_set("trae_uid", "u1")
+        self.store._meta_set("trae_ent_u1", "100|500")
+        self.store._meta_set("trae_uid_2", "u2")
+        self.store._meta_set("trae_ent_u2", "100|500")
+        self._insert("row", int(time.time()) - 60, account="u1")
+
+        result = self.sync.run(force=True)
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(self.server.quotas, [])
+        self.assertIn("疑似归属错乱", result.message())
+
+    def test_uploads_identical_zero_quota_for_new_accounts(self):
+        # 新账号天然都是 0 已用：不能误判成串号
+        self.store._meta_set("trae_uid", "u1")
+        self.store._meta_set("trae_ent_u1", "0|500")
+        self.store._meta_set("trae_uid_2", "u2")
+        self.store._meta_set("trae_ent_u2", "0|500")
+
+        result = self.sync.run(force=True)
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(len(self.server.quotas), 2)
 
     def test_download_cloud_rows_and_respect_local_priority(self):
         now = int(time.time())

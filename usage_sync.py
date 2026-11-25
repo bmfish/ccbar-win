@@ -34,11 +34,12 @@ def normalize_base_url(url):
 class SyncOutcome:
     """一次同步的结果（供设置页展示）。"""
 
-    def __init__(self, uploaded=0, pulled=0, error="", skipped=False):
+    def __init__(self, uploaded=0, pulled=0, error="", skipped=False, note=""):
         self.uploaded = int(uploaded)
         self.pulled = int(pulled)
         self.error = error or ""
         self.skipped = skipped
+        self.note = note or ""
 
     @property
     def ok(self):
@@ -49,7 +50,10 @@ class SyncOutcome:
             return self.error
         if self.skipped:
             return L("同步跳过")
-        return L("已同步：上传 %d 条 · 拉取 %d 条") % (self.uploaded, self.pulled)
+        text = L("已同步：上传 %d 条 · 拉取 %d 条") % (self.uploaded, self.pulled)
+        if self.note:
+            text += "；" + self.note
+        return text
 
 
 class _Abort(Exception):
@@ -146,13 +150,14 @@ class UsageSync:
 
             device_id = self.store.usage_device_id()
             uploaded = self._upload(base, token, device_id)
+            quota_note = ""
             try:
-                self._upload_quota(base, token, device_id)
+                quota_note = self._upload_quota(base, token, device_id)
             except Exception as e:
                 # 积分账单失败不影响用量明细同步
                 print("[ccBar] 积分账单上传失败: %s" % e)
             pulled = self._download(base, token)
-            outcome = SyncOutcome(uploaded=uploaded, pulled=pulled)
+            outcome = SyncOutcome(uploaded=uploaded, pulled=pulled, note=quota_note)
             self.store.set_usage_sync_status(outcome.message(), "")
             return outcome
         except _Abort as e:
@@ -218,23 +223,47 @@ class UsageSync:
         return uploaded
 
     def _upload_quota(self, base, token, device_id):
-        """把本机 Trae 官方账单（已用 / 总额）上报到云端。"""
+        """把本机 Trae 官方账单（已用 / 总额 / 昵称）上报到云端。
+
+        返回附注文本（跳过上传时说明原因），正常为空串。
+        """
         snapshots = self.store.trae_quota_snapshots()
         if not snapshots:
-            return 0
+            return ""
+        if self._quota_looks_swapped(snapshots):
+            message = "跳过积分账单上传：多个账号账单完全相同，疑似归属错乱"
+            print("[ccBar] " + message)
+            return message
         now = int(datetime.now().timestamp())
         quotas = [{
             "account": snapshot["account"],
+            "name": snapshot.get("name") or "",
             "slot": snapshot["slot"],
             "consumed": snapshot["consumed"],
             "total": snapshot["total"],
             "updatedAt": snapshot["updated_at"] or now,
         } for snapshot in snapshots]
-        result = self._call(base + "/usage/quota", token, {
+        self._call(base + "/usage/quota", token, {
             "deviceId": device_id,
             "quotas": quotas,
         })
-        return int(result.get("saved") or 0)
+        return ""
+
+    @staticmethod
+    def _quota_looks_swapped(snapshots):
+        """多个不同账号的已用/总额完全一致 → 疑似账单串号，本轮不上报。
+
+        正常情况下两个账号的消耗不可能一模一样；一旦相同，多半是写入时
+        归属错乱（历史 bug 的典型表现）。已用为 0 的新账号会天然相同，放行。
+        """
+        pairs = {}
+        for snapshot in snapshots:
+            consumed = float(snapshot.get("consumed") or 0)
+            if consumed <= 0:
+                continue
+            key = (round(consumed, 2), round(float(snapshot.get("total") or 0), 2))
+            pairs.setdefault(key, set()).add(snapshot.get("account") or "")
+        return any(len(accounts) > 1 for accounts in pairs.values())
 
     @staticmethod
     def _event_payload(row):
