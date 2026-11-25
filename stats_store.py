@@ -1105,8 +1105,13 @@ class StatsStore:
             # 客户端通道的 JWT 以 storage.json 为准，不写 meta（以免缓存陈旧 JWT）
             if client_account is None:
                 self._meta_set(auth_key, auth.to_json())
-            # uid 认领：换签成功即解出账号 uid 并与凭据指纹绑定（uid 未变则无需重写）。
-            resolved_uid = trae_sync.jwt_uid(auth.jwt) or uid
+            # uid 认领：客户端通道直接用 storage.json 的 uid——trae_auth 里可能是历史
+            # sessionid 换签的旧 JWT，解出的 uid 属于另一个账号，账单会写到别人头上
+            # （表现为两个账号余额完全相同、槽位标签重复）；sessionid 通道才解 JWT。
+            if client_account is not None:
+                resolved_uid = client_account.uid or uid
+            else:
+                resolved_uid = trae_sync.jwt_uid(auth.jwt) or uid
             uid_key = "trae_uid_2" if slot == 2 else "trae_uid"
             cred_key = "trae_uid_cred_2" if slot == 2 else "trae_uid_cred"
             # 客户端通道的 uid 直接来自 storage.json：登记槽位映射，多账号拆分才有归属

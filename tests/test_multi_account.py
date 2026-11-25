@@ -8,10 +8,13 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import stats_store as stats_mod  # noqa: E402
 import trae_sync as ts  # noqa: E402
 import trae_client_credentials  # noqa: E402
 from stats_store import StatsStore  # noqa: E402
@@ -137,6 +140,48 @@ class MultiAccountStoreTests(unittest.TestCase):
         self.store.rebuild(configs=[],
                            trae_enabled=True, trae_sessionid="old")
         self.assertEqual(self.store._meta_get("trae_auth"), "keep-me")
+
+
+class ClientUidAttributionTests(unittest.TestCase):
+    """客户端凭据通道的 uid 归属：账单必须写在 client uid 下，不能被旧 sessionid JWT 串号"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="ccbar-attr-")
+        self._orig_store_path = StatsStore.store_path
+        StatsStore.store_path = staticmethod(
+            lambda: os.path.join(self.tmp, "ccbar.db"))
+        self.store = StatsStore()
+        self.store.rebuild(configs=[],
+                           trae_enabled=True, trae_sessionid="sessionid=old")
+
+    def tearDown(self):
+        self.store._close()
+        StatsStore.store_path = self._orig_store_path
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_ent_written_under_client_uid(self):
+        now = int(time.time())
+        client_uid = "942709926015804"
+        stale_uid = "3172552512377002"
+        acc = trae_client_credentials.ClientTraeAccount(
+            client_uid, make_jwt(client_uid), now + 86400,
+            device_id="1", source_app="Trae CN")
+        # 槽 1 里缓存的旧 sessionid JWT 属于另一个账号：不能拿它当 uid
+        self.store._meta_set(
+            "trae_auth",
+            ts.TraeAuth(jwt=make_jwt(stale_uid), jwt_exp=now + 86400).to_json())
+        self.store.conn.commit()
+        result = ts.TraeResult("ok", rows=[], consumed=100.0, total=900.0)
+        with mock.patch.object(stats_mod.trae_client_credentials, "discover",
+                               return_value=[acc]), \
+                mock.patch.object(stats_mod, "_fetch_trae_window",
+                                  return_value=result):
+            self.store.sync_trae_if_needed(interactive=True)
+        self.assertEqual(self.store._meta_get("trae_uid"), client_uid)
+        self.assertEqual(self.store._meta_get("trae_ent_%s" % client_uid),
+                         "100.0|900.0")
+        self.assertEqual(self.store._meta_get("trae_ent_%s" % stale_uid), "",
+                         "账单不得写到旧 sessionid 账号名下")
 
 
 if __name__ == "__main__":
