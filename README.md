@@ -108,7 +108,7 @@ ccbar 自带统计库（`~/.ccbar/ccbar.db`），对外部源库**全程只读**
 - **历史**（昨天及更早）：每日首次刷新自动补账进自家库，源库清理不影响已有统计
 - **今日**：每次刷新实时查各源库汇总，零延迟；`daily_agg` 永不包含今天
 - **Trae**：本地库是 SQLCipher 加密的，改走官方 HTTP 用量接口（登录态可粘 sessionid、整段 Cookie
-  或 X-Cloudide-Session，自动换签续期），会话快照 UPSERT 幂等，0–9 点静默
+  或 X-Cloudide-Session，自动换签续期），会话快照 UPSERT 幂等，仅 9–21 点自动同步
 
 | 数据源 | 口径 | 默认 |
 |---|---|---|

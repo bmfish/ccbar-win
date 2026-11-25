@@ -17,7 +17,7 @@ DEFAULT_BG_INTERVAL = 600      # 后台默认 10 分钟
 INTERACTIVE_MIN_INTERVAL = 60  # 用户点开界面时 1 分钟
 BG_INTERVAL_MIN = 60           # 后台间隔可配下限（秒）
 BG_INTERVAL_MAX = 7200         # 后台间隔可配上限（秒）
-NIGHT_SILENT_UNTIL_HOUR = 9    # 0–9 点后台静默
+NIGHT_SILENT_UNTIL_HOUR = 9    # 自动同步窗口起点（兼容旧名；窗口为 9–21 点）
 
 DEFAULT_TIMEOUT = 20           # 单次请求超时（秒）
 RETRY_ATTEMPTS = 2             # 网络错误 / 429 / 5xx 的重试次数
@@ -152,9 +152,15 @@ def clamp_bg_interval(value, default=None):
     return max(BG_INTERVAL_MIN, min(BG_INTERVAL_MAX, seconds))
 
 
+# 自动同步窗口：9–21 点。窗口外后台不自动拉接口（用户主动操作仍放行）
+SYNC_ACTIVE_START_HOUR = 9
+SYNC_ACTIVE_END_HOUR = 21
+
 def is_night_silent(now=None):
-    """0–9 点本地时间静默：凌晨不拉 API，由 9 点后第一次同步的回看窗口覆盖"""
-    return _now_dt(now).hour < NIGHT_SILENT_UNTIL_HOUR
+    """自动同步窗口（9–21 点）之外返回 True：后台不拉 API，由窗口内第一次同步的
+    "水位-2 天"回看覆盖；窗口外用户主动点开弹窗不受限（调用方传 interactive）。"""
+    hour = _now_dt(now).hour
+    return not (SYNC_ACTIVE_START_HOUR <= hour < SYNC_ACTIVE_END_HOUR)
 
 
 # ============================================================

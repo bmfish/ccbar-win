@@ -959,8 +959,8 @@ class StatsStore:
         凭据通道优先级与 macOS 版一致：客户端 storage.json 里的 JWT 优先（零配置，
         可多账号），没有客户端凭据时才回落设置里的 sessionid / X-Cloudide-Session。
         interactive=True 是用户点开弹窗的主动刷新，间隔更短（60s vs trae_bg_interval）。
-        夜间静默（0–9 点本地时间）直接返回且**不占**节流窗口：凌晨会话由首次同步的
-        "水位 - 2 天"窗口覆盖，不丢数。
+        自动同步窗口（9–21 点本地时间）之外直接返回且**不占**节流窗口：窗口外
+        的会话由窗口内首次同步的"水位 - 2 天"窗口覆盖，不丢数；用户主动刷新不受限。
         """
         now_epoch = self._now_epoch(now)
         now_dt = datetime.fromtimestamp(now_epoch)
@@ -1045,9 +1045,9 @@ class StatsStore:
         with self._lock:
             if self.conn is None:
                 return None
-            # 夜间静默只限后台定时器（0–9 点）；用户主动点开弹窗仍放行
+            # 自动同步窗口只限后台定时器（9–21 点）；用户主动点开弹窗仍放行
             if not interactive and trae_sync.is_night_silent(now_dt):
-                return None   # 0–9 点后台静默，不消耗节流
+                return None   # 窗口外后台不自动拉取，不消耗节流
             interval = (trae_sync.INTERACTIVE_MIN_INTERVAL if interactive
                         else trae_sync.clamp_bg_interval(self.trae_bg_interval))
             last_sync = self._last_trae_sync_at.get(slot, 0.0)
@@ -1674,7 +1674,8 @@ class StatsStore:
         """按需同步 WorkBuddy 用量。返回 WorkBuddyResult 或 None（被守卫拦下）。
 
         interactive=True 是用户打开洞察中心 WorkBuddy 页的主动刷新（60s 档）。
-        夜间静默只拦后台定时器，且不占节流窗口（由 9 点后的回看窗口覆盖）。
+        自动同步窗口（9–21 点）外只拦后台定时器，且不占节流窗口
+        （由窗口内首次同步的回看窗口覆盖）。
         """
         now_epoch = self._now_epoch(now)
         now_dt = datetime.fromtimestamp(now_epoch)

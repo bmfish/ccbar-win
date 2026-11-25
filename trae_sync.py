@@ -55,7 +55,9 @@ INTERACTIVE_MIN_INTERVAL = 60  # 点开弹窗 1 分钟
 ENT_MIN_INTERVAL = 3600        # 积分账单 1 小时
 BG_INTERVAL_MIN = 60           # 后台间隔可配下限（秒）
 BG_INTERVAL_MAX = 7200         # 后台间隔可配上限（秒）
-NIGHT_SILENT_UNTIL_HOUR = 9    # 0–9 点静默
+SYNC_ACTIVE_START_HOUR = 9     # 自动同步窗口 9–21 点
+SYNC_ACTIVE_END_HOUR = 21
+NIGHT_SILENT_UNTIL_HOUR = SYNC_ACTIVE_START_HOUR   # 兼容旧名
 
 
 # ---- 基础工具 ----
@@ -255,8 +257,10 @@ def credential_identity(text):
 
 
 def is_night_silent(now=None):
-    """0–9 点本地时间静默：凌晨不拉 API，由 9 点后第一次同步的"水位-2 天"窗口覆盖"""
-    return _now_dt(now).hour < NIGHT_SILENT_UNTIL_HOUR
+    """自动同步窗口（9–21 点）之外返回 True：不拉 API，由窗口内第一次同步的
+    "水位-2 天"回看覆盖；窗口外用户主动点开弹窗不受限（调用方传 interactive）。"""
+    hour = _now_dt(now).hour
+    return not (SYNC_ACTIVE_START_HOUR <= hour < SYNC_ACTIVE_END_HOUR)
 
 
 def _now_dt(now=None):

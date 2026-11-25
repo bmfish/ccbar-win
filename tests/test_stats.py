@@ -1101,14 +1101,18 @@ class TestStatsStore(unittest.TestCase):
         self.assertEqual(self.store.query_today_credits(), 1.0)
 
     def test_trae_night_silent_no_http(self):
-        """0–9 点静默：不发 HTTP，也不消耗节流窗口"""
+        """9–21 点之外静默：不发 HTTP，也不消耗节流窗口"""
         self._trae_store()
         fake = _FakeTraeRunner()
         night = self._at(hour=3)
         with mock.patch.object(trae_sync, "run", fake):
             self.assertIsNone(self.store.sync_trae_if_needed(now=night))
-        self.assertEqual(fake.calls, [], "夜间不得发请求")
+        self.assertEqual(fake.calls, [], "窗口外不得发请求")
         self.assertEqual(self.store._last_trae_sync_at, {}, "静默不占节流窗口")
+
+        with mock.patch.object(trae_sync, "run", fake):
+            self.assertIsNone(self.store.sync_trae_if_needed(now=self._at(hour=22)))
+        self.assertEqual(fake.calls, [], "21 点后不再自动同步")
 
         with mock.patch.object(trae_sync, "run", fake):
             self.assertIsNotNone(self.store.sync_trae_if_needed(now=self._at(hour=9)))
@@ -1715,8 +1719,12 @@ class TestWorkBuddyStore(unittest.TestCase):
         night = self._at(hour=3)
         with mock.patch.object(workbuddy_sync, "run", fake):
             self.assertIsNone(self.store.sync_workbuddy_if_needed(now=night))
-        self.assertEqual(fake.calls, [], "0-9 点后台不发请求")
+        self.assertEqual(fake.calls, [], "9–21 点之外后台不发请求")
         self.assertEqual(self.store._last_workbuddy_sync_at, 0.0, "静默不占节流窗口")
+
+        with mock.patch.object(workbuddy_sync, "run", fake):
+            self.assertIsNone(self.store.sync_workbuddy_if_needed(now=self._at(hour=22)))
+        self.assertEqual(fake.calls, [], "21 点后不再自动同步")
 
         with mock.patch.object(workbuddy_sync, "run", fake):
             self.assertIsNotNone(

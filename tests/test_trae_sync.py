@@ -555,27 +555,28 @@ class TestRun(unittest.TestCase):
         self.assertEqual(ts.http_post.__defaults__[-1], 15)
 
 
-# ---- 夜间静默 ----
-
+# ---- 自动同步窗口 ----
 
 class TestNightSilent(unittest.TestCase):
-    def test_hours_0_to_8_are_silent_and_9_to_23_are_not(self):
+    def test_only_9_to_21_is_active(self):
         for hour in range(24):
             dt = datetime(2026, 1, 15, hour, 0)
-            self.assertEqual(ts.is_night_silent(dt), hour < 9,
-                             "hour=%d 的静默判定不符（0–8 静默）" % hour)
+            self.assertEqual(ts.is_night_silent(dt), not (9 <= hour < 21),
+                             "hour=%d 的静默判定不符（9–21 点自动同步）" % hour)
 
     def test_accepts_epoch_and_none(self):
         dt = datetime(2026, 1, 15, 3, 0)
         self.assertTrue(ts.is_night_silent(dt.timestamp()))
         self.assertFalse(ts.is_night_silent(datetime(2026, 1, 15, 12, 0).timestamp()))
+        self.assertTrue(ts.is_night_silent(datetime(2026, 1, 15, 22, 0).timestamp()))
         self.assertIn(ts.is_night_silent(), (True, False))
 
     def test_constants_match_macos(self):
         self.assertEqual((ts.FIRST_FETCH_DAYS, ts.PAGE_LOOKBACK_DAYS), (90, 2))
         self.assertEqual((ts.PAGE_SIZE, ts.MAX_PAGES), (20, 50))
         self.assertEqual((ts.BG_MIN_INTERVAL, ts.INTERACTIVE_MIN_INTERVAL), (600, 60))
-        self.assertEqual((ts.ENT_MIN_INTERVAL, ts.NIGHT_SILENT_UNTIL_HOUR), (3600, 9))
+        self.assertEqual((ts.ENT_MIN_INTERVAL, ts.SYNC_ACTIVE_START_HOUR,
+                          ts.SYNC_ACTIVE_END_HOUR), (3600, 9, 21))
         self.assertEqual(ts.API_BASE, "https://api.trae.cn")
 
 

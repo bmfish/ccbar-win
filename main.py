@@ -2324,9 +2324,9 @@ class CcBarTray(DetailWindowsMixin, InsightsWindowsMixin):
                 time.sleep(self.settings["refresh_interval"])
                 # 懒惰补账：历史（昨天及更早）落后就同步进自建库
                 self.store.sync_if_needed()
-                # Trae 用量（HTTP 源）：后台按设置间隔节流（默认 10 分钟），0-9 点静默
+                # Trae 用量（HTTP 源）：后台按设置间隔节流（默认 10 分钟），仅 9-21 点自动同步
                 self.sync_trae(interactive=False)
-                # WorkBuddy（独立表）：同样按自己的间隔节流，0-9 点静默
+                # WorkBuddy（独立表）：同样按自己的间隔节流，仅 9-21 点自动同步
                 self.sync_workbuddy(interactive=False)
                 # 多设备用量云同步跟随 Trae 拉取触发，不再独立轮询
                 # 按用量更新图标颜色
